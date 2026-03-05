@@ -18,9 +18,11 @@ describe("wrapTool", () => {
           return {
             guardrails_result: {
               input_type: "activity_input",
-              redacted_input: {
-                prompt: "[redacted]"
-              },
+              redacted_input: [
+                {
+                  prompt: "[redacted]"
+                }
+              ],
               validation_passed: true
             },
             verdict: "allow"
@@ -108,18 +110,22 @@ describe("wrapTool", () => {
       .map(request => request.body);
 
     expect(startedEvent).toMatchObject({
-      activity_input: {
-        prompt: "secret prompt"
-      },
+      activity_input: [
+        {
+          prompt: "secret prompt"
+        }
+      ],
       activity_type: "process-prompt",
       event_type: "ActivityStarted",
       run_id: "run-123",
       workflow_id: "wf-123"
     });
     expect(completedEvent).toMatchObject({
-      activity_input: {
-        prompt: "[redacted]"
-      },
+      activity_input: [
+        {
+          prompt: "[redacted]"
+        }
+      ],
       activity_output: {
         result: "processed:[redacted]"
       },

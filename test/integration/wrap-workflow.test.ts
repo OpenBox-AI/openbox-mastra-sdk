@@ -96,9 +96,11 @@ describe("wrapWorkflow", () => {
       .map(request => request.body);
 
     expect(stepStarted).toMatchObject({
-      activity_input: {
-        value: "hello"
-      },
+      activity_input: [
+        {
+          value: "hello"
+        }
+      ],
       activity_type: "uppercase-step"
     });
     expect(stepCompleted).toMatchObject({

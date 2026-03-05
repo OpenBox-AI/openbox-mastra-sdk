@@ -1,8 +1,10 @@
 {
-  "activity_input": {
-    "amount": 4200,
-    "destination": "Vendor Escrow"
-  },
+  "activity_input": [
+    {
+      "amount": 4200,
+      "destination": "Vendor Escrow"
+    }
+  ],
   "activity_output": {
     "confirmationId": "tx-demo-001",
     "destination": "Vendor Escrow",

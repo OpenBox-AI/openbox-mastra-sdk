@@ -60,7 +60,7 @@ export async function executeGovernedActivity<TInput, TOutput>({
   type
 }: GovernedActivityOptions<TInput, TOutput>): Promise<TOutput | undefined> {
   const descriptor = resolveActivityDescriptor(type, runtimeContext);
-  const inputForEvent = serializeValue(input);
+  const inputForEvent = serializeActivityInputForEvent(input);
   let inputForExecution = cloneValue(input);
 
   ensureSpanBuffer(descriptor, dependencies.spanProcessor);
@@ -85,9 +85,13 @@ export async function executeGovernedActivity<TInput, TOutput>({
     startVerdict?.guardrailsResult?.inputType === "activity_input" &&
     startVerdict.guardrailsResult.redactedInput !== undefined
   ) {
-    inputForExecution = applyRedaction(
+    const normalizedRedactedInput = normalizeRedactedActivityInput(
       inputForExecution,
       startVerdict.guardrailsResult.redactedInput
+    );
+    inputForExecution = applyRedaction(
+      inputForExecution,
+      normalizedRedactedInput
     ) as TInput;
   }
 
@@ -172,7 +176,7 @@ export async function executeGovernedActivity<TInput, TOutput>({
           descriptor.activityId
         );
         const completedVerdict = await evaluateActivityEvent(dependencies, {
-          activity_input: serializeValue(inputForExecution),
+          activity_input: serializeActivityInputForEvent(inputForExecution),
           activity_output: serializeValue(output),
           activity_type: descriptor.activityType,
           attempt: descriptor.attempt,
@@ -287,6 +291,35 @@ export function serializeValue(value: unknown): unknown {
   }
 
   return String(value);
+}
+
+function serializeActivityInputForEvent(value: unknown): unknown[] {
+  const serialized = serializeValue(value);
+
+  if (serialized == null) {
+    return [];
+  }
+
+  return Array.isArray(serialized) ? serialized : [serialized];
+}
+
+function normalizeRedactedActivityInput(
+  originalInput: unknown,
+  redactedInput: unknown
+): unknown {
+  // Governance services may return activity_input redaction in list form.
+  // For single-argument tools/steps, unwrap list->value so execution shape is preserved.
+  if (!Array.isArray(originalInput) && Array.isArray(redactedInput)) {
+    if (redactedInput.length === 0) {
+      return redactedInput;
+    }
+
+    if (redactedInput.length === 1) {
+      return redactedInput[0];
+    }
+  }
+
+  return redactedInput;
 }
 
 export function applyRedaction(original: unknown, redacted: unknown): unknown {
