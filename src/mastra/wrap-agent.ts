@@ -280,16 +280,21 @@ async function executeAgentLifecycle<T>({
         const isStreamResult =
           result != null &&
           typeof result === "object" &&
-          "getFullOutput" in (result as Record<string, unknown>);
-        const finishReason =
-          result != null && typeof result === "object"
-            ? (result as { finishReason?: unknown }).finishReason
-            : undefined;
+          ("getFullOutput" in (result as Record<string, unknown>) ||
+            "fullStream" in (result as Record<string, unknown>));
 
         if (
-          !isStreamResult &&
-          finishReason !== "suspended"
+          !isStreamResult
         ) {
+          const finishReason =
+            result != null && typeof result === "object"
+              ? (result as { finishReason?: unknown }).finishReason
+              : undefined;
+
+          if (finishReason === "suspended") {
+            return result;
+          }
+
           await finalizeAgentSuccess(
             options,
             runId,
@@ -546,7 +551,7 @@ function attachStreamLifecycleHandlers(
 ): void {
   const streamLike = stream as Record<PropertyKey, unknown> & {
     consumeStream?: (...args: unknown[]) => Promise<unknown>;
-    finishReason?: Promise<unknown> | unknown;
+    fullStream?: unknown;
     getFullOutput?: (...args: unknown[]) => Promise<unknown>;
     _getImmediateFinishReason?: (() => unknown) | undefined;
     _getImmediateText?: (() => unknown) | undefined;
@@ -565,7 +570,7 @@ function attachStreamLifecycleHandlers(
       ? streamLike.consumeStream.bind(streamLike)
       : undefined;
 
-  if (!originalGetFullOutput && !originalConsumeStream && !isThenable(streamLike.finishReason)) {
+  if (!originalGetFullOutput && !originalConsumeStream && !isReadableStream(streamLike.fullStream)) {
     return;
   }
 
@@ -623,19 +628,27 @@ function attachStreamLifecycleHandlers(
     };
   }
 
-  if (isThenable(streamLike.finishReason)) {
-    void streamLike.finishReason
-      .then(async () => {
-        if (settled) {
-          return;
-        }
+  if (isReadableStream(streamLike.fullStream)) {
+    const observedStream = streamLike.fullStream.pipeThrough(
+      new TransformStream({
+        flush() {
+          if (settled) {
+            return;
+          }
 
-        const snapshot = buildStreamSnapshot(streamLike);
-        await settleSuccess(snapshot).catch(() => {});
+          const snapshot = buildStreamSnapshot(streamLike);
+
+          return settleSuccess(snapshot).catch(() => {});
+        }
       })
-      .catch(async error => {
-        await settleFailure(error).catch(() => {});
-      });
+    );
+
+    Object.defineProperty(streamLike, "fullStream", {
+      configurable: true,
+      enumerable: false,
+      value: observedStream,
+      writable: true
+    });
   }
 }
 
@@ -661,11 +674,11 @@ function buildStreamSnapshot(
   };
 }
 
-function isThenable(value: unknown): value is Promise<unknown> {
+function isReadableStream(value: unknown): value is ReadableStream<unknown> {
   return (
     typeof value === "object" &&
     value !== null &&
-    "then" in value &&
-    typeof (value as { then?: unknown }).then === "function"
+    "pipeThrough" in value &&
+    typeof (value as { pipeThrough?: unknown }).pipeThrough === "function"
   );
 }

@@ -566,6 +566,96 @@ describe("wrapAgent", () => {
     });
   });
 
+  it("finalizes on fullStream completion without touching finishReason", async () => {
+    const server = await startOpenBoxServer({
+      evaluate() {
+        return { verdict: "allow" };
+      }
+    });
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_agent",
+      apiUrl: server.url,
+      validate: false
+    });
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+
+    const streamObject = {
+      get finishReason() {
+        throw new Error("finishReason should not be read");
+      },
+      status: "streaming",
+      _getImmediateFinishReason: () => "stop",
+      _getImmediateText: () => "from fullStream",
+      _getImmediateToolCalls: () => [],
+      _getImmediateToolResults: () => [],
+      _getImmediateUsage: () => ({ totalTokens: 2 }),
+      _getImmediateWarnings: () => [],
+      fullStream: new ReadableStream({
+        start(controller) {
+          controller.enqueue({
+            type: "text-delta",
+            payload: { text: "hello" }
+          });
+          controller.close();
+        }
+      })
+    };
+
+    const agent = wrapAgent(
+      {
+        id: "fullstream-finalize-agent",
+        name: "FullStream Finalize Agent",
+        async stream() {
+          return streamObject;
+        }
+      },
+      {
+        client,
+        config,
+        spanProcessor: new OpenBoxSpanProcessor()
+      }
+    );
+
+    const typedAgent = agent as {
+      stream: (
+        message: string,
+        options?: Record<string, unknown>
+      ) => Promise<{
+        fullStream: ReadableStream<unknown>;
+      }>;
+    };
+
+    const stream = await typedAgent.stream("hello", {
+      runId: "agent-fullstream-finalize-run"
+    });
+
+    const reader = stream.fullStream.getReader();
+    while (true) {
+      const next = await reader.read();
+      if (next.done) {
+        break;
+      }
+    }
+    reader.releaseLock();
+
+    const completedEvent = server.requests
+      .filter(request => request.pathname === "/api/v1/governance/evaluate")
+      .map(request => request.body)
+      .find(body => body.event_type === "WorkflowCompleted");
+
+    await server.close();
+
+    expect(completedEvent).toBeDefined();
+    expect(completedEvent?.workflow_output).toMatchObject({
+      text: "from fullStream"
+    });
+  });
+
   it("does not break stream text delivery while emitting completion events", async () => {
     const server = await startOpenBoxServer({
       evaluate() {
