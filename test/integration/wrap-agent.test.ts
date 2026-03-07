@@ -395,4 +395,71 @@ describe("wrapAgent", () => {
         .map(request => request.body.event_type)
     ).toContain("WorkflowCompleted");
   });
+
+  it("does not break stream text delivery while emitting completion events", async () => {
+    const server = await startOpenBoxServer({
+      evaluate() {
+        return { verdict: "allow" };
+      }
+    });
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_agent",
+      apiUrl: server.url,
+      validate: false
+    });
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+    const agent = wrapAgent(
+      new Agent({
+        id: "stream-text-agent",
+        instructions: "Be concise.",
+        model: createMockModel({
+          mockText: "stream text intact",
+          version: "v2"
+        }) as never,
+        name: "Stream Text Agent"
+      }),
+      {
+        client,
+        config,
+        spanProcessor: new OpenBoxSpanProcessor()
+      }
+    );
+
+    const stream = await agent.stream("hello", {
+      runId: "agent-stream-text-run"
+    });
+    let received = "";
+
+    for await (const part of stream.textStream) {
+      received += part;
+    }
+
+    await stream.consumeStream();
+
+    const deadline = Date.now() + 1_000;
+
+    while (
+      Date.now() < deadline &&
+      !server.requests
+        .filter(request => request.pathname === "/api/v1/governance/evaluate")
+        .map(request => request.body.event_type)
+        .includes("WorkflowCompleted")
+    ) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+
+    await server.close();
+
+    expect(received).toContain("stream text intact");
+    expect(
+      server.requests
+        .filter(request => request.pathname === "/api/v1/governance/evaluate")
+        .map(request => request.body.event_type)
+    ).toContain("WorkflowCompleted");
+  });
 });

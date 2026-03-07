@@ -547,6 +547,13 @@ function attachStreamLifecycleHandlers(
   const streamLike = stream as Record<PropertyKey, unknown> & {
     finishReason?: Promise<unknown> | unknown;
     getFullOutput?: (...args: unknown[]) => Promise<unknown>;
+    _getImmediateFinishReason?: (() => unknown) | undefined;
+    _getImmediateText?: (() => unknown) | undefined;
+    _getImmediateToolCalls?: (() => unknown) | undefined;
+    _getImmediateToolResults?: (() => unknown) | undefined;
+    _getImmediateUsage?: (() => unknown) | undefined;
+    _getImmediateWarnings?: (() => unknown) | undefined;
+    status?: unknown;
   };
   const originalGetFullOutput =
     typeof streamLike.getFullOutput === "function"
@@ -599,10 +606,32 @@ function attachStreamLifecycleHandlers(
         return;
       }
 
-      const fullOutput = await originalGetFullOutput();
-      await settleSuccess(fullOutput);
+      const snapshot = buildStreamSnapshot(streamLike);
+      await settleSuccess(snapshot);
     })
     .catch(async error => {
       await settleFailure(error);
     });
+}
+
+function buildStreamSnapshot(
+  stream: {
+    _getImmediateFinishReason?: (() => unknown) | undefined;
+    _getImmediateText?: (() => unknown) | undefined;
+    _getImmediateToolCalls?: (() => unknown) | undefined;
+    _getImmediateToolResults?: (() => unknown) | undefined;
+    _getImmediateUsage?: (() => unknown) | undefined;
+    _getImmediateWarnings?: (() => unknown) | undefined;
+    status?: unknown;
+  }
+): Record<string, unknown> {
+  return {
+    finishReason: stream._getImmediateFinishReason?.(),
+    status: stream.status,
+    text: stream._getImmediateText?.(),
+    toolCalls: stream._getImmediateToolCalls?.(),
+    toolResults: stream._getImmediateToolResults?.(),
+    usage: stream._getImmediateUsage?.(),
+    warnings: stream._getImmediateWarnings?.()
+  };
 }
