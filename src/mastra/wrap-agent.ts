@@ -545,6 +545,7 @@ function attachStreamLifecycleHandlers(
   }
 ): void {
   const streamLike = stream as Record<PropertyKey, unknown> & {
+    consumeStream?: (...args: unknown[]) => Promise<unknown>;
     finishReason?: Promise<unknown> | unknown;
     getFullOutput?: (...args: unknown[]) => Promise<unknown>;
     _getImmediateFinishReason?: (() => unknown) | undefined;
@@ -559,8 +560,12 @@ function attachStreamLifecycleHandlers(
     typeof streamLike.getFullOutput === "function"
       ? streamLike.getFullOutput.bind(streamLike)
       : undefined;
+  const originalConsumeStream =
+    typeof streamLike.consumeStream === "function"
+      ? streamLike.consumeStream.bind(streamLike)
+      : undefined;
 
-  if (!originalGetFullOutput) {
+  if (!originalGetFullOutput && !originalConsumeStream && !isThenable(streamLike.finishReason)) {
     return;
   }
 
@@ -600,18 +605,38 @@ function attachStreamLifecycleHandlers(
     };
   }
 
-  void Promise.resolve(streamLike.finishReason)
-    .then(async () => {
-      if (settled) {
-        return;
-      }
+  if (originalConsumeStream) {
+    streamLike.consumeStream = async (...args: unknown[]) => {
+      try {
+        const consumed = await originalConsumeStream(...args);
 
-      const snapshot = buildStreamSnapshot(streamLike);
-      await settleSuccess(snapshot);
-    })
-    .catch(async error => {
-      await settleFailure(error);
-    });
+        if (!settled) {
+          const snapshot = buildStreamSnapshot(streamLike);
+          await settleSuccess(snapshot).catch(() => {});
+        }
+
+        return consumed;
+      } catch (error) {
+        await settleFailure(error);
+        throw error;
+      }
+    };
+  }
+
+  if (isThenable(streamLike.finishReason)) {
+    void streamLike.finishReason
+      .then(async () => {
+        if (settled) {
+          return;
+        }
+
+        const snapshot = buildStreamSnapshot(streamLike);
+        await settleSuccess(snapshot).catch(() => {});
+      })
+      .catch(async error => {
+        await settleFailure(error).catch(() => {});
+      });
+  }
 }
 
 function buildStreamSnapshot(
@@ -634,4 +659,13 @@ function buildStreamSnapshot(
     usage: stream._getImmediateUsage?.(),
     warnings: stream._getImmediateWarnings?.()
   };
+}
+
+function isThenable(value: unknown): value is Promise<unknown> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "then" in value &&
+    typeof (value as { then?: unknown }).then === "function"
+  );
 }

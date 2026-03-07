@@ -396,6 +396,176 @@ describe("wrapAgent", () => {
     ).toContain("WorkflowCompleted");
   });
 
+  it("does not finalize stream early when finishReason is not promise-like", async () => {
+    const server = await startOpenBoxServer({
+      evaluate() {
+        return { verdict: "allow" };
+      }
+    });
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_agent",
+      apiUrl: server.url,
+      validate: false
+    });
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+
+    const streamObject = {
+      finishReason: undefined,
+      status: "streaming",
+      _getImmediateFinishReason: () => undefined,
+      _getImmediateText: () => "",
+      _getImmediateToolCalls: () => [],
+      _getImmediateToolResults: () => [],
+      _getImmediateUsage: () => undefined,
+      _getImmediateWarnings: () => [],
+      async getFullOutput() {
+        return {
+          finishReason: "stop",
+          text: "final output"
+        };
+      }
+    };
+
+    const agent = wrapAgent(
+      {
+        id: "non-thenable-finish-reason-agent",
+        name: "Non-Thenable Finish Agent",
+        async stream() {
+          return streamObject;
+        }
+      },
+      {
+        client,
+        config,
+        spanProcessor: new OpenBoxSpanProcessor()
+      }
+    );
+
+    const typedAgent = agent as {
+      stream: (
+        message: string,
+        options?: Record<string, unknown>
+      ) => Promise<{
+        getFullOutput: () => Promise<{ text: string }>;
+      }>;
+    };
+
+    const stream = await typedAgent.stream("hello", {
+      runId: "agent-non-thenable-run"
+    });
+
+    await new Promise(resolve => setTimeout(resolve, 20));
+
+    const preCompletionEvents = server.requests
+      .filter(request => request.pathname === "/api/v1/governance/evaluate")
+      .map(request => request.body.event_type);
+
+    expect(preCompletionEvents).toEqual(["WorkflowStarted"]);
+
+    const fullOutput = await stream.getFullOutput();
+    expect(fullOutput).toMatchObject({
+      text: "final output"
+    });
+
+    const completedEvent = server.requests
+      .filter(request => request.pathname === "/api/v1/governance/evaluate")
+      .map(request => request.body)
+      .find(body => body.event_type === "WorkflowCompleted");
+
+    await server.close();
+
+    expect(completedEvent).toBeDefined();
+    expect(completedEvent?.workflow_output).toMatchObject({
+      text: "final output"
+    });
+  });
+
+  it("finalizes stream on consumeStream when finishReason is not promise-like", async () => {
+    const server = await startOpenBoxServer({
+      evaluate() {
+        return { verdict: "allow" };
+      }
+    });
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_agent",
+      apiUrl: server.url,
+      validate: false
+    });
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+
+    const streamObject = {
+      finishReason: undefined,
+      status: "completed",
+      _getImmediateFinishReason: () => "stop",
+      _getImmediateText: () => "stream consumed output",
+      _getImmediateToolCalls: () => [],
+      _getImmediateToolResults: () => [],
+      _getImmediateUsage: () => ({ totalTokens: 1 }),
+      _getImmediateWarnings: () => [],
+      async consumeStream() {
+        return;
+      },
+      async getFullOutput() {
+        return {
+          finishReason: "stop",
+          text: "unused"
+        };
+      }
+    };
+
+    const agent = wrapAgent(
+      {
+        id: "consume-stream-finalize-agent",
+        name: "Consume Stream Finalize Agent",
+        async stream() {
+          return streamObject;
+        }
+      },
+      {
+        client,
+        config,
+        spanProcessor: new OpenBoxSpanProcessor()
+      }
+    );
+
+    const typedAgent = agent as {
+      stream: (
+        message: string,
+        options?: Record<string, unknown>
+      ) => Promise<{
+        consumeStream: () => Promise<void>;
+      }>;
+    };
+
+    const stream = await typedAgent.stream("hello", {
+      runId: "agent-consume-finalize-run"
+    });
+
+    await stream.consumeStream();
+
+    const completedEvent = server.requests
+      .filter(request => request.pathname === "/api/v1/governance/evaluate")
+      .map(request => request.body)
+      .find(body => body.event_type === "WorkflowCompleted");
+
+    await server.close();
+
+    expect(completedEvent).toBeDefined();
+    expect(completedEvent?.workflow_output).toMatchObject({
+      text: "stream consumed output"
+    });
+  });
+
   it("does not break stream text delivery while emitting completion events", async () => {
     const server = await startOpenBoxServer({
       evaluate() {
