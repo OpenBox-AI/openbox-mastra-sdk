@@ -459,9 +459,12 @@ function buildWorkflowCompletedTelemetryPayload(
   const durationMs =
     typeof startTimeMs === "number" ? Math.max(0, endTimeMs - startTimeMs) : undefined;
   const usage = extractUsageMetrics(output);
-  const modelId = extractModelId(output);
-  const spans = normalizeSpansForGovernance(
-    options.spanProcessor.getBuffer(workflowId)?.spans ?? []
+  const modelInfo = extractModelInfo(output);
+  const spans = buildWorkflowTelemetrySpans(
+    normalizeSpansForGovernance(options.spanProcessor.getBuffer(workflowId)?.spans ?? []),
+    modelInfo,
+    usage,
+    endTimeMs
   );
 
   return {
@@ -478,7 +481,7 @@ function buildWorkflowCompletedTelemetryPayload(
     ...(typeof usage.totalTokens === "number"
       ? { total_tokens: usage.totalTokens }
       : {}),
-    ...(modelId ? { model_id: modelId } : {}),
+    ...(modelInfo.modelId ? { model_id: modelInfo.modelId } : {}),
     span_count: spans.length,
     spans
   };
@@ -547,9 +550,12 @@ function toNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
-function extractModelId(output: unknown): string | undefined {
+function extractModelInfo(output: unknown): {
+  modelId?: string;
+  provider?: string;
+} {
   if (!output || typeof output !== "object") {
-    return undefined;
+    return {};
   }
 
   const record = output as Record<string, unknown>;
@@ -561,19 +567,292 @@ function extractModelId(output: unknown): string | undefined {
     response?.modelMetadata && typeof response.modelMetadata === "object"
       ? (response.modelMetadata as Record<string, unknown>)
       : undefined;
-  const candidates = [
+  const modelIdCandidates = [
     response?.modelId,
     modelMetadata?.modelId,
     record.modelId
   ];
+  const providerCandidates = [
+    modelMetadata?.provider,
+    response?.provider,
+    record.provider
+  ];
 
-  for (const candidate of candidates) {
+  let modelId: string | undefined;
+  let provider: string | undefined;
+
+  for (const candidate of modelIdCandidates) {
     if (typeof candidate === "string" && candidate.trim().length > 0) {
-      return candidate;
+      modelId = candidate;
+      break;
+    }
+  }
+
+  for (const candidate of providerCandidates) {
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
+      provider = candidate;
+      break;
+    }
+  }
+
+  return {
+    ...(modelId ? { modelId } : {}),
+    ...(provider ? { provider } : {})
+  };
+}
+
+function buildWorkflowTelemetrySpans(
+  spans: Array<Record<string, unknown>>,
+  modelInfo: {
+    modelId?: string;
+    provider?: string;
+  },
+  usage: {
+    inputTokens?: number;
+    outputTokens?: number;
+    totalTokens?: number;
+  },
+  endTimeMs: number
+): Array<Record<string, unknown>> {
+  if (!modelInfo.modelId) {
+    return spans;
+  }
+
+  const inputTokens = usage.inputTokens ?? 0;
+  const outputTokens = usage.outputTokens ?? 0;
+
+  if (inputTokens <= 0 && outputTokens <= 0) {
+    return spans;
+  }
+
+  if (hasParseableModelUsageSpan(spans)) {
+    return spans;
+  }
+
+  const providerUrl = resolveProviderUrl(modelInfo);
+
+  if (!providerUrl) {
+    return spans;
+  }
+
+  const traceId = getTraceIdCandidate(spans);
+
+  return [
+    ...spans,
+    createSyntheticModelUsageSpan({
+      endTimeMs,
+      inputTokens,
+      modelId: modelInfo.modelId,
+      outputTokens,
+      providerUrl,
+      ...(traceId ? { traceId } : {})
+    })
+  ];
+}
+
+function hasParseableModelUsageSpan(
+  spans: Array<Record<string, unknown>>
+): boolean {
+  return spans.some(span => {
+    const attributes =
+      span.attributes && typeof span.attributes === "object"
+        ? (span.attributes as Record<string, unknown>)
+        : {};
+    const rawUrl = attributes["http.url"] ?? attributes["url.full"];
+    const url = typeof rawUrl === "string" ? rawUrl : undefined;
+
+    if (!url || !isLlmProviderUrl(url)) {
+      return false;
+    }
+
+    const responseBody = getStringField(span, "response_body", "responseBody");
+
+    if (!responseBody) {
+      return false;
+    }
+
+    try {
+      const parsed = JSON.parse(responseBody) as {
+        model?: unknown;
+        usage?: {
+          completion_tokens?: unknown;
+          input_tokens?: unknown;
+          output_tokens?: unknown;
+          prompt_tokens?: unknown;
+        };
+      };
+
+      const modelPresent = typeof parsed.model === "string" && parsed.model.length > 0;
+      const usage = parsed.usage;
+      const hasPromptTokens =
+        typeof usage?.prompt_tokens === "number" && usage.prompt_tokens > 0;
+      const hasCompletionTokens =
+        typeof usage?.completion_tokens === "number" && usage.completion_tokens > 0;
+      const hasInputTokens =
+        typeof usage?.input_tokens === "number" && usage.input_tokens > 0;
+      const hasOutputTokens =
+        typeof usage?.output_tokens === "number" && usage.output_tokens > 0;
+
+      return (
+        modelPresent ||
+        hasPromptTokens ||
+        hasCompletionTokens ||
+        hasInputTokens ||
+        hasOutputTokens
+      );
+    } catch {
+      return false;
+    }
+  });
+}
+
+function createSyntheticModelUsageSpan({
+  endTimeMs,
+  inputTokens,
+  modelId,
+  outputTokens,
+  providerUrl,
+  traceId
+}: {
+  endTimeMs: number;
+  inputTokens: number;
+  modelId: string;
+  outputTokens: number;
+  providerUrl: string;
+  traceId?: string;
+}): Record<string, unknown> {
+  const endTimeNs = Math.max(1, Math.floor(endTimeMs * 1_000_000));
+  const startTimeNs = Math.max(0, endTimeNs - 1);
+  const normalizedTraceId = normalizeHexId(traceId, 32);
+  const spanId = normalizeHexId(undefined, 16);
+
+  return {
+    attributes: {
+      "http.method": "POST",
+      "http.url": providerUrl,
+      "openbox.synthetic": true
+    },
+    duration_ns: 1,
+    end_time: endTimeNs,
+    events: [],
+    kind: "CLIENT",
+    name: "openbox.synthetic.model_usage",
+    request_body: JSON.stringify({
+      model: modelId
+    }),
+    response_body: JSON.stringify({
+      model: modelId,
+      usage: {
+        input_tokens: inputTokens,
+        output_tokens: outputTokens
+      }
+    }),
+    semantic_type: "llm_completion",
+    span_id: spanId,
+    start_time: startTimeNs,
+    status: {
+      code: "OK"
+    },
+    trace_id: normalizedTraceId
+  };
+}
+
+function resolveProviderUrl(modelInfo: {
+  modelId?: string;
+  provider?: string;
+}): string | undefined {
+  const provider = modelInfo.provider?.toLowerCase();
+  const modelId = modelInfo.modelId?.toLowerCase();
+
+  if (provider?.includes("openai")) {
+    return "https://api.openai.com/v1/responses";
+  }
+
+  if (provider?.includes("anthropic")) {
+    return "https://api.anthropic.com/v1/messages";
+  }
+
+  if (provider?.includes("google") || provider?.includes("gemini")) {
+    return "https://generativelanguage.googleapis.com/v1beta/models";
+  }
+
+  if (!modelId) {
+    return undefined;
+  }
+
+  if (
+    modelId.startsWith("gpt-") ||
+    modelId.startsWith("o1") ||
+    modelId.startsWith("o3")
+  ) {
+    return "https://api.openai.com/v1/responses";
+  }
+
+  if (modelId.startsWith("claude-")) {
+    return "https://api.anthropic.com/v1/messages";
+  }
+
+  if (modelId.startsWith("gemini")) {
+    return "https://generativelanguage.googleapis.com/v1beta/models";
+  }
+
+  return undefined;
+}
+
+function getTraceIdCandidate(
+  spans: Array<Record<string, unknown>>
+): string | undefined {
+  for (const span of spans) {
+    const traceId = getStringField(span, "trace_id", "traceId");
+
+    if (traceId) {
+      return traceId;
     }
   }
 
   return undefined;
+}
+
+function getStringField(
+  record: Record<string, unknown>,
+  snakeKey: string,
+  camelKey: string
+): string | undefined {
+  const snake = record[snakeKey];
+
+  if (typeof snake === "string") {
+    return snake;
+  }
+
+  const camel = record[camelKey];
+
+  if (typeof camel === "string") {
+    return camel;
+  }
+
+  return undefined;
+}
+
+function isLlmProviderUrl(url: string): boolean {
+  return (
+    url.includes("api.openai.com") ||
+    url.includes("api.anthropic.com") ||
+    url.includes("generativelanguage.googleapis.com")
+  );
+}
+
+function normalizeHexId(
+  candidate: string | undefined,
+  width: number
+): string {
+  const source = (candidate ?? randomUUID().replaceAll("-", "")).toLowerCase();
+  const filtered = source.replace(/[^a-f0-9]/g, "");
+
+  if (filtered.length >= width) {
+    return filtered.slice(0, width);
+  }
+
+  return filtered.padEnd(width, "0");
 }
 
 async function sendAgentFailure(

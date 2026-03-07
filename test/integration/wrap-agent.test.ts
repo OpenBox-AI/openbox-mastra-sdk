@@ -356,6 +356,30 @@ describe("wrapAgent", () => {
     expect(spans[0]).not.toHaveProperty("endTime");
     expect(typeof (completedEvent as { start_time?: unknown }).start_time).toBe("number");
     expect(typeof (completedEvent as { end_time?: unknown }).end_time).toBe("number");
+
+    const syntheticUsageSpan = spans.find(span => {
+      const attributes =
+        span.attributes && typeof span.attributes === "object"
+          ? (span.attributes as Record<string, unknown>)
+          : undefined;
+      return attributes?.["http.url"] === "https://api.openai.com/v1/responses";
+    });
+    expect(syntheticUsageSpan).toBeDefined();
+    expect(syntheticUsageSpan).toHaveProperty("request_body");
+    expect(syntheticUsageSpan).toHaveProperty("response_body");
+    const responseBody = (syntheticUsageSpan as { response_body?: unknown })
+      .response_body;
+    expect(typeof responseBody).toBe("string");
+    const parsedResponse = JSON.parse(responseBody as string) as {
+      model?: string;
+      usage?: {
+        input_tokens?: number;
+        output_tokens?: number;
+      };
+    };
+    expect(parsedResponse.model).toBe("gpt-4o-mini");
+    expect(parsedResponse.usage?.input_tokens).toBe(10);
+    expect(parsedResponse.usage?.output_tokens).toBe(4);
   });
 
   it("falls back to minimal workflow completion payload when telemetry schema is rejected", async () => {
