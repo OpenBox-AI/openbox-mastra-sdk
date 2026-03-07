@@ -13,6 +13,7 @@ import {
   ApprovalExpiredError,
   ApprovalPendingError,
   ApprovalRejectedError,
+  GovernanceAPIError,
   GovernanceHaltError,
   Verdict,
   WorkflowEventType,
@@ -412,21 +413,164 @@ async function finalizeAgentSuccess(
   if (options.config.skipWorkflowTypes.has(workflowType)) {
     return;
   }
-  void streamMeta;
-
-  const verdict = await evaluateAgentEvent(options, {
+  const workflowOutput = serializeValue(output);
+  const minimalPayload = {
     event_type: WorkflowEventType.WORKFLOW_COMPLETED,
     run_id: runId,
     workflow_id: workflowId,
-    workflow_output: serializeValue(output),
+    workflow_output: workflowOutput,
     workflow_type: workflowType
-  });
+  } as const;
+  const telemetryPayload = buildWorkflowCompletedTelemetryPayload(
+    options,
+    workflowId,
+    minimalPayload,
+    output,
+    streamMeta
+  );
+
+  const verdict = await evaluateAgentEvent(options, telemetryPayload, minimalPayload);
 
   if (verdict && Verdict.shouldStop(verdict.verdict)) {
     throw new GovernanceHaltError(
       verdict.reason ?? "Agent blocked by governance"
     );
   }
+}
+
+function buildWorkflowCompletedTelemetryPayload(
+  options: WrapToolOptions,
+  workflowId: string,
+  basePayload: {
+    event_type: WorkflowEventType.WORKFLOW_COMPLETED;
+    run_id: string;
+    workflow_id: string;
+    workflow_output: unknown;
+    workflow_type: string;
+  },
+  output: unknown,
+  streamMeta?: AgentStreamMeta
+): Record<string, unknown> & { event_type: WorkflowEventType } {
+  const endTimeMs = Date.now();
+  const startTimeMs = streamMeta?.startTimeMs;
+  const durationMs =
+    typeof startTimeMs === "number" ? Math.max(0, endTimeMs - startTimeMs) : undefined;
+  const usage = extractUsageMetrics(output);
+  const modelId = extractModelId(output);
+  const spans = options.spanProcessor.getBuffer(workflowId)?.spans ?? [];
+
+  return {
+    ...basePayload,
+    ...(typeof durationMs === "number" ? { duration_ms: durationMs } : {}),
+    ...(typeof startTimeMs === "number"
+      ? { start_time: new Date(startTimeMs).toISOString() }
+      : {}),
+    end_time: new Date(endTimeMs).toISOString(),
+    ...(typeof usage.inputTokens === "number"
+      ? { input_tokens: usage.inputTokens }
+      : {}),
+    ...(typeof usage.outputTokens === "number"
+      ? { output_tokens: usage.outputTokens }
+      : {}),
+    ...(typeof usage.totalTokens === "number"
+      ? { total_tokens: usage.totalTokens }
+      : {}),
+    ...(modelId ? { model_id: modelId } : {}),
+    span_count: spans.length,
+    spans
+  };
+}
+
+function extractUsageMetrics(output: unknown): {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+} {
+  const outputRecord =
+    output && typeof output === "object" ? (output as Record<string, unknown>) : undefined;
+  const usageCandidates = [
+    outputRecord?.usage,
+    outputRecord?.totalUsage,
+    outputRecord?.output,
+    outputRecord?.stepResult
+  ];
+
+  for (const candidate of usageCandidates) {
+    const usage = extractUsageRecord(candidate);
+
+    if (usage) {
+      return usage;
+    }
+  }
+
+  return {};
+}
+
+function extractUsageRecord(value: unknown):
+  | {
+      inputTokens?: number;
+      outputTokens?: number;
+      totalTokens?: number;
+    }
+  | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+
+  const record = value as Record<string, unknown>;
+  const usage = "usage" in record && record.usage && typeof record.usage === "object"
+    ? (record.usage as Record<string, unknown>)
+    : record;
+  const inputTokens = toNumber(usage.inputTokens);
+  const outputTokens = toNumber(usage.outputTokens);
+  const totalTokens = toNumber(usage.totalTokens);
+
+  if (
+    inputTokens === undefined &&
+    outputTokens === undefined &&
+    totalTokens === undefined
+  ) {
+    return undefined;
+  }
+
+  return {
+    ...(inputTokens !== undefined ? { inputTokens } : {}),
+    ...(outputTokens !== undefined ? { outputTokens } : {}),
+    ...(totalTokens !== undefined ? { totalTokens } : {})
+  };
+}
+
+function toNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function extractModelId(output: unknown): string | undefined {
+  if (!output || typeof output !== "object") {
+    return undefined;
+  }
+
+  const record = output as Record<string, unknown>;
+  const response =
+    record.response && typeof record.response === "object"
+      ? (record.response as Record<string, unknown>)
+      : undefined;
+  const modelMetadata =
+    response?.modelMetadata && typeof response.modelMetadata === "object"
+      ? (response.modelMetadata as Record<string, unknown>)
+      : undefined;
+  const candidates = [
+    response?.modelId,
+    modelMetadata?.modelId,
+    record.modelId
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
+      return candidate;
+    }
+  }
+
+  return undefined;
 }
 
 async function sendAgentFailure(
@@ -453,15 +597,40 @@ async function sendAgentFailure(
 
 async function evaluateAgentEvent(
   options: WrapToolOptions,
-  payload: Record<string, unknown> & { event_type: WorkflowEventType }
+  payload: Record<string, unknown> & { event_type: WorkflowEventType },
+  fallbackPayload?: Record<string, unknown> & { event_type: WorkflowEventType }
 ): Promise<GovernanceVerdictResponse | null> {
   try {
-    return await options.client.evaluate({
+    const primaryResult = await options.client.evaluate({
       source: "workflow-telemetry",
       timestamp: new Date().toISOString(),
       ...payload
     });
-  } catch (error) {
+
+    if (primaryResult !== null || !fallbackPayload) {
+      return primaryResult;
+    }
+
+    return await options.client.evaluate({
+      source: "workflow-telemetry",
+      timestamp: new Date().toISOString(),
+      ...fallbackPayload
+    });
+  } catch (initialError) {
+    let resolvedError: unknown = initialError;
+
+    if (fallbackPayload && isBadRequestSchemaError(initialError)) {
+      try {
+        return await options.client.evaluate({
+          source: "workflow-telemetry",
+          timestamp: new Date().toISOString(),
+          ...fallbackPayload
+        });
+      } catch (fallbackError) {
+        resolvedError = fallbackError;
+      }
+    }
+
     if (options.config.onApiError === "fail_closed") {
       return {
         action: "stop",
@@ -474,7 +643,9 @@ async function evaluateAgentEvent(
         metadata: undefined,
         policyId: undefined,
         reason: `Governance API error: ${
-          error instanceof Error ? error.message : String(error)
+          resolvedError instanceof Error
+            ? resolvedError.message
+            : String(resolvedError)
         }`,
         riskScore: 0,
         trustTier: undefined,
@@ -484,6 +655,13 @@ async function evaluateAgentEvent(
 
     return null;
   }
+}
+
+function isBadRequestSchemaError(error: unknown): boolean {
+  return (
+    error instanceof GovernanceAPIError &&
+    /HTTP 400/i.test(error.message)
+  );
 }
 
 function serializeError(error: unknown): Record<string, unknown> {

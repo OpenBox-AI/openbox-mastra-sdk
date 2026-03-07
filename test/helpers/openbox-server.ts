@@ -9,14 +9,21 @@ export interface OpenBoxRequestRecord {
 export interface OpenBoxServerHandlers {
   approval?: (
     body: Record<string, unknown>
-  ) => Record<string, unknown> | Promise<Record<string, unknown>>;
+  ) => OpenBoxHandlerResult | Promise<OpenBoxHandlerResult>;
   evaluate?: (
     body: Record<string, unknown>
-  ) => Record<string, unknown> | Promise<Record<string, unknown>>;
+  ) => OpenBoxHandlerResult | Promise<OpenBoxHandlerResult>;
   validate?: (
     body: Record<string, unknown>
-  ) => Record<string, unknown> | Promise<Record<string, unknown>>;
+  ) => OpenBoxHandlerResult | Promise<OpenBoxHandlerResult>;
 }
+
+export type OpenBoxHandlerResult =
+  | Record<string, unknown>
+  | {
+      body: Record<string, unknown>;
+      statusCode: number;
+    };
 
 export interface OpenBoxTestServer {
   close: () => Promise<void>;
@@ -40,20 +47,25 @@ export async function startOpenBoxServer(
       });
 
       if (pathname === "/api/v1/auth/validate") {
-        const payload = (await handlers.validate?.(body)) ?? { ok: true };
-        writeJson(response, 200, payload);
+        const handlerResult = (await handlers.validate?.(body)) ?? { ok: true };
+        const { body: payload, statusCode } = normalizeHandlerResult(handlerResult);
+        writeJson(response, statusCode, payload);
         return;
       }
 
       if (pathname === "/api/v1/governance/evaluate") {
-        const payload = (await handlers.evaluate?.(body)) ?? { verdict: "allow" };
-        writeJson(response, 200, payload);
+        const handlerResult =
+          (await handlers.evaluate?.(body)) ?? { verdict: "allow" };
+        const { body: payload, statusCode } = normalizeHandlerResult(handlerResult);
+        writeJson(response, statusCode, payload);
         return;
       }
 
       if (pathname === "/api/v1/governance/approval") {
-        const payload = (await handlers.approval?.(body)) ?? { verdict: "allow" };
-        writeJson(response, 200, payload);
+        const handlerResult =
+          (await handlers.approval?.(body)) ?? { verdict: "allow" };
+        const { body: payload, statusCode } = normalizeHandlerResult(handlerResult);
+        writeJson(response, statusCode, payload);
         return;
       }
 
@@ -119,4 +131,33 @@ function writeJson(
 ): void {
   response.writeHead(statusCode, { "content-type": "application/json" });
   response.end(JSON.stringify(payload));
+}
+
+function normalizeHandlerResult(result: OpenBoxHandlerResult): {
+  body: Record<string, unknown>;
+  statusCode: number;
+} {
+  if (isStructuredHandlerResult(result)) {
+    return {
+      body: result.body,
+      statusCode: result.statusCode
+    };
+  }
+
+  return {
+    body: result,
+    statusCode: 200
+  };
+}
+
+function isStructuredHandlerResult(
+  result: OpenBoxHandlerResult
+): result is { body: Record<string, unknown>; statusCode: number } {
+  return (
+    "statusCode" in result &&
+    typeof result.statusCode === "number" &&
+    "body" in result &&
+    result.body !== null &&
+    typeof result.body === "object"
+  );
 }

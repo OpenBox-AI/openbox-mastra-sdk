@@ -250,7 +250,7 @@ describe("wrapAgent", () => {
     ]);
   });
 
-  it("sends parity-safe workflow completion payload for agent runs", async () => {
+  it("sends telemetry-rich workflow completion payload for agent runs", async () => {
     const server = await startOpenBoxServer({
       evaluate() {
         return { verdict: "allow" };
@@ -290,6 +290,7 @@ describe("wrapAgent", () => {
 
               return {
                 finishReason: "stop",
+                modelId: "gpt-4o-mini",
                 text: "ok",
                 usage: {
                   inputTokens: 10,
@@ -326,13 +327,107 @@ describe("wrapAgent", () => {
       workflow_id: "agent:telemetry-agent",
       workflow_type: "telemetry-agent"
     });
-    expect(completedEvent).not.toHaveProperty("duration_ms");
-    expect(completedEvent).not.toHaveProperty("end_time");
-    expect(completedEvent).not.toHaveProperty("input_tokens");
-    expect(completedEvent).not.toHaveProperty("model_id");
-    expect(completedEvent).not.toHaveProperty("span_count");
-    expect(completedEvent).not.toHaveProperty("spans");
-    expect(completedEvent).not.toHaveProperty("start_time");
+    expect(completedEvent).toHaveProperty("duration_ms");
+    expect(completedEvent).toHaveProperty("end_time");
+    expect(completedEvent).toHaveProperty("input_tokens", 10);
+    expect(completedEvent).toHaveProperty("output_tokens", 4);
+    expect(completedEvent).toHaveProperty("total_tokens", 14);
+    expect(completedEvent).toHaveProperty("model_id", "gpt-4o-mini");
+    expect(completedEvent).toHaveProperty("span_count");
+    expect(completedEvent).toHaveProperty("spans");
+    expect(completedEvent).toHaveProperty("start_time");
+    expect(
+      typeof (completedEvent as { duration_ms?: unknown }).duration_ms
+    ).toBe("number");
+    expect(
+      (completedEvent as { span_count?: unknown }).span_count
+    ).toSatisfy(value => typeof value === "number" && value > 0);
+    expect(
+      (completedEvent as { spans?: unknown }).spans
+    ).toSatisfy(value => Array.isArray(value) && value.length > 0);
+  });
+
+  it("falls back to minimal workflow completion payload when telemetry schema is rejected", async () => {
+    let workflowCompletedAttempts = 0;
+    const server = await startOpenBoxServer({
+      evaluate(body) {
+        if (body.event_type === "WorkflowCompleted") {
+          workflowCompletedAttempts += 1;
+
+          if (workflowCompletedAttempts === 1) {
+            return {
+              body: {
+                code: 400,
+                message: "invalid request body"
+              },
+              statusCode: 400
+            };
+          }
+        }
+
+        return { verdict: "allow" };
+      }
+    });
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_agent",
+      apiUrl: server.url,
+      validate: false
+    });
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+    const spanProcessor = new OpenBoxSpanProcessor();
+    const agent = wrapAgent(
+      {
+        id: "telemetry-fallback-agent",
+        name: "Telemetry Fallback Agent",
+        async generate(
+          _messages?: unknown,
+          _executionOptions?: Record<string, unknown>
+        ) {
+          return {
+            finishReason: "stop",
+            modelId: "gpt-4o-mini",
+            text: "ok",
+            usage: {
+              inputTokens: 1,
+              outputTokens: 1,
+              totalTokens: 2
+            }
+          };
+        }
+      },
+      {
+        client,
+        config,
+        spanProcessor
+      }
+    );
+
+    await agent.generate("hello", {
+      runId: "agent-telemetry-fallback-run"
+    });
+
+    await server.close();
+
+    const completedRequests = server.requests
+      .filter(request => request.pathname === "/api/v1/governance/evaluate")
+      .map(request => request.body)
+      .filter(body => body.event_type === "WorkflowCompleted");
+
+    expect(completedRequests.length).toBe(2);
+    expect(workflowCompletedAttempts).toBe(2);
+    expect(completedRequests[1]).not.toHaveProperty("input_tokens");
+    expect(completedRequests[1]).not.toHaveProperty("model_id");
+    expect(completedRequests[1]).toMatchObject({
+      event_type: "WorkflowCompleted",
+      run_id: "agent-telemetry-fallback-run",
+      workflow_id: "agent:telemetry-fallback-agent",
+      workflow_type: "telemetry-fallback-agent"
+    });
   });
 
   it("emits workflow completion when stream is consumed without getFullOutput", async () => {
