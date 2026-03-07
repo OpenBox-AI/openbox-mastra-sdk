@@ -39,6 +39,7 @@ export class OpenBoxClient {
   public readonly timeoutSeconds: number;
 
   readonly #fetch: typeof fetch;
+  readonly #debugEnabled: boolean;
 
   public constructor({
     apiKey,
@@ -52,6 +53,7 @@ export class OpenBoxClient {
     this.onApiError = onApiError;
     this.timeoutSeconds = timeoutSeconds;
     this.#fetch = customFetch ?? fetch;
+    this.#debugEnabled = isOpenBoxDebugEnabled();
   }
 
   public async validateApiKey(): Promise<void> {
@@ -97,6 +99,10 @@ export class OpenBoxClient {
     payload: Record<string, unknown>
   ): Promise<GovernanceVerdictResponse | null> {
     return this.#withApiPolicy(async () => {
+      if (this.#debugEnabled) {
+        console.info("[openbox-sdk] evaluate.request", summarizeEvaluatePayload(payload));
+      }
+
       const response = await this.#fetch(
         this.#buildUrl("/api/v1/governance/evaluate"),
         {
@@ -112,16 +118,35 @@ export class OpenBoxClient {
       );
 
       if (response.status !== 200) {
+        const body = await response.text();
+
+        if (this.#debugEnabled) {
+          console.error("[openbox-sdk] evaluate.response", {
+            event_type: payload.event_type,
+            reason: body,
+            status: response.status
+          });
+        }
+
         throw new GovernanceAPIError(
-          `HTTP ${response.status}: ${await response.text()}`
+          `HTTP ${response.status}: ${body}`
         );
       }
 
-      return GovernanceVerdictResponse.fromObject(
-        (await response.json()) as Parameters<
-          typeof GovernanceVerdictResponse.fromObject
-        >[0]
-      );
+      const parsed = (await response.json()) as Parameters<
+        typeof GovernanceVerdictResponse.fromObject
+      >[0];
+
+      if (this.#debugEnabled) {
+        console.info("[openbox-sdk] evaluate.response", {
+          action: parsed.action,
+          event_type: payload.event_type,
+          status: response.status,
+          verdict: parsed.verdict
+        });
+      }
+
+      return GovernanceVerdictResponse.fromObject(parsed);
     });
   }
 
@@ -129,6 +154,14 @@ export class OpenBoxClient {
     payload: ApprovalPollRequest
   ): Promise<ApprovalPollResponse | null> {
     try {
+      if (this.#debugEnabled) {
+        console.info("[openbox-sdk] approval.request", {
+          activity_id: payload.activityId,
+          run_id: payload.runId,
+          workflow_id: payload.workflowId
+        });
+      }
+
       const response = await this.#fetch(
         this.#buildUrl("/api/v1/governance/approval"),
         {
@@ -147,10 +180,23 @@ export class OpenBoxClient {
       );
 
       if (response.status !== 200) {
+        if (this.#debugEnabled) {
+          console.error("[openbox-sdk] approval.response", {
+            status: response.status
+          });
+        }
+
         return null;
       }
 
       const data = (await response.json()) as ApprovalPollResponse;
+      if (this.#debugEnabled) {
+        console.info("[openbox-sdk] approval.response", {
+          action: data.action,
+          status: response.status,
+          verdict: data.verdict
+        });
+      }
       const expirationTime = data.approval_expiration_time;
 
       if (typeof expirationTime === "string") {
@@ -197,6 +243,29 @@ export class OpenBoxClient {
 
     return String(error);
   }
+}
+
+function isOpenBoxDebugEnabled(): boolean {
+  const value = process.env.OPENBOX_DEBUG?.trim().toLowerCase();
+  return value === "1" || value === "true" || value === "yes";
+}
+
+function summarizeEvaluatePayload(
+  payload: Record<string, unknown>
+): Record<string, unknown> {
+  return {
+    activity_type: payload.activity_type,
+    event_type: payload.event_type,
+    has_activity_input: Object.hasOwn(payload, "activity_input"),
+    has_activity_output: Object.hasOwn(payload, "activity_output"),
+    has_error: Object.hasOwn(payload, "error"),
+    has_signal_args: Object.hasOwn(payload, "signal_args"),
+    has_workflow_input: Object.hasOwn(payload, "workflow_input"),
+    has_workflow_output: Object.hasOwn(payload, "workflow_output"),
+    run_id: payload.run_id,
+    workflow_id: payload.workflow_id,
+    workflow_type: payload.workflow_type
+  };
 }
 
 function parseApprovalExpiration(value: string): Date | null {
