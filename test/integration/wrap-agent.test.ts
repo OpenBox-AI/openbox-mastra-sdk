@@ -250,7 +250,7 @@ describe("wrapAgent", () => {
     ]);
   });
 
-  it("attaches timing and span telemetry to workflow completion for agent runs", async () => {
+  it("sends parity-safe workflow completion payload for agent runs", async () => {
     const server = await startOpenBoxServer({
       evaluate() {
         return { verdict: "allow" };
@@ -290,15 +290,10 @@ describe("wrapAgent", () => {
 
               return {
                 finishReason: "stop",
-                response: {
-                  modelId: "gpt-4o-mini"
-                },
                 text: "ok",
                 usage: {
-                  cachedInputTokens: 0,
                   inputTokens: 10,
                   outputTokens: 4,
-                  reasoningTokens: 0,
                   totalTokens: 14
                 }
               };
@@ -325,21 +320,19 @@ describe("wrapAgent", () => {
       .find(body => body.event_type === "WorkflowCompleted");
 
     expect(completedEvent).toBeDefined();
-    expect(completedEvent?.start_time).toEqual(expect.any(String));
-    expect(completedEvent?.end_time).toEqual(expect.any(String));
-    expect(completedEvent?.duration_ms).toEqual(expect.any(Number));
-    expect(completedEvent?.model_id).toBe("gpt-4o-mini");
-    expect(completedEvent?.input_tokens).toBe(10);
-    expect(completedEvent?.output_tokens).toBe(4);
-    expect(completedEvent?.total_tokens).toBe(14);
-    expect(completedEvent?.span_count).toBeGreaterThan(0);
-    expect(completedEvent?.spans).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          name: "agent.child.operation"
-        })
-      ])
-    );
+    expect(completedEvent).toMatchObject({
+      event_type: "WorkflowCompleted",
+      run_id: "agent-telemetry-run",
+      workflow_id: "agent:telemetry-agent",
+      workflow_type: "telemetry-agent"
+    });
+    expect(completedEvent).not.toHaveProperty("duration_ms");
+    expect(completedEvent).not.toHaveProperty("end_time");
+    expect(completedEvent).not.toHaveProperty("input_tokens");
+    expect(completedEvent).not.toHaveProperty("model_id");
+    expect(completedEvent).not.toHaveProperty("span_count");
+    expect(completedEvent).not.toHaveProperty("spans");
+    expect(completedEvent).not.toHaveProperty("start_time");
   });
 
   it("emits workflow completion when stream is consumed without getFullOutput", async () => {

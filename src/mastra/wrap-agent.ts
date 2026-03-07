@@ -23,14 +23,6 @@ import type { WrapToolOptions } from "./wrap-tool.js";
 const OPENBOX_WRAPPED_AGENT = Symbol.for("openbox.mastra.wrapAgent");
 const OPENBOX_AGENT_STREAM_META = Symbol.for("openbox.mastra.wrapAgent.streamMeta");
 
-interface AgentRunTelemetry {
-  durationMs: number;
-  endTime: string;
-  spanCount: number;
-  spans: Record<string, unknown>[];
-  startTime: string;
-}
-
 interface AgentStreamMeta {
   startTimeMs: number;
 }
@@ -415,24 +407,11 @@ async function finalizeAgentSuccess(
   if (options.config.skipWorkflowTypes.has(workflowType)) {
     return;
   }
-
-  const telemetry = buildAgentRunTelemetry(
-    options,
-    workflowId,
-    runId,
-    streamMeta?.startTimeMs
-  );
-  const modelTelemetry = extractAgentModelTelemetry(output);
+  void streamMeta;
 
   const verdict = await evaluateAgentEvent(options, {
-    duration_ms: telemetry.durationMs,
-    end_time: telemetry.endTime,
     event_type: WorkflowEventType.WORKFLOW_COMPLETED,
-    ...modelTelemetry,
     run_id: runId,
-    span_count: telemetry.spanCount,
-    spans: telemetry.spans,
-    start_time: telemetry.startTime,
     workflow_id: workflowId,
     workflow_output: serializeValue(output),
     workflow_type: workflowType
@@ -456,23 +435,12 @@ async function sendAgentFailure(
   if (options.config.skipWorkflowTypes.has(workflowType)) {
     return;
   }
-
-  const telemetry = buildAgentRunTelemetry(
-    options,
-    workflowId,
-    runId,
-    streamMeta?.startTimeMs
-  );
+  void streamMeta;
 
   await evaluateAgentEvent(options, {
-    duration_ms: telemetry.durationMs,
-    end_time: telemetry.endTime,
     error: serializeError(error),
     event_type: WorkflowEventType.WORKFLOW_FAILED,
     run_id: runId,
-    span_count: telemetry.spanCount,
-    spans: telemetry.spans,
-    start_time: telemetry.startTime,
     workflow_id: workflowId,
     workflow_type: workflowType
   });
@@ -569,42 +537,6 @@ function setAgentStreamMeta(
   });
 }
 
-function buildAgentRunTelemetry(
-  options: WrapToolOptions,
-  workflowId: string,
-  runId: string,
-  startTimeMsInput?: number
-): AgentRunTelemetry {
-  const startTimeMs = startTimeMsInput ?? Date.now();
-  const endTimeMs = Date.now();
-  const startTime = new Date(startTimeMs).toISOString();
-  const endTime = new Date(endTimeMs).toISOString();
-  const durationMs = Math.max(0, endTimeMs - startTimeMs);
-  const spans = collectWorkflowSpans(options, workflowId, runId);
-
-  return {
-    durationMs,
-    endTime,
-    spanCount: spans.length,
-    spans,
-    startTime
-  };
-}
-
-function collectWorkflowSpans(
-  options: WrapToolOptions,
-  workflowId: string,
-  runId: string
-): Record<string, unknown>[] {
-  const buffer = options.spanProcessor.getBuffer(workflowId);
-
-  if (!buffer || buffer.runId !== runId) {
-    return [];
-  }
-
-  return [...buffer.spans];
-}
-
 function attachStreamLifecycleHandlers(
   stream: Record<PropertyKey, unknown>,
   handlers: {
@@ -673,44 +605,4 @@ function attachStreamLifecycleHandlers(
     .catch(async error => {
       await settleFailure(error);
     });
-}
-
-function extractAgentModelTelemetry(output: unknown): Record<string, unknown> {
-  if (!output || typeof output !== "object") {
-    return {};
-  }
-
-  const outputRecord = output as Record<string, unknown>;
-  const usage =
-    readRecord(outputRecord.totalUsage) ??
-    readRecord(outputRecord.usage);
-  const response = readRecord(outputRecord.response);
-  const model = readRecord(outputRecord.model);
-  const modelId =
-    readString(response?.modelId) ??
-    readString(outputRecord.modelId) ??
-    readString(model?.modelId);
-
-  return {
-    cached_input_tokens: readNumber(usage?.cachedInputTokens),
-    input_tokens: readNumber(usage?.inputTokens),
-    model_id: modelId,
-    output_tokens: readNumber(usage?.outputTokens),
-    reasoning_tokens: readNumber(usage?.reasoningTokens),
-    total_tokens: readNumber(usage?.totalTokens)
-  };
-}
-
-function readNumber(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-
-function readRecord(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === "object"
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
-
-function readString(value: unknown): string | undefined {
-  return typeof value === "string" ? value : undefined;
 }
