@@ -352,13 +352,15 @@ function patchFetch(
     const response = await originalFetch(request);
     const responseHeaders = headersToRecord(response.headers);
     const responseBody = await captureResponseBody(response);
-    const spanId = activeSpan.spanContext().spanId;
+    const spanContext = activeSpan.spanContext();
 
-    spanProcessor.storeBody(spanId, {
+    spanProcessor.storeTraceBody(spanContext.traceId, {
+      method: request.method,
       requestBody,
       requestHeaders,
       responseBody,
-      responseHeaders
+      responseHeaders,
+      url
     });
 
     return response;

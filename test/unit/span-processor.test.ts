@@ -211,6 +211,87 @@ describe("OpenBoxSpanProcessor", () => {
     expect(processor.getPendingBody("abcdef0123456789")).toBeUndefined();
   });
 
+  it("merges trace-scoped HTTP privacy data into matching HTTP spans", () => {
+    const processor = new OpenBoxSpanProcessor();
+    const buffer = new WorkflowSpanBuffer({
+      runId: "run-456",
+      taskQueue: "test-queue",
+      workflowId: "wf-123",
+      workflowType: "TestWorkflow"
+    });
+
+    processor.registerWorkflow("wf-123", buffer);
+    processor.registerTrace(
+      "0000000000000000123456789abcdef0",
+      "wf-123",
+      "act-789"
+    );
+    processor.storeTraceBody("0000000000000000123456789abcdef0", {
+      method: "POST",
+      requestBody: '{"model":"gpt-4o"}',
+      responseBody: '{"usage":{"prompt_tokens":10,"completion_tokens":2}}',
+      url: "https://api.openai.com/v1/responses"
+    });
+
+    processor.onEnd(
+      createSpan({
+        attributes: {
+          "http.method": "POST",
+          "http.url": "https://api.openai.com/v1/responses"
+        },
+        name: "llm.http"
+      }) as never
+    );
+
+    expect(buffer.spans[0]).toMatchObject({
+      activityId: "act-789",
+      name: "llm.http",
+      requestBody: '{"model":"gpt-4o"}',
+      responseBody: '{"usage":{"prompt_tokens":10,"completion_tokens":2}}'
+    });
+  });
+
+  it("retrofits trace-scoped HTTP privacy data when body arrives after span end", () => {
+    const processor = new OpenBoxSpanProcessor();
+    const buffer = new WorkflowSpanBuffer({
+      runId: "run-456",
+      taskQueue: "test-queue",
+      workflowId: "wf-123",
+      workflowType: "TestWorkflow"
+    });
+
+    processor.registerWorkflow("wf-123", buffer);
+    processor.registerTrace(
+      "0000000000000000123456789abcdef0",
+      "wf-123",
+      "act-789"
+    );
+
+    processor.onEnd(
+      createSpan({
+        attributes: {
+          "http.method": "POST",
+          "http.url": "https://api.openai.com/v1/responses"
+        },
+        name: "llm.http"
+      }) as never
+    );
+
+    processor.storeTraceBody("0000000000000000123456789abcdef0", {
+      method: "POST",
+      requestBody: '{"model":"gpt-4o"}',
+      responseBody: '{"usage":{"prompt_tokens":10,"completion_tokens":2}}',
+      url: "https://api.openai.com/v1/responses"
+    });
+
+    expect(buffer.spans[0]).toMatchObject({
+      activityId: "act-789",
+      name: "llm.http",
+      requestBody: '{"model":"gpt-4o"}',
+      responseBody: '{"usage":{"prompt_tokens":10,"completion_tokens":2}}'
+    });
+  });
+
   it("registers trace correlation from started workflow spans for later child spans", () => {
     const processor = new OpenBoxSpanProcessor();
     const buffer = new WorkflowSpanBuffer({

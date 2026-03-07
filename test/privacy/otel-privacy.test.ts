@@ -96,9 +96,21 @@ describe("setupOpenBoxOpenTelemetry", () => {
     expect(spanWithBodies.requestHeaders["content-type"]).toBe(
       "application/json"
     );
+    const requestUrl =
+      (spanWithBodies.attributes["http.url"] as string | undefined) ??
+      (spanWithBodies.attributes["url.full"] as string | undefined);
+    expect(requestUrl).toBe(`http://127.0.0.1:${address.port}/echo`);
     expect(JSON.stringify(spanWithBodies.attributes)).not.toContain(
       "top-secret"
     );
+
+    const workflowSpan = buffer.spans.find(
+      span =>
+        typeof span === "object" &&
+        span !== null &&
+        (span as { name?: string }).name === "workflow.fetch"
+    ) as { requestBody?: string | undefined } | undefined;
+    expect(workflowSpan?.requestBody).toBeUndefined();
   });
 
   it("creates file spans only when file I/O instrumentation is enabled and skips system paths", async () => {

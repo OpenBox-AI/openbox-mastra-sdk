@@ -14,6 +14,11 @@ export interface StoredSpanBody {
   responseHeaders?: Record<string, string> | undefined;
 }
 
+export interface StoredTraceBody extends StoredSpanBody {
+  method?: string | undefined;
+  url?: string | undefined;
+}
+
 export interface StoredWorkflowVerdict {
   reason?: string | undefined;
   runId?: string | undefined;
@@ -85,6 +90,7 @@ type SpanLike = Pick<
 export class OpenBoxSpanProcessor implements SpanProcessor {
   readonly #bodyData = new Map<string, StoredSpanBody>();
   readonly #buffers = new Map<string, WorkflowSpanBuffer>();
+  readonly #traceBodyData = new Map<string, StoredTraceBody[]>();
   readonly #ignoredUrlPrefixes: Set<string>;
   readonly #traceToActivity = new Map<string, string>();
   readonly #traceToWorkflow = new Map<string, string>();
@@ -167,6 +173,22 @@ export class OpenBoxSpanProcessor implements SpanProcessor {
     });
   }
 
+  public storeTraceBody(
+    traceId: number | string,
+    body: StoredTraceBody
+  ): void {
+    const normalizedTraceId = normalizeHexId(traceId, 32);
+    const normalizedBody = normalizeTraceBody(body);
+
+    if (this.#attachTraceBodyToBufferedSpan(normalizedTraceId, normalizedBody)) {
+      return;
+    }
+
+    const existing = this.#traceBodyData.get(normalizedTraceId) ?? [];
+    existing.push(normalizedBody);
+    this.#traceBodyData.set(normalizedTraceId, existing);
+  }
+
   public getPendingBody(spanId: number | string): StoredSpanBody | undefined {
     return this.#bodyData.get(normalizeHexId(spanId, 16));
   }
@@ -217,6 +239,22 @@ export class OpenBoxSpanProcessor implements SpanProcessor {
             spanData.responseHeaders = body.responseHeaders;
             this.#bodyData.delete(spanId);
           }
+        }
+
+        const traceBody =
+          traceId != null
+            ? this.#consumeTraceBodyForSpan(traceId, spanData.attributes)
+            : undefined;
+
+        if (
+          traceBody &&
+          spanData.requestBody === undefined &&
+          spanData.responseBody === undefined
+        ) {
+          spanData.requestBody = traceBody.requestBody;
+          spanData.responseBody = traceBody.responseBody;
+          spanData.requestHeaders = traceBody.requestHeaders;
+          spanData.responseHeaders = traceBody.responseHeaders;
         }
 
         buffer.spans.push(spanData as unknown as Record<string, unknown>);
@@ -308,6 +346,111 @@ export class OpenBoxSpanProcessor implements SpanProcessor {
     if (activityId) {
       this.#traceToActivity.set(traceId, activityId);
     }
+  }
+
+  #consumeTraceBodyForSpan(
+    traceId: string,
+    attributes: Record<string, unknown>
+  ): StoredTraceBody | undefined {
+    const spanUrl = normalizeHttpUrl(
+      toStringAttribute(attributes["http.url"]) ??
+        toStringAttribute(attributes["url.full"])
+    );
+
+    if (!spanUrl) {
+      return undefined;
+    }
+
+    const spanMethod = normalizeHttpMethod(
+      toStringAttribute(attributes["http.method"])
+    );
+    const entries = this.#traceBodyData.get(traceId);
+
+    if (!entries || entries.length === 0) {
+      return undefined;
+    }
+
+    const index = entries.findIndex(entry => {
+      const sameUrl = entry.url === undefined || entry.url === spanUrl;
+      const sameMethod =
+        entry.method === undefined || spanMethod === undefined || entry.method === spanMethod;
+
+      return sameUrl && sameMethod;
+    });
+
+    if (index === -1) {
+      return undefined;
+    }
+
+    const [matched] = entries.splice(index, 1);
+
+    if (entries.length === 0) {
+      this.#traceBodyData.delete(traceId);
+    } else {
+      this.#traceBodyData.set(traceId, entries);
+    }
+
+    return matched;
+  }
+
+  #attachTraceBodyToBufferedSpan(
+    traceId: string,
+    body: StoredTraceBody
+  ): boolean {
+    const workflowId = this.#traceToWorkflow.get(traceId);
+
+    if (!workflowId) {
+      return false;
+    }
+
+    const buffer = this.#buffers.get(workflowId);
+
+    if (!buffer || buffer.spans.length === 0) {
+      return false;
+    }
+
+    for (let index = buffer.spans.length - 1; index >= 0; index -= 1) {
+      const candidate = buffer.spans[index];
+
+      if (!candidate || typeof candidate !== "object") {
+        continue;
+      }
+
+      const spanRecord = candidate;
+      const spanTraceId = normalizeHttpTraceId(
+        toStringAttribute(spanRecord.traceId) ??
+          toStringAttribute(spanRecord.trace_id)
+      );
+
+      if (spanTraceId !== traceId) {
+        continue;
+      }
+
+      const attributes = toRecord(
+        spanRecord.attributes as Record<string, unknown> | undefined
+      );
+
+      if (!traceBodyMatchesSpan(body, attributes)) {
+        continue;
+      }
+
+      if (
+        spanRecord.requestBody !== undefined ||
+        spanRecord.responseBody !== undefined ||
+        spanRecord.request_body !== undefined ||
+        spanRecord.response_body !== undefined
+      ) {
+        return true;
+      }
+
+      spanRecord.requestBody = body.requestBody;
+      spanRecord.responseBody = body.responseBody;
+      spanRecord.requestHeaders = body.requestHeaders;
+      spanRecord.responseHeaders = body.responseHeaders;
+      return true;
+    }
+
+    return false;
   }
 }
 
@@ -419,4 +562,60 @@ function toRecord(
 
 function toStringAttribute(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+function normalizeHttpMethod(value: string | undefined): string | undefined {
+  return value ? value.toUpperCase() : undefined;
+}
+
+function normalizeHttpTraceId(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  return value.padStart(32, "0");
+}
+
+function normalizeHttpUrl(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  try {
+    return new URL(value).toString();
+  } catch {
+    return value;
+  }
+}
+
+function normalizeTraceBody(body: StoredTraceBody): StoredTraceBody {
+  return {
+    ...body,
+    method: normalizeHttpMethod(body.method),
+    url: normalizeHttpUrl(body.url)
+  };
+}
+
+function traceBodyMatchesSpan(
+  body: StoredTraceBody,
+  attributes: Record<string, unknown>
+): boolean {
+  const spanUrl = normalizeHttpUrl(
+    toStringAttribute(attributes["http.url"]) ??
+      toStringAttribute(attributes["url.full"])
+  );
+
+  if (body.url && (!spanUrl || body.url !== spanUrl)) {
+    return false;
+  }
+
+  const spanMethod = normalizeHttpMethod(
+    toStringAttribute(attributes["http.method"])
+  );
+
+  if (body.method && spanMethod && body.method !== spanMethod) {
+    return false;
+  }
+
+  return true;
 }
