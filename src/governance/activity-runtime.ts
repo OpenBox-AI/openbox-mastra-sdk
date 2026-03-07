@@ -293,6 +293,12 @@ export function serializeValue(value: unknown): unknown {
   return String(value);
 }
 
+export function normalizeSpansForGovernance(
+  spans: Array<Record<string, unknown>>
+): Array<Record<string, unknown>> {
+  return spans.map(span => normalizeSpanForGovernance(span));
+}
+
 function serializeActivityInputForEvent(value: unknown): unknown[] {
   const serialized = serializeValue(value);
 
@@ -506,12 +512,173 @@ function collectActivitySpans(
     return [];
   }
 
-  return buffer.spans.filter(span => {
-    return (
-      span.activityId === activityId ||
-      (span.attributes as Record<string, unknown> | undefined)?.[
-        "openbox.activity_id"
-      ] === activityId
-    );
+  return normalizeSpansForGovernance(
+    buffer.spans.filter(span => {
+      return (
+        span.activityId === activityId ||
+        (span.attributes as Record<string, unknown> | undefined)?.[
+          "openbox.activity_id"
+        ] === activityId
+      );
+    })
+  );
+}
+
+function normalizeSpanForGovernance(
+  span: Record<string, unknown>
+): Record<string, unknown> {
+  const attributes = asRecord(span.attributes);
+  const normalizedAttributes = {
+    ...attributes
+  };
+  const urlFull = toStringOrUndefined(normalizedAttributes["url.full"]);
+
+  if (!toStringOrUndefined(normalizedAttributes["http.url"]) && urlFull) {
+    normalizedAttributes["http.url"] = urlFull;
+  }
+
+  const normalized: Record<string, unknown> = {
+    attributes: normalizedAttributes,
+    end_time: toFiniteNumber(span.end_time ?? span.endTime),
+    events: normalizeSpanEvents(span.events),
+    name: toStringOrUndefined(span.name),
+    span_id: toStringOrUndefined(span.span_id ?? span.spanId),
+    start_time: toFiniteNumber(span.start_time ?? span.startTime),
+    trace_id: toStringOrUndefined(span.trace_id ?? span.traceId)
+  };
+  const parentSpanId = toStringOrUndefined(
+    span.parent_span_id ?? span.parentSpanId
+  );
+  const kind = toStringOrUndefined(span.kind);
+  const durationNs =
+    toFiniteNumber(span.duration_ns ?? span.durationNs) ??
+    calculateDurationNs(normalized.start_time, normalized.end_time);
+  const status = normalizeSpanStatus(span.status);
+  const requestHeaders = toStringRecord(
+    span.request_headers ?? span.requestHeaders
+  );
+  const responseHeaders = toStringRecord(
+    span.response_headers ?? span.responseHeaders
+  );
+  const requestBody = toStringOrUndefined(span.request_body ?? span.requestBody);
+  const responseBody = toStringOrUndefined(span.response_body ?? span.responseBody);
+  const semanticType = toStringOrUndefined(
+    span.semantic_type ?? span.semanticType
+  );
+
+  if (parentSpanId) {
+    normalized.parent_span_id = parentSpanId;
+  }
+
+  if (kind) {
+    normalized.kind = kind;
+  }
+
+  if (durationNs !== undefined) {
+    normalized.duration_ns = durationNs;
+  }
+
+  if (status) {
+    normalized.status = status;
+  }
+
+  if (requestHeaders) {
+    normalized.request_headers = requestHeaders;
+  }
+
+  if (responseHeaders) {
+    normalized.response_headers = responseHeaders;
+  }
+
+  if (requestBody !== undefined) {
+    normalized.request_body = requestBody;
+  }
+
+  if (responseBody !== undefined) {
+    normalized.response_body = responseBody;
+  }
+
+  if (semanticType) {
+    normalized.semantic_type = semanticType;
+  }
+
+  return normalized;
+}
+
+function calculateDurationNs(
+  startTime: unknown,
+  endTime: unknown
+): number | undefined {
+  if (typeof startTime !== "number" || typeof endTime !== "number") {
+    return undefined;
+  }
+
+  return Math.max(0, endTime - startTime);
+}
+
+function normalizeSpanEvents(events: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(events)) {
+    return [];
+  }
+
+  return events.map(event => {
+    const eventRecord = asRecord(event);
+
+    return {
+      attributes: asRecord(eventRecord.attributes),
+      name: toStringOrUndefined(eventRecord.name) ?? "",
+      timestamp: toFiniteNumber(eventRecord.timestamp) ?? 0
+    };
   });
+}
+
+function normalizeSpanStatus(
+  status: unknown
+): Record<string, unknown> | undefined {
+  const statusRecord = asRecord(status);
+  const code = toStringOrUndefined(statusRecord.code);
+  const description = toStringOrUndefined(statusRecord.description);
+
+  if (!code && !description) {
+    return undefined;
+  }
+
+  return {
+    ...(code ? { code } : {}),
+    ...(description ? { description } : {})
+  };
+}
+
+function toFiniteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function toStringOrUndefined(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+
+  return value as Record<string, unknown>;
+}
+
+function toStringRecord(
+  value: unknown
+): Record<string, string> | undefined {
+  const record = asRecord(value);
+
+  if (Object.keys(record).length === 0) {
+    return undefined;
+  }
+
+  const serialized = Object.fromEntries(
+    Object.entries(record).flatMap(([key, entry]) =>
+      typeof entry === "string" ? ([[key, entry]] as const) : []
+    )
+  );
+
+  return Object.keys(serialized).length > 0 ? serialized : undefined;
 }

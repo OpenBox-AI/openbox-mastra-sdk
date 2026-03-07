@@ -6,7 +6,10 @@ import {
   clearPendingApproval,
   getPendingApproval
 } from "../governance/approval-registry.js";
-import { serializeValue } from "../governance/activity-runtime.js";
+import {
+  normalizeSpansForGovernance,
+  serializeValue
+} from "../governance/activity-runtime.js";
 import { runWithOpenBoxExecutionContext } from "../governance/context.js";
 import type { GovernanceVerdictResponse } from "../types/index.js";
 import {
@@ -457,15 +460,15 @@ function buildWorkflowCompletedTelemetryPayload(
     typeof startTimeMs === "number" ? Math.max(0, endTimeMs - startTimeMs) : undefined;
   const usage = extractUsageMetrics(output);
   const modelId = extractModelId(output);
-  const spans = options.spanProcessor.getBuffer(workflowId)?.spans ?? [];
+  const spans = normalizeSpansForGovernance(
+    options.spanProcessor.getBuffer(workflowId)?.spans ?? []
+  );
 
   return {
     ...basePayload,
     ...(typeof durationMs === "number" ? { duration_ms: durationMs } : {}),
-    ...(typeof startTimeMs === "number"
-      ? { start_time: new Date(startTimeMs).toISOString() }
-      : {}),
-    end_time: new Date(endTimeMs).toISOString(),
+    ...(typeof startTimeMs === "number" ? { start_time: startTimeMs } : {}),
+    end_time: endTimeMs,
     ...(typeof usage.inputTokens === "number"
       ? { input_tokens: usage.inputTokens }
       : {}),

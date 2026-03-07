@@ -345,6 +345,17 @@ describe("wrapAgent", () => {
     expect(
       (completedEvent as { spans?: unknown }).spans
     ).toSatisfy(value => Array.isArray(value) && value.length > 0);
+    const spans = (completedEvent as { spans?: Array<Record<string, unknown>> }).spans ?? [];
+    expect(spans[0]).toHaveProperty("span_id");
+    expect(spans[0]).toHaveProperty("trace_id");
+    expect(spans[0]).toHaveProperty("start_time");
+    expect(spans[0]).toHaveProperty("end_time");
+    expect(spans[0]).not.toHaveProperty("spanId");
+    expect(spans[0]).not.toHaveProperty("traceId");
+    expect(spans[0]).not.toHaveProperty("startTime");
+    expect(spans[0]).not.toHaveProperty("endTime");
+    expect(typeof (completedEvent as { start_time?: unknown }).start_time).toBe("number");
+    expect(typeof (completedEvent as { end_time?: unknown }).end_time).toBe("number");
   });
 
   it("falls back to minimal workflow completion payload when telemetry schema is rejected", async () => {
