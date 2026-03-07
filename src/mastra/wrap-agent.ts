@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 
+import { trace } from "@opentelemetry/api";
+
 import {
   clearPendingApproval,
   getPendingApproval
@@ -13,11 +15,25 @@ import {
   ApprovalRejectedError,
   GovernanceHaltError,
   Verdict,
-  WorkflowEventType
+  WorkflowEventType,
+  WorkflowSpanBuffer
 } from "../types/index.js";
 import type { WrapToolOptions } from "./wrap-tool.js";
 
 const OPENBOX_WRAPPED_AGENT = Symbol.for("openbox.mastra.wrapAgent");
+const OPENBOX_AGENT_STREAM_META = Symbol.for("openbox.mastra.wrapAgent.streamMeta");
+
+interface AgentRunTelemetry {
+  durationMs: number;
+  endTime: string;
+  spanCount: number;
+  spans: Record<string, unknown>[];
+  startTime: string;
+}
+
+interface AgentStreamMeta {
+  startTimeMs: number;
+}
 
 export function wrapAgent<TAgent>(agent: TAgent, options: WrapToolOptions): TAgent {
   const baseAgent = agent as Record<PropertyKey, unknown> & {
@@ -87,27 +103,30 @@ export function wrapAgent<TAgent>(agent: TAgent, options: WrapToolOptions): TAge
         }
       );
 
-      if (output && typeof output.getFullOutput === "function") {
-        const originalGetFullOutput = output.getFullOutput.bind(output);
-
-        output.getFullOutput = async () => {
-          try {
-            const fullOutput = await originalGetFullOutput();
-
+      if (output && typeof output === "object") {
+        const streamMeta = getAgentStreamMeta(output);
+        attachStreamLifecycleHandlers(output, {
+          onFailure: async error => {
+            await sendAgentFailure(
+              options,
+              runId,
+              workflowId,
+              workflowType,
+              error,
+              streamMeta
+            );
+          },
+          onSuccess: async fullOutput => {
             await finalizeAgentSuccess(
               options,
               runId,
               workflowId,
               workflowType,
-              fullOutput
+              fullOutput,
+              streamMeta
             );
-
-            return fullOutput;
-          } catch (error) {
-            await sendAgentFailure(options, runId, workflowId, workflowType, error);
-            throw error;
           }
-        };
+        });
       }
 
       return output;
@@ -158,34 +177,31 @@ export function wrapAgent<TAgent>(agent: TAgent, options: WrapToolOptions): TAge
         workflowType
       });
 
-      if (output && typeof output.getFullOutput === "function") {
+      if (output && typeof output === "object") {
         const resolvedRunId = runId ?? randomUUID();
-        const originalGetFullOutput = output.getFullOutput.bind(output);
-
-        output.getFullOutput = async () => {
-          try {
-            const fullOutput = await originalGetFullOutput();
-
-            await finalizeAgentSuccess(
-              options,
-              resolvedRunId,
-              workflowId,
-              workflowType,
-              fullOutput
-            );
-
-            return fullOutput;
-          } catch (error) {
+        const streamMeta = getAgentStreamMeta(output);
+        attachStreamLifecycleHandlers(output, {
+          onFailure: async error => {
             await sendAgentFailure(
               options,
               resolvedRunId,
               workflowId,
               workflowType,
-              error
+              error,
+              streamMeta
             );
-            throw error;
+          },
+          onSuccess: async fullOutput => {
+            await finalizeAgentSuccess(
+              options,
+              resolvedRunId,
+              workflowId,
+              workflowType,
+              fullOutput,
+              streamMeta
+            );
           }
-        };
+        });
       }
 
       return output;
@@ -238,6 +254,9 @@ async function executeAgentLifecycle<T>({
     }
   }
 
+  ensureAgentSpanBuffer(options, runId, workflowId, workflowType);
+  const startTimeMs = Date.now();
+
   return runWithOpenBoxExecutionContext(
     {
       agentId: workflowType,
@@ -249,7 +268,23 @@ async function executeAgentLifecycle<T>({
     },
     async () => {
       try {
-        const result = await operation();
+        const result = await trace
+          .getTracer("openbox.mastra")
+          .startActiveSpan(`agent.${phase}.${workflowType}`, async activeSpan => {
+            activeSpan.setAttribute("openbox.workflow_id", workflowId);
+            activeSpan.setAttribute("openbox.activity_id", `agent:${workflowType}:${phase}`);
+            options.spanProcessor.registerTrace(
+              activeSpan.spanContext().traceId,
+              workflowId,
+              `agent:${workflowType}:${phase}`
+            );
+
+            try {
+              return await operation();
+            } finally {
+              activeSpan.end();
+            }
+          });
         const isStreamResult =
           result != null &&
           typeof result === "object" &&
@@ -268,13 +303,24 @@ async function executeAgentLifecycle<T>({
             runId,
             workflowId,
             workflowType,
-            result
+            result,
+            {
+              startTimeMs
+            }
           );
+        }
+
+        if (isStreamResult) {
+          setAgentStreamMeta(result as Record<PropertyKey, unknown>, {
+            startTimeMs
+          });
         }
 
         return result;
       } catch (error) {
-        await sendAgentFailure(options, runId, workflowId, workflowType, error);
+        await sendAgentFailure(options, runId, workflowId, workflowType, error, {
+          startTimeMs
+        });
         throw error;
       }
     }
@@ -363,15 +409,30 @@ async function finalizeAgentSuccess(
   runId: string,
   workflowId: string,
   workflowType: string,
-  output: unknown
+  output: unknown,
+  streamMeta?: AgentStreamMeta
 ): Promise<void> {
   if (options.config.skipWorkflowTypes.has(workflowType)) {
     return;
   }
 
+  const telemetry = buildAgentRunTelemetry(
+    options,
+    workflowId,
+    runId,
+    streamMeta?.startTimeMs
+  );
+  const modelTelemetry = extractAgentModelTelemetry(output);
+
   const verdict = await evaluateAgentEvent(options, {
+    duration_ms: telemetry.durationMs,
+    end_time: telemetry.endTime,
     event_type: WorkflowEventType.WORKFLOW_COMPLETED,
+    ...modelTelemetry,
     run_id: runId,
+    span_count: telemetry.spanCount,
+    spans: telemetry.spans,
+    start_time: telemetry.startTime,
     workflow_id: workflowId,
     workflow_output: serializeValue(output),
     workflow_type: workflowType
@@ -389,16 +450,29 @@ async function sendAgentFailure(
   runId: string,
   workflowId: string,
   workflowType: string,
-  error: unknown
+  error: unknown,
+  streamMeta?: AgentStreamMeta
 ): Promise<void> {
   if (options.config.skipWorkflowTypes.has(workflowType)) {
     return;
   }
 
+  const telemetry = buildAgentRunTelemetry(
+    options,
+    workflowId,
+    runId,
+    streamMeta?.startTimeMs
+  );
+
   await evaluateAgentEvent(options, {
+    duration_ms: telemetry.durationMs,
+    end_time: telemetry.endTime,
     error: serializeError(error),
     event_type: WorkflowEventType.WORKFLOW_FAILED,
     run_id: runId,
+    span_count: telemetry.spanCount,
+    spans: telemetry.spans,
+    start_time: telemetry.startTime,
     workflow_id: workflowId,
     workflow_type: workflowType
   });
@@ -451,4 +525,192 @@ function serializeError(error: unknown): Record<string, unknown> {
     message: String(error),
     type: typeof error
   };
+}
+
+function ensureAgentSpanBuffer(
+  options: WrapToolOptions,
+  runId: string,
+  workflowId: string,
+  workflowType: string
+): void {
+  const existing = options.spanProcessor.getBuffer(workflowId);
+
+  if (!existing || existing.runId !== runId) {
+    options.spanProcessor.registerWorkflow(
+      workflowId,
+      new WorkflowSpanBuffer({
+        runId,
+        taskQueue: "mastra",
+        workflowId,
+        workflowType
+      })
+    );
+  }
+}
+
+function getAgentStreamMeta(stream: unknown): AgentStreamMeta | undefined {
+  if (!stream || typeof stream !== "object") {
+    return undefined;
+  }
+
+  return (stream as Record<PropertyKey, unknown>)[
+    OPENBOX_AGENT_STREAM_META
+  ] as AgentStreamMeta | undefined;
+}
+
+function setAgentStreamMeta(
+  stream: Record<PropertyKey, unknown>,
+  meta: AgentStreamMeta
+): void {
+  Object.defineProperty(stream, OPENBOX_AGENT_STREAM_META, {
+    configurable: true,
+    enumerable: false,
+    value: meta
+  });
+}
+
+function buildAgentRunTelemetry(
+  options: WrapToolOptions,
+  workflowId: string,
+  runId: string,
+  startTimeMsInput?: number
+): AgentRunTelemetry {
+  const startTimeMs = startTimeMsInput ?? Date.now();
+  const endTimeMs = Date.now();
+  const startTime = new Date(startTimeMs).toISOString();
+  const endTime = new Date(endTimeMs).toISOString();
+  const durationMs = Math.max(0, endTimeMs - startTimeMs);
+  const spans = collectWorkflowSpans(options, workflowId, runId);
+
+  return {
+    durationMs,
+    endTime,
+    spanCount: spans.length,
+    spans,
+    startTime
+  };
+}
+
+function collectWorkflowSpans(
+  options: WrapToolOptions,
+  workflowId: string,
+  runId: string
+): Record<string, unknown>[] {
+  const buffer = options.spanProcessor.getBuffer(workflowId);
+
+  if (!buffer || buffer.runId !== runId) {
+    return [];
+  }
+
+  return [...buffer.spans];
+}
+
+function attachStreamLifecycleHandlers(
+  stream: Record<PropertyKey, unknown>,
+  handlers: {
+    onFailure: (error: unknown) => Promise<void>;
+    onSuccess: (fullOutput: unknown) => Promise<void>;
+  }
+): void {
+  const streamLike = stream as Record<PropertyKey, unknown> & {
+    finishReason?: Promise<unknown> | unknown;
+    getFullOutput?: (...args: unknown[]) => Promise<unknown>;
+  };
+  const originalGetFullOutput =
+    typeof streamLike.getFullOutput === "function"
+      ? streamLike.getFullOutput.bind(streamLike)
+      : undefined;
+
+  if (!originalGetFullOutput) {
+    return;
+  }
+
+  let settled = false;
+  let settledPromise: Promise<void> | undefined;
+
+  const settleSuccess = (fullOutput: unknown): Promise<void> => {
+    if (settledPromise) {
+      return settledPromise;
+    }
+
+    settled = true;
+    settledPromise = handlers.onSuccess(fullOutput);
+    return settledPromise;
+  };
+
+  const settleFailure = (error: unknown): Promise<void> => {
+    if (settledPromise) {
+      return settledPromise;
+    }
+
+    settled = true;
+    settledPromise = handlers.onFailure(error);
+    return settledPromise;
+  };
+
+  if (originalGetFullOutput) {
+    streamLike.getFullOutput = async (...args: unknown[]) => {
+      try {
+        const fullOutput = await originalGetFullOutput(...args);
+        await settleSuccess(fullOutput);
+        return fullOutput;
+      } catch (error) {
+        await settleFailure(error);
+        throw error;
+      }
+    };
+  }
+
+  void Promise.resolve(streamLike.finishReason)
+    .then(async () => {
+      if (settled) {
+        return;
+      }
+
+      const fullOutput = await originalGetFullOutput();
+      await settleSuccess(fullOutput);
+    })
+    .catch(async error => {
+      await settleFailure(error);
+    });
+}
+
+function extractAgentModelTelemetry(output: unknown): Record<string, unknown> {
+  if (!output || typeof output !== "object") {
+    return {};
+  }
+
+  const outputRecord = output as Record<string, unknown>;
+  const usage =
+    readRecord(outputRecord.totalUsage) ??
+    readRecord(outputRecord.usage);
+  const response = readRecord(outputRecord.response);
+  const model = readRecord(outputRecord.model);
+  const modelId =
+    readString(response?.modelId) ??
+    readString(outputRecord.modelId) ??
+    readString(model?.modelId);
+
+  return {
+    cached_input_tokens: readNumber(usage?.cachedInputTokens),
+    input_tokens: readNumber(usage?.inputTokens),
+    model_id: modelId,
+    output_tokens: readNumber(usage?.outputTokens),
+    reasoning_tokens: readNumber(usage?.reasoningTokens),
+    total_tokens: readNumber(usage?.totalTokens)
+  };
+}
+
+function readNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function readRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object"
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function readString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
 }

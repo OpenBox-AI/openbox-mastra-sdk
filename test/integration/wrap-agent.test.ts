@@ -1,12 +1,14 @@
 import { Agent } from "@mastra/core/agent";
 import { createTool } from "@mastra/core/tools";
 import { createMockModel } from "@mastra/core/test-utils/llm-mock";
+import { trace } from "@opentelemetry/api";
 import { z } from "zod";
 
 import {
   OpenBoxClient,
   OpenBoxSpanProcessor,
   parseOpenBoxConfig,
+  setupOpenBoxOpenTelemetry,
   wrapAgent,
   wrapTool
 } from "../../src/index.js";
@@ -246,5 +248,158 @@ describe("wrapAgent", () => {
       "SignalReceived",
       "WorkflowCompleted"
     ]);
+  });
+
+  it("attaches timing and span telemetry to workflow completion for agent runs", async () => {
+    const server = await startOpenBoxServer({
+      evaluate() {
+        return { verdict: "allow" };
+      }
+    });
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_agent",
+      apiUrl: server.url,
+      validate: false
+    });
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+    const spanProcessor = new OpenBoxSpanProcessor();
+    const telemetry = setupOpenBoxOpenTelemetry({
+      captureHttpBodies: false,
+      instrumentDatabases: false,
+      instrumentFileIo: false,
+      spanProcessor
+    });
+    const fakeAgent = wrapAgent(
+      {
+        id: "telemetry-agent",
+        name: "Telemetry Agent",
+        async generate(
+          _messages?: unknown,
+          _executionOptions?: Record<string, unknown>
+        ) {
+          return trace
+            .getTracer("openbox.test")
+            .startActiveSpan("agent.child.operation", async span => {
+              span.setAttribute("test.attr", "value");
+              span.end();
+
+              return {
+                finishReason: "stop",
+                response: {
+                  modelId: "gpt-4o-mini"
+                },
+                text: "ok",
+                usage: {
+                  cachedInputTokens: 0,
+                  inputTokens: 10,
+                  outputTokens: 4,
+                  reasoningTokens: 0,
+                  totalTokens: 14
+                }
+              };
+            });
+        }
+      },
+      {
+        client,
+        config,
+        spanProcessor
+      }
+    );
+
+    await fakeAgent.generate("hello", {
+      runId: "agent-telemetry-run"
+    });
+
+    await telemetry.shutdown();
+    await server.close();
+
+    const completedEvent = server.requests
+      .filter(request => request.pathname === "/api/v1/governance/evaluate")
+      .map(request => request.body)
+      .find(body => body.event_type === "WorkflowCompleted");
+
+    expect(completedEvent).toBeDefined();
+    expect(completedEvent?.start_time).toEqual(expect.any(String));
+    expect(completedEvent?.end_time).toEqual(expect.any(String));
+    expect(completedEvent?.duration_ms).toEqual(expect.any(Number));
+    expect(completedEvent?.model_id).toBe("gpt-4o-mini");
+    expect(completedEvent?.input_tokens).toBe(10);
+    expect(completedEvent?.output_tokens).toBe(4);
+    expect(completedEvent?.total_tokens).toBe(14);
+    expect(completedEvent?.span_count).toBeGreaterThan(0);
+    expect(completedEvent?.spans).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "agent.child.operation"
+        })
+      ])
+    );
+  });
+
+  it("emits workflow completion when stream is consumed without getFullOutput", async () => {
+    const server = await startOpenBoxServer({
+      evaluate() {
+        return { verdict: "allow" };
+      }
+    });
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_agent",
+      apiUrl: server.url,
+      validate: false
+    });
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+    const agent = wrapAgent(
+      new Agent({
+        id: "consume-stream-agent",
+        instructions: "Be concise.",
+        model: createMockModel({
+          mockText: "stream response",
+          version: "v2"
+        }) as never,
+        name: "Consume Stream Agent"
+      }),
+      {
+        client,
+        config,
+        spanProcessor: new OpenBoxSpanProcessor()
+      }
+    );
+
+    const stream = await agent.stream("hello", {
+      runId: "agent-consume-stream-run"
+    });
+
+    await stream.consumeStream();
+
+    const deadline = Date.now() + 1_000;
+
+    while (
+      Date.now() < deadline &&
+      !server.requests
+        .filter(request => request.pathname === "/api/v1/governance/evaluate")
+        .map(request => request.body.event_type)
+        .includes("WorkflowCompleted")
+    ) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+
+    await server.close();
+
+    expect(
+      server.requests
+        .filter(request => request.pathname === "/api/v1/governance/evaluate")
+        .map(request => request.body.event_type)
+    ).toContain("WorkflowCompleted");
   });
 });
