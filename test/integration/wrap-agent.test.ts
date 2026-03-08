@@ -382,6 +382,198 @@ describe("wrapAgent", () => {
     expect(parsedResponse.usage?.output_tokens).toBe(4);
   });
 
+  it("emits synthetic usage span when usage is present but modelId is missing", async () => {
+    const server = await startOpenBoxServer({
+      evaluate() {
+        return { verdict: "allow" };
+      }
+    });
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_agent",
+      apiUrl: server.url,
+      validate: false
+    });
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+    const spanProcessor = new OpenBoxSpanProcessor();
+    const telemetry = setupOpenBoxOpenTelemetry({
+      captureHttpBodies: false,
+      instrumentDatabases: false,
+      instrumentFileIo: false,
+      spanProcessor
+    });
+    const fakeAgent = wrapAgent(
+      {
+        id: "telemetry-agent-no-model",
+        name: "Telemetry Agent No Model",
+        async generate(
+          _messages?: unknown,
+          _executionOptions?: Record<string, unknown>
+        ) {
+          return trace
+            .getTracer("openbox.test")
+            .startActiveSpan(
+              "agent.openai.call",
+              {
+                attributes: {
+                  "http.method": "POST",
+                  "http.url": "https://api.openai.com/v1/responses"
+                }
+              },
+              async span => {
+                span.end();
+
+                return {
+                  finishReason: "stop",
+                  text: "ok",
+                  usage: {
+                    inputTokens: 8,
+                    outputTokens: 3,
+                    totalTokens: 11
+                  }
+                };
+              }
+            );
+        }
+      },
+      {
+        client,
+        config,
+        spanProcessor
+      }
+    );
+
+    await fakeAgent.generate("hello", {
+      runId: "agent-telemetry-no-model-run"
+    });
+
+    await telemetry.shutdown();
+    await server.close();
+
+    const completedEvent = server.requests
+      .filter(request => request.pathname === "/api/v1/governance/evaluate")
+      .map(request => request.body)
+      .find(body => body.event_type === "WorkflowCompleted");
+
+    const spans = (completedEvent as { spans?: Array<Record<string, unknown>> }).spans ?? [];
+    const syntheticUsageSpan = spans.find(span => {
+      const attributes =
+        span.attributes && typeof span.attributes === "object"
+          ? (span.attributes as Record<string, unknown>)
+          : undefined;
+      return (
+        attributes?.["http.url"] === "https://api.openai.com/v1/responses" &&
+        span.name === "openbox.synthetic.model_usage"
+      );
+    });
+    expect(syntheticUsageSpan).toBeDefined();
+    const responseBody = (syntheticUsageSpan as { response_body?: unknown })
+      .response_body;
+    const parsedResponse = JSON.parse(responseBody as string) as {
+      model?: string;
+      usage?: {
+        input_tokens?: number;
+        output_tokens?: number;
+      };
+    };
+    expect(parsedResponse.model).toBe("unknown-model");
+    expect(parsedResponse.usage?.input_tokens).toBe(8);
+    expect(parsedResponse.usage?.output_tokens).toBe(3);
+  });
+
+  it("emits synthetic usage span from provider metadata when model spans are missing", async () => {
+    const server = await startOpenBoxServer({
+      evaluate() {
+        return { verdict: "allow" };
+      }
+    });
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_agent",
+      apiUrl: server.url,
+      validate: false
+    });
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+    const spanProcessor = new OpenBoxSpanProcessor();
+    const fakeAgent = wrapAgent(
+      {
+        id: "telemetry-agent-provider-metadata",
+        name: "Telemetry Agent Provider Metadata",
+        async generate(
+          _messages?: unknown,
+          _executionOptions?: Record<string, unknown>
+        ) {
+          return {
+            finishReason: "stop",
+            text: "ok",
+            toolCalls: [
+              {
+                payload: {
+                  providerMetadata: {
+                    openai: {
+                      itemId: "fc_test"
+                    }
+                  }
+                }
+              }
+            ],
+            usage: {
+              inputTokens: 12,
+              outputTokens: 6,
+              totalTokens: 18
+            }
+          };
+        }
+      },
+      {
+        client,
+        config,
+        spanProcessor
+      }
+    );
+
+    await fakeAgent.generate("hello", {
+      runId: "agent-telemetry-provider-metadata-run"
+    });
+
+    await server.close();
+
+    const completedEvent = server.requests
+      .filter(request => request.pathname === "/api/v1/governance/evaluate")
+      .map(request => request.body)
+      .find(body => body.event_type === "WorkflowCompleted");
+    const spans = (completedEvent as { spans?: Array<Record<string, unknown>> }).spans ?? [];
+    const syntheticUsageSpan = spans.find(span => {
+      const attributes =
+        span.attributes && typeof span.attributes === "object"
+          ? (span.attributes as Record<string, unknown>)
+          : undefined;
+      return attributes?.["http.url"] === "https://api.openai.com/v1/responses";
+    });
+
+    expect(syntheticUsageSpan).toBeDefined();
+    const responseBody = (syntheticUsageSpan as { response_body?: unknown })
+      .response_body;
+    const parsedResponse = JSON.parse(responseBody as string) as {
+      model?: string;
+      usage?: {
+        input_tokens?: number;
+        output_tokens?: number;
+      };
+    };
+    expect(parsedResponse.model).toBe("unknown-model");
+    expect(parsedResponse.usage?.input_tokens).toBe(12);
+    expect(parsedResponse.usage?.output_tokens).toBe(6);
+  });
+
   it("falls back to minimal workflow completion payload when telemetry schema is rejected", async () => {
     let workflowCompletedAttempts = 0;
     const server = await startOpenBoxServer({

@@ -718,7 +718,8 @@ function extractModelInfo(output: unknown): {
   const providerCandidates = [
     modelMetadata?.provider,
     response?.provider,
-    record.provider
+    record.provider,
+    extractProviderHint(record)
   ];
 
   let modelId: string | undefined;
@@ -744,6 +745,106 @@ function extractModelInfo(output: unknown): {
   };
 }
 
+function extractProviderHint(
+  outputRecord: Record<string, unknown>
+): string | undefined {
+  const directProvider = inferProviderFromMetadata(outputRecord.providerMetadata);
+
+  if (directProvider) {
+    return directProvider;
+  }
+
+  const toolCallsProvider = inferProviderFromToolCalls(outputRecord.toolCalls);
+
+  if (toolCallsProvider) {
+    return toolCallsProvider;
+  }
+
+  const steps = Array.isArray(outputRecord.steps)
+    ? outputRecord.steps
+    : undefined;
+
+  if (!steps) {
+    return undefined;
+  }
+
+  for (const step of steps) {
+    if (!step || typeof step !== "object") {
+      continue;
+    }
+
+    const stepRecord = step as Record<string, unknown>;
+    const stepProvider = inferProviderFromMetadata(stepRecord.providerMetadata);
+
+    if (stepProvider) {
+      return stepProvider;
+    }
+
+    const stepToolProvider = inferProviderFromToolCalls(stepRecord.toolCalls);
+
+    if (stepToolProvider) {
+      return stepToolProvider;
+    }
+  }
+
+  return undefined;
+}
+
+function inferProviderFromToolCalls(toolCalls: unknown): string | undefined {
+  if (!Array.isArray(toolCalls)) {
+    return undefined;
+  }
+
+  for (const entry of toolCalls) {
+    if (!entry || typeof entry !== "object") {
+      continue;
+    }
+
+    const entryRecord = entry as Record<string, unknown>;
+    const directProvider = inferProviderFromMetadata(entryRecord.providerMetadata);
+
+    if (directProvider) {
+      return directProvider;
+    }
+
+    const payload =
+      entryRecord.payload && typeof entryRecord.payload === "object"
+        ? (entryRecord.payload as Record<string, unknown>)
+        : undefined;
+    const payloadProvider = inferProviderFromMetadata(payload?.providerMetadata);
+
+    if (payloadProvider) {
+      return payloadProvider;
+    }
+  }
+
+  return undefined;
+}
+
+function inferProviderFromMetadata(metadata: unknown): string | undefined {
+  if (!metadata || typeof metadata !== "object") {
+    return undefined;
+  }
+
+  const keys = Object.keys(metadata as Record<string, unknown>).map(key =>
+    key.toLowerCase()
+  );
+
+  if (keys.includes("openai")) {
+    return "openai";
+  }
+
+  if (keys.includes("anthropic")) {
+    return "anthropic";
+  }
+
+  if (keys.includes("google") || keys.includes("gemini")) {
+    return "google";
+  }
+
+  return undefined;
+}
+
 function buildWorkflowTelemetrySpans(
   spans: Array<Record<string, unknown>>,
   modelInfo: {
@@ -757,10 +858,6 @@ function buildWorkflowTelemetrySpans(
   },
   endTimeMs: number
 ): Array<Record<string, unknown>> {
-  if (!modelInfo.modelId) {
-    return spans;
-  }
-
   const inputTokens = usage.inputTokens ?? 0;
   const outputTokens = usage.outputTokens ?? 0;
 
@@ -772,11 +869,12 @@ function buildWorkflowTelemetrySpans(
     return spans;
   }
 
-  const providerUrl = resolveProviderUrl(modelInfo);
+  const providerUrl = resolveProviderUrl(modelInfo, spans);
 
   if (!providerUrl) {
     return spans;
   }
+  const modelId = resolveSyntheticModelId(modelInfo, spans);
 
   const traceId = getTraceIdCandidate(spans);
 
@@ -785,7 +883,7 @@ function buildWorkflowTelemetrySpans(
     createSyntheticModelUsageSpan({
       endTimeMs,
       inputTokens,
-      modelId: modelInfo.modelId,
+      modelId,
       outputTokens,
       providerUrl,
       ...(traceId ? { traceId } : {})
@@ -903,7 +1001,7 @@ function createSyntheticModelUsageSpan({
 function resolveProviderUrl(modelInfo: {
   modelId?: string;
   provider?: string;
-}): string | undefined {
+}, spans: Array<Record<string, unknown>>): string | undefined {
   const provider = modelInfo.provider?.toLowerCase();
   const modelId = modelInfo.modelId?.toLowerCase();
 
@@ -917,6 +1015,31 @@ function resolveProviderUrl(modelInfo: {
 
   if (provider?.includes("google") || provider?.includes("gemini")) {
     return "https://generativelanguage.googleapis.com/v1beta/models";
+  }
+
+  for (const span of spans) {
+    const attributes =
+      span.attributes && typeof span.attributes === "object"
+        ? (span.attributes as Record<string, unknown>)
+        : {};
+    const rawUrl = attributes["http.url"] ?? attributes["url.full"];
+    const url = typeof rawUrl === "string" ? rawUrl : undefined;
+
+    if (!url) {
+      continue;
+    }
+
+    if (url.includes("api.openai.com")) {
+      return "https://api.openai.com/v1/responses";
+    }
+
+    if (url.includes("api.anthropic.com")) {
+      return "https://api.anthropic.com/v1/messages";
+    }
+
+    if (url.includes("generativelanguage.googleapis.com")) {
+      return "https://generativelanguage.googleapis.com/v1beta/models";
+    }
   }
 
   if (!modelId) {
@@ -940,6 +1063,39 @@ function resolveProviderUrl(modelInfo: {
   }
 
   return undefined;
+}
+
+function resolveSyntheticModelId(
+  modelInfo: {
+    modelId?: string;
+  },
+  spans: Array<Record<string, unknown>>
+): string {
+  if (modelInfo.modelId) {
+    return modelInfo.modelId;
+  }
+
+  for (const span of spans) {
+    const requestBody = getStringField(span, "request_body", "requestBody");
+
+    if (!requestBody) {
+      continue;
+    }
+
+    try {
+      const parsed = JSON.parse(requestBody) as {
+        model?: unknown;
+      };
+
+      if (typeof parsed.model === "string" && parsed.model.trim().length > 0) {
+        return parsed.model;
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return "unknown-model";
 }
 
 function getTraceIdCandidate(
