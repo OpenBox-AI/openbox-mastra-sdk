@@ -465,6 +465,99 @@ describe("wrapAgent", () => {
     });
   });
 
+  it("falls back to a size-safe workflow completion payload when event blob is too large", async () => {
+    let workflowCompletedAttempts = 0;
+    const server = await startOpenBoxServer({
+      evaluate(body) {
+        if (body.event_type === "WorkflowCompleted") {
+          workflowCompletedAttempts += 1;
+
+          if (workflowCompletedAttempts === 1) {
+            return {
+              body: {
+                code: 500,
+                message:
+                  "failed to evaluate event: failed to start workflow: Blob data size exceeds limit."
+              },
+              statusCode: 500
+            };
+          }
+        }
+
+        return { verdict: "allow" };
+      }
+    });
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_agent",
+      apiUrl: server.url,
+      onApiError: "fail_closed",
+      validate: false
+    });
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+    const spanProcessor = new OpenBoxSpanProcessor();
+    const agent = wrapAgent(
+      {
+        id: "telemetry-size-fallback-agent",
+        name: "Telemetry Size Fallback Agent",
+        async generate(
+          _messages?: unknown,
+          _executionOptions?: Record<string, unknown>
+        ) {
+          return {
+            finishReason: "stop",
+            modelId: "gpt-4o-mini",
+            text: "x".repeat(200_000),
+            usage: {
+              inputTokens: 100,
+              outputTokens: 20,
+              totalTokens: 120
+            }
+          };
+        }
+      },
+      {
+        client,
+        config,
+        spanProcessor
+      }
+    );
+
+    await agent.generate("hello", {
+      runId: "agent-telemetry-size-fallback-run"
+    });
+
+    await server.close();
+
+    const completedRequests = server.requests
+      .filter(request => request.pathname === "/api/v1/governance/evaluate")
+      .map(request => request.body)
+      .filter(body => body.event_type === "WorkflowCompleted");
+
+    expect(workflowCompletedAttempts).toBe(2);
+    expect(completedRequests.length).toBe(2);
+    expect(completedRequests[1]).toMatchObject({
+      event_type: "WorkflowCompleted",
+      input_tokens: 100,
+      model_id: "gpt-4o-mini",
+      output_tokens: 20,
+      run_id: "agent-telemetry-size-fallback-run",
+      workflow_id: "agent:telemetry-size-fallback-agent",
+      workflow_type: "telemetry-size-fallback-agent"
+    });
+
+    const secondSpans = completedRequests[1]?.spans as
+      | Array<Record<string, unknown>>
+      | undefined;
+    expect(Array.isArray(secondSpans)).toBe(true);
+    expect(secondSpans?.length).toBe(1);
+    expect(secondSpans?.[0]?.name).toBe("openbox.synthetic.model_usage");
+  });
+
   it("emits workflow completion when stream is consumed without getFullOutput", async () => {
     const server = await startOpenBoxServer({
       evaluate() {

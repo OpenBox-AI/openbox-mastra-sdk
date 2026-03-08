@@ -416,7 +416,7 @@ async function finalizeAgentSuccess(
   if (options.config.skipWorkflowTypes.has(workflowType)) {
     return;
   }
-  const workflowOutput = serializeValue(output);
+  const workflowOutput = serializeWorkflowOutputForGovernance(output);
   const minimalPayload = {
     event_type: WorkflowEventType.WORKFLOW_COMPLETED,
     run_id: runId,
@@ -431,14 +431,86 @@ async function finalizeAgentSuccess(
     output,
     streamMeta
   );
+  const sizeSafePayload = buildWorkflowCompletedSizeSafePayload(
+    minimalPayload,
+    output,
+    streamMeta
+  );
 
-  const verdict = await evaluateAgentEvent(options, telemetryPayload, minimalPayload);
+  const verdict = await evaluateAgentEvent(
+    options,
+    telemetryPayload,
+    minimalPayload,
+    sizeSafePayload
+  );
 
   if (verdict && Verdict.shouldStop(verdict.verdict)) {
     throw new GovernanceHaltError(
       verdict.reason ?? "Agent blocked by governance"
     );
   }
+}
+
+function buildWorkflowCompletedSizeSafePayload(
+  basePayload: {
+    event_type: WorkflowEventType.WORKFLOW_COMPLETED;
+    run_id: string;
+    workflow_id: string;
+    workflow_output: unknown;
+    workflow_type: string;
+  },
+  output: unknown,
+  streamMeta?: AgentStreamMeta
+): Record<string, unknown> & { event_type: WorkflowEventType } {
+  const endTimeMs = Date.now();
+  const startTimeMs = streamMeta?.startTimeMs;
+  const durationMs =
+    typeof startTimeMs === "number" ? Math.max(0, endTimeMs - startTimeMs) : undefined;
+  const usage = extractUsageMetrics(output);
+  const modelInfo = extractModelInfo(output);
+  const syntheticSpans = buildWorkflowTelemetrySpans(
+    [],
+    modelInfo,
+    usage,
+    endTimeMs
+  );
+
+  const payload: Record<string, unknown> & {
+    event_type: WorkflowEventType.WORKFLOW_COMPLETED;
+  } = {
+    event_type: basePayload.event_type,
+    run_id: basePayload.run_id,
+    workflow_id: basePayload.workflow_id,
+    workflow_type: basePayload.workflow_type,
+    ...(typeof durationMs === "number" ? { duration_ms: durationMs } : {}),
+    ...(typeof startTimeMs === "number" ? { start_time: startTimeMs } : {}),
+    end_time: endTimeMs,
+    ...(typeof usage.inputTokens === "number"
+      ? { input_tokens: usage.inputTokens }
+      : {}),
+    ...(typeof usage.outputTokens === "number"
+      ? { output_tokens: usage.outputTokens }
+      : {}),
+    ...(typeof usage.totalTokens === "number"
+      ? { total_tokens: usage.totalTokens }
+      : {}),
+    ...(modelInfo.modelId ? { model_id: modelInfo.modelId } : {}),
+    ...(syntheticSpans.length > 0
+      ? {
+          span_count: syntheticSpans.length,
+          spans: syntheticSpans
+        }
+      : {
+          span_count: 0
+        })
+  };
+  const compactOutput = compactWorkflowOutput(basePayload.workflow_output);
+
+  if (compactOutput !== undefined) {
+    payload.workflow_output = compactOutput;
+  }
+
+  return payload;
 }
 
 function buildWorkflowCompletedTelemetryPayload(
@@ -548,6 +620,77 @@ function extractUsageRecord(value: unknown):
 
 function toNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function serializeWorkflowOutputForGovernance(output: unknown): unknown {
+  const serialized = serializeValue(output);
+  return compactWorkflowOutput(serialized) ?? {
+    summary: "Workflow output omitted by SDK compaction"
+  };
+}
+
+function compactWorkflowOutput(output: unknown): unknown {
+  if (output == null) {
+    return output;
+  }
+
+  if (typeof output === "string") {
+    return truncateString(output, 4_000);
+  }
+
+  if (typeof output !== "object") {
+    return output;
+  }
+
+  const record = output as Record<string, unknown>;
+  const usage = extractUsageMetrics(output);
+  const compact: Record<string, unknown> = {
+    ...(typeof record.finishReason === "string"
+      ? { finishReason: record.finishReason }
+      : {}),
+    ...(typeof record.status === "string" ? { status: record.status } : {}),
+    ...(typeof record.text === "string"
+      ? { text: truncateString(record.text, 4_000) }
+      : {}),
+    ...(typeof record.modelId === "string" ? { modelId: record.modelId } : {}),
+    ...(typeof usage.inputTokens === "number" ||
+    typeof usage.outputTokens === "number" ||
+    typeof usage.totalTokens === "number"
+      ? {
+          usage: {
+            ...(typeof usage.inputTokens === "number"
+              ? { inputTokens: usage.inputTokens }
+              : {}),
+            ...(typeof usage.outputTokens === "number"
+              ? { outputTokens: usage.outputTokens }
+              : {}),
+            ...(typeof usage.totalTokens === "number"
+              ? { totalTokens: usage.totalTokens }
+              : {})
+          }
+        }
+      : {})
+  };
+  const warnings = record.warnings;
+
+  if (Array.isArray(warnings) && warnings.length > 0) {
+    compact.warnings = warnings.slice(0, 3).map(warning => serializeValue(warning));
+  }
+
+  if (Object.keys(compact).length > 0) {
+    return compact;
+  }
+
+  const fallback = JSON.stringify(record);
+  return truncateString(fallback, 4_000);
+}
+
+function truncateString(value: string, maxChars: number): string {
+  if (value.length <= maxChars) {
+    return value;
+  }
+
+  return `${value.slice(0, Math.max(0, maxChars - 16))}...[truncated]`;
 }
 
 function extractModelInfo(output: unknown): {
@@ -880,7 +1023,8 @@ async function sendAgentFailure(
 async function evaluateAgentEvent(
   options: WrapToolOptions,
   payload: Record<string, unknown> & { event_type: WorkflowEventType },
-  fallbackPayload?: Record<string, unknown> & { event_type: WorkflowEventType }
+  fallbackPayload?: Record<string, unknown> & { event_type: WorkflowEventType },
+  sizeSafePayload?: Record<string, unknown> & { event_type: WorkflowEventType }
 ): Promise<GovernanceVerdictResponse | null> {
   try {
     const primaryResult = await options.client.evaluate({
@@ -889,15 +1033,31 @@ async function evaluateAgentEvent(
       ...payload
     });
 
-    if (primaryResult !== null || !fallbackPayload) {
+    if (primaryResult !== null) {
       return primaryResult;
     }
 
-    return await options.client.evaluate({
-      source: "workflow-telemetry",
-      timestamp: new Date().toISOString(),
-      ...fallbackPayload
-    });
+    if (fallbackPayload) {
+      const fallbackResult = await options.client.evaluate({
+        source: "workflow-telemetry",
+        timestamp: new Date().toISOString(),
+        ...fallbackPayload
+      });
+
+      if (fallbackResult !== null || !sizeSafePayload) {
+        return fallbackResult;
+      }
+    }
+
+    if (sizeSafePayload) {
+      return await options.client.evaluate({
+        source: "workflow-telemetry",
+        timestamp: new Date().toISOString(),
+        ...sizeSafePayload
+      });
+    }
+
+    return null;
   } catch (initialError) {
     let resolvedError: unknown = initialError;
 
@@ -910,6 +1070,18 @@ async function evaluateAgentEvent(
         });
       } catch (fallbackError) {
         resolvedError = fallbackError;
+      }
+    }
+
+    if (sizeSafePayload && isPayloadTooLargeError(resolvedError)) {
+      try {
+        return await options.client.evaluate({
+          source: "workflow-telemetry",
+          timestamp: new Date().toISOString(),
+          ...sizeSafePayload
+        });
+      } catch (sizeSafeError) {
+        resolvedError = sizeSafeError;
       }
     }
 
@@ -943,6 +1115,15 @@ function isBadRequestSchemaError(error: unknown): boolean {
   return (
     error instanceof GovernanceAPIError &&
     /HTTP 400/i.test(error.message)
+  );
+}
+
+function isPayloadTooLargeError(error: unknown): boolean {
+  return (
+    error instanceof GovernanceAPIError &&
+    /(blob data size exceeds limit|payload too large|request entity too large|message too large)/i.test(
+      error.message
+    )
   );
 }
 
