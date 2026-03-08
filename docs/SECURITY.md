@@ -8,6 +8,12 @@
 - System paths are skipped during file I/O instrumentation.
 - OpenBox governance payloads receive redacted inputs and outputs after guardrail processing.
 
+## Governance Payload Safety
+
+- Evaluate payloads can be bounded with `OPENBOX_MAX_EVALUATE_PAYLOAD_BYTES`.
+- `WorkflowCompleted` events degrade through compact and ultra-minimal payload tiers when large payloads are rejected.
+- The ultra-minimal tier drops spans and workflow output to reduce risk of oversized transport blobs.
+
 ## Transport Safety
 
 - `https://` is required for non-localhost OpenBox URLs.
@@ -18,6 +24,9 @@
 
 - `fail_open` allows execution when OpenBox is unavailable.
 - `fail_closed` converts OpenBox failures into halting governance behavior.
+- Transient evaluate errors can be retried with bounded backoff using:
+  - `OPENBOX_EVALUATE_MAX_RETRIES`
+  - `OPENBOX_EVALUATE_RETRY_BASE_DELAY_MS`
 
 Choose `fail_closed` for production systems where governance availability is mandatory.
 

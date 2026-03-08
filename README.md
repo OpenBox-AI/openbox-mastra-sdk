@@ -10,6 +10,10 @@
 - OpenTelemetry span buffering with HTTP, database, and opt-in file I/O capture
 - Workflow, activity, and resume event emission with skip filters and start-event toggles
 - Zero-code wiring with `withOpenBox()` plus manual wiring APIs
+- Production hardening for large sessions:
+  - bounded evaluate retries with backoff
+  - payload byte budgeting before evaluate
+  - multi-tier `WorkflowCompleted` fallback payloads
 
 ## Install
 
@@ -86,6 +90,9 @@ Supported config inputs:
 - `apiUrl` or `OPENBOX_URL`
 - `apiKey` or `OPENBOX_API_KEY`
 - `governanceTimeout`
+- `evaluateMaxRetries`
+- `evaluateRetryBaseDelayMs`
+- `maxEvaluatePayloadBytes`
 - `onApiError` as `fail_open` or `fail_closed`
 - `hitlEnabled`
 - `sendStartEvent`
@@ -97,6 +104,12 @@ Supported config inputs:
 - `instrumentDatabases`
 - `instrumentFileIo`
 - `validate`
+
+Environment variable equivalents:
+
+- `OPENBOX_EVALUATE_MAX_RETRIES`
+- `OPENBOX_EVALUATE_RETRY_BASE_DELAY_MS`
+- `OPENBOX_MAX_EVALUATE_PAYLOAD_BYTES`
 
 Security defaults:
 

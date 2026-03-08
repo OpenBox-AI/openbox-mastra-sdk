@@ -154,10 +154,12 @@ export async function executeGovernedActivity<TInput, TOutput>({
           .startActiveSpan(`activity.${descriptor.activityType}`, async activeSpan => {
             activeSpan.setAttribute("openbox.workflow_id", descriptor.workflowId);
             activeSpan.setAttribute("openbox.activity_id", descriptor.activityId);
+            activeSpan.setAttribute("openbox.run_id", descriptor.runId);
             dependencies.spanProcessor.registerTrace(
               activeSpan.spanContext().traceId,
               descriptor.workflowId,
-              descriptor.activityId
+              descriptor.activityId,
+              descriptor.runId
             );
 
             try {
@@ -173,7 +175,8 @@ export async function executeGovernedActivity<TInput, TOutput>({
         const spans = collectActivitySpans(
           dependencies.spanProcessor,
           descriptor.workflowId,
-          descriptor.activityId
+          descriptor.activityId,
+          descriptor.runId
         );
         const completedVerdict = await evaluateActivityEvent(dependencies, {
           activity_input: serializeActivityInputForEvent(inputForExecution),
@@ -486,7 +489,10 @@ function ensureSpanBuffer(
   },
   spanProcessor: OpenBoxSpanProcessor
 ): void {
-  const existing = spanProcessor.getBuffer(descriptor.workflowId);
+  const existing = spanProcessor.getBuffer(
+    descriptor.workflowId,
+    descriptor.runId
+  );
 
   if (!existing || existing.runId !== descriptor.runId) {
     spanProcessor.registerWorkflow(
@@ -504,9 +510,10 @@ function ensureSpanBuffer(
 function collectActivitySpans(
   spanProcessor: OpenBoxSpanProcessor,
   workflowId: string,
-  activityId: string
+  activityId: string,
+  runId: string
 ): Record<string, unknown>[] {
-  const buffer = spanProcessor.getBuffer(workflowId);
+  const buffer = spanProcessor.getBuffer(workflowId, runId);
 
   if (!buffer) {
     return [];

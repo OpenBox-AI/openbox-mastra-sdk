@@ -12,11 +12,14 @@ export const API_KEY_PATTERN = /^obx_(live|test)_[a-zA-Z0-9_]+$/;
 export interface OpenBoxConfigInput {
   apiKey?: string | undefined;
   apiUrl?: string | undefined;
+  evaluateMaxRetries?: number | undefined;
+  evaluateRetryBaseDelayMs?: number | undefined;
   governanceTimeout?: number | undefined;
   hitlEnabled?: boolean | undefined;
   httpCapture?: boolean | undefined;
   instrumentDatabases?: boolean | undefined;
   instrumentFileIo?: boolean | undefined;
+  maxEvaluatePayloadBytes?: number | undefined;
   onApiError?: OpenBoxApiErrorPolicy | undefined;
   sendActivityStartEvent?: boolean | undefined;
   sendStartEvent?: boolean | undefined;
@@ -30,11 +33,14 @@ export interface OpenBoxConfigInput {
 export interface OpenBoxConfig {
   apiKey: string;
   apiUrl: string;
+  evaluateMaxRetries: number;
+  evaluateRetryBaseDelayMs: number;
   governanceTimeout: number;
   hitlEnabled: boolean;
   httpCapture: boolean;
   instrumentDatabases: boolean;
   instrumentFileIo: boolean;
+  maxEvaluatePayloadBytes: number;
   onApiError: OpenBoxApiErrorPolicy;
   sendActivityStartEvent: boolean;
   sendStartEvent: boolean;
@@ -50,11 +56,14 @@ const OPENBOX_CONFIG_SCHEMA = z.object({
     message: "Invalid API key format. Expected 'obx_live_*' or 'obx_test_*'."
   }),
   apiUrl: z.string().min(1),
+  evaluateMaxRetries: z.number().int().nonnegative().default(2),
+  evaluateRetryBaseDelayMs: z.number().int().nonnegative().default(150),
   governanceTimeout: z.number().nonnegative().default(30),
   hitlEnabled: z.boolean().default(true),
   httpCapture: z.boolean().default(true),
   instrumentDatabases: z.boolean().default(true),
   instrumentFileIo: z.boolean().default(false),
+  maxEvaluatePayloadBytes: z.number().int().positive().default(256_000),
   onApiError: z.enum(["fail_open", "fail_closed"]).default("fail_open"),
   sendActivityStartEvent: z.boolean().default(true),
   sendStartEvent: z.boolean().default(true),
@@ -110,6 +119,12 @@ export function parseOpenBoxConfig(
   const parsed = OPENBOX_CONFIG_SCHEMA.parse({
     apiKey,
     apiUrl: apiUrl.replace(/\/+$/, ""),
+    evaluateMaxRetries:
+      input.evaluateMaxRetries ??
+      parseInteger(env.OPENBOX_EVALUATE_MAX_RETRIES, 2),
+    evaluateRetryBaseDelayMs:
+      input.evaluateRetryBaseDelayMs ??
+      parseInteger(env.OPENBOX_EVALUATE_RETRY_BASE_DELAY_MS, 150),
     governanceTimeout:
       input.governanceTimeout ?? parseNumber(env.OPENBOX_GOVERNANCE_TIMEOUT, 30),
     hitlEnabled: input.hitlEnabled ?? parseBoolean(env.OPENBOX_HITL_ENABLED, true),
@@ -119,6 +134,9 @@ export function parseOpenBoxConfig(
       parseBoolean(env.OPENBOX_INSTRUMENT_DATABASES, true),
     instrumentFileIo:
       input.instrumentFileIo ?? parseBoolean(env.OPENBOX_INSTRUMENT_FILE_IO, false),
+    maxEvaluatePayloadBytes:
+      input.maxEvaluatePayloadBytes ??
+      parseInteger(env.OPENBOX_MAX_EVALUATE_PAYLOAD_BYTES, 256_000),
     onApiError:
       input.onApiError ??
       parsePolicy(env.OPENBOX_GOVERNANCE_POLICY, "fail_open"),
@@ -215,6 +233,20 @@ function parseNumber(value: string | undefined, defaultValue: number): number {
 
   if (Number.isNaN(parsed)) {
     throw new OpenBoxConfigError(`Invalid numeric value: ${value}`);
+  }
+
+  return parsed;
+}
+
+function parseInteger(value: string | undefined, defaultValue: number): number {
+  if (!value) {
+    return defaultValue;
+  }
+
+  const parsed = Number(value);
+
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed)) {
+    throw new OpenBoxConfigError(`Invalid integer value: ${value}`);
   }
 
   return parsed;

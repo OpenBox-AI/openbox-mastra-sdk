@@ -10,6 +10,8 @@ export type OpenBoxApiErrorPolicy = "fail_open" | "fail_closed";
 export interface OpenBoxClientOptions {
   apiKey: string;
   apiUrl: string;
+  evaluateMaxRetries?: number | undefined;
+  evaluateRetryBaseDelayMs?: number | undefined;
   fetch?: typeof fetch;
   onApiError?: OpenBoxApiErrorPolicy | undefined;
   timeoutSeconds?: number | undefined;
@@ -35,6 +37,8 @@ const USER_AGENT = "OpenBox-SDK/1.0";
 export class OpenBoxClient {
   public readonly apiKey: string;
   public readonly apiUrl: string;
+  public readonly evaluateMaxRetries: number;
+  public readonly evaluateRetryBaseDelayMs: number;
   public readonly onApiError: OpenBoxApiErrorPolicy;
   public readonly timeoutSeconds: number;
 
@@ -44,12 +48,16 @@ export class OpenBoxClient {
   public constructor({
     apiKey,
     apiUrl,
+    evaluateMaxRetries = 0,
+    evaluateRetryBaseDelayMs = 150,
     fetch: customFetch,
     onApiError = "fail_open",
     timeoutSeconds = 30
   }: OpenBoxClientOptions) {
     this.apiKey = apiKey;
     this.apiUrl = apiUrl.replace(/\/+$/, "");
+    this.evaluateMaxRetries = Math.max(0, Math.floor(evaluateMaxRetries));
+    this.evaluateRetryBaseDelayMs = Math.max(0, Math.floor(evaluateRetryBaseDelayMs));
     this.onApiError = onApiError;
     this.timeoutSeconds = timeoutSeconds;
     this.#fetch = customFetch ?? fetch;
@@ -98,56 +106,7 @@ export class OpenBoxClient {
   public async evaluate(
     payload: Record<string, unknown>
   ): Promise<GovernanceVerdictResponse | null> {
-    return this.#withApiPolicy(async () => {
-      if (this.#debugEnabled) {
-        console.info("[openbox-sdk] evaluate.request", summarizeEvaluatePayload(payload));
-      }
-
-      const response = await this.#fetch(
-        this.#buildUrl("/api/v1/governance/evaluate"),
-        {
-          body: JSON.stringify(payload),
-          headers: {
-            Authorization: `Bearer ${this.apiKey}`,
-            "Content-Type": "application/json",
-            "User-Agent": USER_AGENT
-          },
-          method: "POST",
-          signal: AbortSignal.timeout(this.timeoutSeconds * 1000)
-        }
-      );
-
-      if (response.status !== 200) {
-        const body = await response.text();
-
-        if (this.#debugEnabled) {
-          console.error("[openbox-sdk] evaluate.response", {
-            event_type: payload.event_type,
-            reason: body,
-            status: response.status
-          });
-        }
-
-        throw new GovernanceAPIError(
-          `HTTP ${response.status}: ${body}`
-        );
-      }
-
-      const parsed = (await response.json()) as Parameters<
-        typeof GovernanceVerdictResponse.fromObject
-      >[0];
-
-      if (this.#debugEnabled) {
-        console.info("[openbox-sdk] evaluate.response", {
-          action: parsed.action,
-          event_type: payload.event_type,
-          status: response.status,
-          verdict: parsed.verdict
-        });
-      }
-
-      return GovernanceVerdictResponse.fromObject(parsed);
-    });
+    return this.#withApiPolicy(async () => this.#evaluateWithRetry(payload));
   }
 
   public async pollApproval(
@@ -220,6 +179,95 @@ export class OpenBoxClient {
     return `${this.apiUrl}${pathname}`;
   }
 
+  async #evaluateWithRetry(
+    payload: Record<string, unknown>
+  ): Promise<GovernanceVerdictResponse> {
+    let attempt = 0;
+
+    while (true) {
+      try {
+        return await this.#evaluateOnce(payload);
+      } catch (error) {
+        if (
+          attempt >= this.evaluateMaxRetries ||
+          !isRetryableEvaluateError(error)
+        ) {
+          throw error;
+        }
+
+        const waitMs = this.evaluateRetryBaseDelayMs * 2 ** attempt;
+
+        if (this.#debugEnabled) {
+          console.warn("[openbox-sdk] evaluate.retry", {
+            attempt: attempt + 1,
+            error:
+              error instanceof Error ? error.message : String(error),
+            wait_ms: waitMs
+          });
+        }
+
+        attempt += 1;
+
+        if (waitMs > 0) {
+          await delay(waitMs);
+        }
+      }
+    }
+  }
+
+  async #evaluateOnce(
+    payload: Record<string, unknown>
+  ): Promise<GovernanceVerdictResponse> {
+    if (this.#debugEnabled) {
+      console.info("[openbox-sdk] evaluate.request", summarizeEvaluatePayload(payload));
+    }
+
+    const response = await this.#fetch(
+      this.#buildUrl("/api/v1/governance/evaluate"),
+      {
+        body: JSON.stringify(payload),
+        headers: {
+          Authorization: `Bearer ${this.apiKey}`,
+          "Content-Type": "application/json",
+          "User-Agent": USER_AGENT
+        },
+        method: "POST",
+        signal: AbortSignal.timeout(this.timeoutSeconds * 1000)
+      }
+    );
+
+    if (response.status !== 200) {
+      const body = await response.text();
+
+      if (this.#debugEnabled) {
+        console.error("[openbox-sdk] evaluate.response", {
+          event_type: payload.event_type,
+          reason: body,
+          status: response.status
+        });
+      }
+
+      throw new GovernanceAPIError(
+        `HTTP ${response.status}: ${body}`
+      );
+    }
+
+    const parsed = (await response.json()) as Parameters<
+      typeof GovernanceVerdictResponse.fromObject
+    >[0];
+
+    if (this.#debugEnabled) {
+      console.info("[openbox-sdk] evaluate.response", {
+        action: parsed.action,
+        event_type: payload.event_type,
+        status: response.status,
+        verdict: parsed.verdict
+      });
+    }
+
+    return GovernanceVerdictResponse.fromObject(parsed);
+  }
+
   async #withApiPolicy<T>(operation: () => Promise<T>): Promise<T | null> {
     try {
       return await operation();
@@ -266,6 +314,36 @@ function summarizeEvaluatePayload(
     workflow_id: payload.workflow_id,
     workflow_type: payload.workflow_type
   };
+}
+
+function isRetryableEvaluateError(error: unknown): boolean {
+  if (error instanceof GovernanceAPIError) {
+    if (/HTTP\s(429|5\d\d)\b/i.test(error.message)) {
+      return true;
+    }
+
+    return /(context deadline exceeded|temporarily unavailable|timeout|timed out|connection reset|econnreset|etimedout|upstream connect error)/i.test(
+      error.message
+    );
+  }
+
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  if (error.name === "AbortError") {
+    return true;
+  }
+
+  return /(fetch failed|network|econnreset|etimedout|connection reset)/i.test(
+    error.message
+  );
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => {
+    setTimeout(resolve, ms);
+  });
 }
 
 function parseApprovalExpiration(value: string): Date | null {

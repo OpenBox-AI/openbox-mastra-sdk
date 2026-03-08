@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Added evaluate retry/backoff controls in `OpenBoxClient` with transient error classification.
+- Added payload-budget controls (`maxEvaluatePayloadBytes`) for governance evaluate dispatch.
+- Added tiered `WorkflowCompleted` fallback payload strategy:
+  - full telemetry
+  - compact payload
+  - ultra-minimal payload
+- Added run-scoped span buffer isolation for concurrent runs sharing a workflow id.
+- Expanded unit, contract, and integration coverage for retries, fallback tiers, payload budgeting, and concurrency isolation.
+
 ## 0.1.0
 
 - Added the initial ESM TypeScript SDK scaffold for Mastra.

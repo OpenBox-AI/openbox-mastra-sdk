@@ -90,10 +90,13 @@ type SpanLike = Pick<
 export class OpenBoxSpanProcessor implements SpanProcessor {
   readonly #bodyData = new Map<string, StoredSpanBody>();
   readonly #buffers = new Map<string, WorkflowSpanBuffer>();
+  readonly #activeWorkflowRunKey = new Map<string, string>();
   readonly #traceBodyData = new Map<string, StoredTraceBody[]>();
   readonly #ignoredUrlPrefixes: Set<string>;
   readonly #traceToActivity = new Map<string, string>();
+  readonly #traceToRunId = new Map<string, string>();
   readonly #traceToWorkflow = new Map<string, string>();
+  readonly #workflowRunKeys = new Map<string, Set<string>>();
   readonly #verdicts = new Map<string, StoredWorkflowVerdict>();
 
   public readonly fallbackProcessor?: OpenBoxSpanProcessorOptions["fallbackProcessor"];
@@ -107,36 +110,87 @@ export class OpenBoxSpanProcessor implements SpanProcessor {
   }
 
   public registerWorkflow(workflowId: string, buffer: WorkflowSpanBuffer): void {
-    this.#buffers.set(workflowId, buffer);
+    const runKey = toWorkflowRunKey(workflowId, buffer.runId);
+    this.#buffers.set(runKey, buffer);
+    this.#activeWorkflowRunKey.set(workflowId, runKey);
+    const existingKeys = this.#workflowRunKeys.get(workflowId) ?? new Set<string>();
+    existingKeys.add(runKey);
+    this.#workflowRunKeys.set(workflowId, existingKeys);
   }
 
   public registerTrace(
     traceId: number | string,
     workflowId: string,
-    activityId?: string
+    activityId?: string,
+    runId?: string
   ): void {
     const normalizedTraceId = normalizeHexId(traceId, 32);
 
     this.#traceToWorkflow.set(normalizedTraceId, workflowId);
+    if (runId) {
+      this.#traceToRunId.set(normalizedTraceId, runId);
+    }
 
     if (activityId) {
       this.#traceToActivity.set(normalizedTraceId, activityId);
     }
   }
 
-  public getBuffer(workflowId: string): WorkflowSpanBuffer | undefined {
-    return this.#buffers.get(workflowId);
+  public getBuffer(workflowId: string, runId?: string): WorkflowSpanBuffer | undefined {
+    if (runId) {
+      const scoped = this.#buffers.get(toWorkflowRunKey(workflowId, runId));
+
+      if (scoped) {
+        return scoped;
+      }
+    }
+
+    const activeKey = this.#activeWorkflowRunKey.get(workflowId);
+
+    if (!activeKey) {
+      return undefined;
+    }
+
+    return this.#buffers.get(activeKey);
   }
 
-  public removeBuffer(workflowId: string): WorkflowSpanBuffer | undefined {
-    const buffer = this.#buffers.get(workflowId);
-    this.#buffers.delete(workflowId);
+  public removeBuffer(workflowId: string, runId?: string): WorkflowSpanBuffer | undefined {
+    if (runId) {
+      return this.#removeRunScopedBuffer(workflowId, runId);
+    }
+
+    const activeKey = this.#activeWorkflowRunKey.get(workflowId);
+
+    if (!activeKey) {
+      return undefined;
+    }
+
+    const buffer = this.#buffers.get(activeKey);
+    this.#buffers.delete(activeKey);
+    this.#removeRunKey(workflowId, activeKey);
+    this.#updateActiveRunKey(workflowId);
 
     return buffer;
   }
 
-  public unregisterWorkflow(workflowId: string): void {
-    this.#buffers.delete(workflowId);
+  public unregisterWorkflow(workflowId: string, runId?: string): void {
+    if (runId) {
+      this.#removeRunScopedBuffer(workflowId, runId);
+      this.#verdicts.delete(toWorkflowRunKey(workflowId, runId));
+      return;
+    }
+
+    const runKeys = this.#workflowRunKeys.get(workflowId);
+
+    if (runKeys) {
+      for (const runKey of runKeys) {
+        this.#buffers.delete(runKey);
+        this.#verdicts.delete(runKey);
+      }
+    }
+
+    this.#workflowRunKeys.delete(workflowId);
+    this.#activeWorkflowRunKey.delete(workflowId);
     this.#verdicts.delete(workflowId);
   }
 
@@ -146,9 +200,14 @@ export class OpenBoxSpanProcessor implements SpanProcessor {
     reason?: string,
     runId?: string
   ): void {
-    this.#verdicts.set(workflowId, { reason, runId, verdict });
+    const verdictKey = runId
+      ? toWorkflowRunKey(workflowId, runId)
+      : (this.#activeWorkflowRunKey.get(workflowId) ?? workflowId);
+    this.#verdicts.set(verdictKey, { reason, runId, verdict });
 
-    const buffer = this.#buffers.get(workflowId);
+    const buffer = runId
+      ? this.getBuffer(workflowId, runId)
+      : this.getBuffer(workflowId);
 
     if (buffer) {
       buffer.verdict = verdict;
@@ -156,11 +215,36 @@ export class OpenBoxSpanProcessor implements SpanProcessor {
     }
   }
 
-  public getVerdict(workflowId: string): StoredWorkflowVerdict | undefined {
+  public getVerdict(workflowId: string, runId?: string): StoredWorkflowVerdict | undefined {
+    if (runId) {
+      return this.#verdicts.get(toWorkflowRunKey(workflowId, runId));
+    }
+
+    const activeKey = this.#activeWorkflowRunKey.get(workflowId);
+
+    if (activeKey) {
+      const scopedVerdict = this.#verdicts.get(activeKey);
+
+      if (scopedVerdict) {
+        return scopedVerdict;
+      }
+    }
+
     return this.#verdicts.get(workflowId);
   }
 
-  public clearVerdict(workflowId: string): void {
+  public clearVerdict(workflowId: string, runId?: string): void {
+    if (runId) {
+      this.#verdicts.delete(toWorkflowRunKey(workflowId, runId));
+      return;
+    }
+
+    const activeKey = this.#activeWorkflowRunKey.get(workflowId);
+
+    if (activeKey) {
+      this.#verdicts.delete(activeKey);
+    }
+
     this.#verdicts.delete(workflowId);
   }
 
@@ -215,12 +299,15 @@ export class OpenBoxSpanProcessor implements SpanProcessor {
     const workflowId =
       toStringAttribute(attributes["openbox.workflow_id"]) ??
       (traceId != null ? this.#traceToWorkflow.get(traceId) : undefined);
+    const runId =
+      toStringAttribute(attributes["openbox.run_id"]) ??
+      (traceId != null ? this.#traceToRunId.get(traceId) : undefined);
     const activityId =
       toStringAttribute(attributes["openbox.activity_id"]) ??
       (traceId != null ? this.#traceToActivity.get(traceId) : undefined);
 
     if (workflowId) {
-      const buffer = this.#buffers.get(workflowId);
+      const buffer = this.getBuffer(workflowId, runId);
 
       if (buffer) {
         const spanData = this.extractSpanData(span);
@@ -338,9 +425,14 @@ export class OpenBoxSpanProcessor implements SpanProcessor {
     const attributes = toRecord(span.attributes);
     const workflowId = toStringAttribute(attributes["openbox.workflow_id"]);
     const activityId = toStringAttribute(attributes["openbox.activity_id"]);
+    const runId = toStringAttribute(attributes["openbox.run_id"]);
 
     if (workflowId) {
       this.#traceToWorkflow.set(traceId, workflowId);
+    }
+
+    if (runId) {
+      this.#traceToRunId.set(traceId, runId);
     }
 
     if (activityId) {
@@ -403,7 +495,8 @@ export class OpenBoxSpanProcessor implements SpanProcessor {
       return false;
     }
 
-    const buffer = this.#buffers.get(workflowId);
+    const runId = this.#traceToRunId.get(traceId);
+    const buffer = this.getBuffer(workflowId, runId);
 
     if (!buffer || buffer.spans.length === 0) {
       return false;
@@ -452,9 +545,57 @@ export class OpenBoxSpanProcessor implements SpanProcessor {
 
     return false;
   }
+
+  #removeRunScopedBuffer(
+    workflowId: string,
+    runId: string
+  ): WorkflowSpanBuffer | undefined {
+    const runKey = toWorkflowRunKey(workflowId, runId);
+    const buffer = this.#buffers.get(runKey);
+    this.#buffers.delete(runKey);
+    this.#removeRunKey(workflowId, runKey);
+    this.#updateActiveRunKey(workflowId);
+
+    return buffer;
+  }
+
+  #removeRunKey(workflowId: string, runKey: string): void {
+    const runKeys = this.#workflowRunKeys.get(workflowId);
+
+    if (!runKeys) {
+      return;
+    }
+
+    runKeys.delete(runKey);
+
+    if (runKeys.size === 0) {
+      this.#workflowRunKeys.delete(workflowId);
+    }
+  }
+
+  #updateActiveRunKey(workflowId: string): void {
+    const runKeys = this.#workflowRunKeys.get(workflowId);
+
+    if (!runKeys || runKeys.size === 0) {
+      this.#activeWorkflowRunKey.delete(workflowId);
+      return;
+    }
+
+    const nextKey = Array.from(runKeys).at(-1);
+
+    if (nextKey) {
+      this.#activeWorkflowRunKey.set(workflowId, nextKey);
+    } else {
+      this.#activeWorkflowRunKey.delete(workflowId);
+    }
+  }
 }
 
 export const WorkflowSpanProcessor = OpenBoxSpanProcessor;
+
+function toWorkflowRunKey(workflowId: string, runId: string): string {
+  return `${workflowId}::${runId}`;
+}
 
 function formatHex(value: number, width: number): string {
   return value.toString(16).padStart(width, "0");

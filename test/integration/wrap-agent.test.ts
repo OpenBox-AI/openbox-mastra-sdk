@@ -574,7 +574,7 @@ describe("wrapAgent", () => {
     expect(parsedResponse.usage?.output_tokens).toBe(6);
   });
 
-  it("falls back to minimal workflow completion payload when telemetry schema is rejected", async () => {
+  it("falls back to compact workflow completion payload when telemetry schema is rejected", async () => {
     let workflowCompletedAttempts = 0;
     const server = await startOpenBoxServer({
       evaluate(body) {
@@ -647,14 +647,21 @@ describe("wrapAgent", () => {
 
     expect(completedRequests.length).toBe(2);
     expect(workflowCompletedAttempts).toBe(2);
-    expect(completedRequests[1]).not.toHaveProperty("input_tokens");
-    expect(completedRequests[1]).not.toHaveProperty("model_id");
     expect(completedRequests[1]).toMatchObject({
       event_type: "WorkflowCompleted",
+      input_tokens: 1,
+      model_id: "gpt-4o-mini",
+      output_tokens: 1,
       run_id: "agent-telemetry-fallback-run",
       workflow_id: "agent:telemetry-fallback-agent",
       workflow_type: "telemetry-fallback-agent"
     });
+    const fallbackSpans = completedRequests[1]?.spans as
+      | Array<Record<string, unknown>>
+      | undefined;
+    expect(Array.isArray(fallbackSpans)).toBe(true);
+    expect(fallbackSpans?.length).toBe(1);
+    expect(fallbackSpans?.[0]?.name).toBe("openbox.synthetic.model_usage");
   });
 
   it("falls back to a size-safe workflow completion payload when event blob is too large", async () => {
@@ -748,6 +755,283 @@ describe("wrapAgent", () => {
     expect(Array.isArray(secondSpans)).toBe(true);
     expect(secondSpans?.length).toBe(1);
     expect(secondSpans?.[0]?.name).toBe("openbox.synthetic.model_usage");
+  });
+
+  it("falls back to an ultra-minimal workflow completion payload after compact fallback timeout", async () => {
+    let workflowCompletedAttempts = 0;
+    const server = await startOpenBoxServer({
+      evaluate(body) {
+        if (body.event_type === "WorkflowCompleted") {
+          workflowCompletedAttempts += 1;
+
+          if (workflowCompletedAttempts === 1) {
+            return {
+              body: {
+                code: 500,
+                message:
+                  "failed to evaluate event: failed to start workflow: Blob data size exceeds limit."
+              },
+              statusCode: 500
+            };
+          }
+
+          if (workflowCompletedAttempts === 2) {
+            return {
+              body: {
+                code: 500,
+                message:
+                  "failed to evaluate event: failed to start workflow: context deadline exceeded"
+              },
+              statusCode: 500
+            };
+          }
+        }
+
+        return { verdict: "allow" };
+      }
+    });
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_agent",
+      apiUrl: server.url,
+      onApiError: "fail_closed",
+      validate: false
+    });
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+    const spanProcessor = new OpenBoxSpanProcessor();
+    const agent = wrapAgent(
+      {
+        id: "telemetry-ultra-minimal-fallback-agent",
+        name: "Telemetry Ultra Minimal Fallback Agent",
+        async generate(
+          _messages?: unknown,
+          _executionOptions?: Record<string, unknown>
+        ) {
+          return {
+            finishReason: "stop",
+            modelId: "gpt-4o-mini",
+            text: "x".repeat(200_000),
+            usage: {
+              inputTokens: 200,
+              outputTokens: 40,
+              totalTokens: 240
+            }
+          };
+        }
+      },
+      {
+        client,
+        config,
+        spanProcessor
+      }
+    );
+
+    await expect(
+      agent.generate("hello", {
+        runId: "agent-ultra-minimal-fallback-run"
+      })
+    ).resolves.toMatchObject({
+      finishReason: "stop"
+    });
+
+    await server.close();
+
+    const completedRequests = server.requests
+      .filter(request => request.pathname === "/api/v1/governance/evaluate")
+      .map(request => request.body)
+      .filter(body => body.event_type === "WorkflowCompleted");
+
+    expect(workflowCompletedAttempts).toBe(3);
+    expect(completedRequests.length).toBe(3);
+    expect(completedRequests[2]).toMatchObject({
+      event_type: "WorkflowCompleted",
+      input_tokens: 200,
+      output_tokens: 40,
+      run_id: "agent-ultra-minimal-fallback-run",
+      workflow_id: "agent:telemetry-ultra-minimal-fallback-agent",
+      workflow_type: "telemetry-ultra-minimal-fallback-agent"
+    });
+    expect(completedRequests[2]).not.toHaveProperty("spans");
+    expect(completedRequests[2]).not.toHaveProperty("workflow_output");
+  });
+
+  it("skips oversized completion payload tiers using byte budget preflight", async () => {
+    const server = await startOpenBoxServer({
+      evaluate() {
+        return { verdict: "allow" };
+      }
+    });
+    const config = parseOpenBoxConfig(
+      {
+        apiKey: "obx_test_agent",
+        apiUrl: server.url,
+        validate: false
+      },
+      {
+        OPENBOX_MAX_EVALUATE_PAYLOAD_BYTES: "300"
+      } as NodeJS.ProcessEnv
+    );
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+    const spanProcessor = new OpenBoxSpanProcessor();
+    const agent = wrapAgent(
+      {
+        id: "telemetry-byte-budget-agent",
+        name: "Telemetry Byte Budget Agent",
+        async generate(
+          _messages?: unknown,
+          _executionOptions?: Record<string, unknown>
+        ) {
+          return {
+            finishReason: "stop",
+            modelId: "gpt-4o-mini",
+            text: "x".repeat(50_000),
+            usage: {
+              inputTokens: 50,
+              outputTokens: 10,
+              totalTokens: 60
+            }
+          };
+        }
+      },
+      {
+        client,
+        config,
+        spanProcessor
+      }
+    );
+
+    await agent.generate("hello", {
+      runId: "agent-byte-budget-run"
+    });
+
+    await server.close();
+
+    const completedRequests = server.requests
+      .filter(request => request.pathname === "/api/v1/governance/evaluate")
+      .map(request => request.body)
+      .filter(body => body.event_type === "WorkflowCompleted");
+
+    expect(completedRequests.length).toBe(1);
+    expect(completedRequests[0]).toMatchObject({
+      event_type: "WorkflowCompleted",
+      input_tokens: 50,
+      output_tokens: 10,
+      run_id: "agent-byte-budget-run",
+      workflow_id: "agent:telemetry-byte-budget-agent",
+      workflow_type: "telemetry-byte-budget-agent"
+    });
+    expect(completedRequests[0]).not.toHaveProperty("spans");
+    expect(completedRequests[0]).not.toHaveProperty("workflow_output");
+  });
+
+  it("isolates completion spans by run id for concurrent agent runs", async () => {
+    const server = await startOpenBoxServer({
+      evaluate() {
+        return { verdict: "allow" };
+      }
+    });
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_agent",
+      apiUrl: server.url,
+      validate: false
+    });
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+    const spanProcessor = new OpenBoxSpanProcessor();
+    const telemetry = setupOpenBoxOpenTelemetry({
+      captureHttpBodies: false,
+      instrumentDatabases: false,
+      instrumentFileIo: false,
+      spanProcessor
+    });
+    const fakeAgent = wrapAgent(
+      {
+        id: "concurrent-span-agent",
+        name: "Concurrent Span Agent",
+        async generate(
+          _messages?: unknown,
+          executionOptions?: Record<string, unknown>
+        ) {
+          const candidateRunId = executionOptions?.runId;
+          const runId =
+            typeof candidateRunId === "string" && candidateRunId.length > 0
+              ? candidateRunId
+              : "unknown-run";
+
+          return trace
+            .getTracer("openbox.test")
+            .startActiveSpan(`agent.run.${runId}`, async span => {
+              if (runId === "run-a") {
+                await new Promise(resolve => setTimeout(resolve, 25));
+              } else {
+                await new Promise(resolve => setTimeout(resolve, 5));
+              }
+
+              span.end();
+
+              return {
+                finishReason: "stop",
+                modelId: "gpt-4o-mini",
+                text: runId,
+                usage: {
+                  inputTokens: 5,
+                  outputTokens: 2,
+                  totalTokens: 7
+                }
+              };
+            });
+        }
+      },
+      {
+        client,
+        config,
+        spanProcessor
+      }
+    );
+
+    await Promise.all([
+      fakeAgent.generate("hello", {
+        runId: "run-a"
+      }),
+      fakeAgent.generate("hello", {
+        runId: "run-b"
+      })
+    ]);
+
+    await telemetry.shutdown();
+    await server.close();
+
+    const completedRequests = server.requests
+      .filter(request => request.pathname === "/api/v1/governance/evaluate")
+      .map(request => request.body)
+      .filter(body => body.event_type === "WorkflowCompleted");
+
+    const runAEvent = completedRequests.find(body => body.run_id === "run-a") as
+      | { spans?: Array<Record<string, unknown>> }
+      | undefined;
+    const runBEvent = completedRequests.find(body => body.run_id === "run-b") as
+      | { spans?: Array<Record<string, unknown>> }
+      | undefined;
+
+    expect(runAEvent).toBeDefined();
+    expect(runBEvent).toBeDefined();
+    expect(runAEvent?.spans?.some(span => span.name === "agent.run.run-a")).toBe(true);
+    expect(runAEvent?.spans?.some(span => span.name === "agent.run.run-b")).toBe(false);
+    expect(runBEvent?.spans?.some(span => span.name === "agent.run.run-b")).toBe(true);
+    expect(runBEvent?.spans?.some(span => span.name === "agent.run.run-a")).toBe(false);
   });
 
   it("emits workflow completion when stream is consumed without getFullOutput", async () => {

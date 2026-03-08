@@ -46,6 +46,8 @@ await runtime?.shutdown();
 const client = new OpenBoxClient({
   apiKey,
   apiUrl,
+  evaluateMaxRetries: 2,
+  evaluateRetryBaseDelayMs: 200,
   fetch: customFetch,
   onApiError: "fail_closed",
   timeoutSeconds: 30
@@ -58,6 +60,22 @@ await withOpenBox(mastra, {
   validate: false
 });
 ```
+
+## Production Hardening Controls
+
+The SDK supports explicit controls for reliability under large or bursty workloads:
+
+- `maxEvaluatePayloadBytes` / `OPENBOX_MAX_EVALUATE_PAYLOAD_BYTES`
+- `evaluateMaxRetries` / `OPENBOX_EVALUATE_MAX_RETRIES`
+- `evaluateRetryBaseDelayMs` / `OPENBOX_EVALUATE_RETRY_BASE_DELAY_MS`
+
+`WorkflowCompleted` evaluate uses a tiered payload strategy:
+
+1. Full telemetry payload
+2. Compact payload (truncated output + synthetic model usage span)
+3. Ultra-minimal payload (no spans, no workflow output, keep core identifiers and usage fields)
+
+The payload preflight budget skips oversized tiers automatically and only sends payloads under budget, except the final ultra-minimal tier which is always attempted.
 
 ## Telemetry Controls
 

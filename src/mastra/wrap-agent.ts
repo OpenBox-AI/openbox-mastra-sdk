@@ -269,10 +269,12 @@ async function executeAgentLifecycle<T>({
           .startActiveSpan(`agent.${phase}.${workflowType}`, async activeSpan => {
             activeSpan.setAttribute("openbox.workflow_id", workflowId);
             activeSpan.setAttribute("openbox.activity_id", `agent:${workflowType}:${phase}`);
+            activeSpan.setAttribute("openbox.run_id", runId);
             options.spanProcessor.registerTrace(
               activeSpan.spanContext().traceId,
               workflowId,
-              `agent:${workflowType}:${phase}`
+              `agent:${workflowType}:${phase}`,
+              runId
             );
 
             try {
@@ -416,23 +418,32 @@ async function finalizeAgentSuccess(
   if (options.config.skipWorkflowTypes.has(workflowType)) {
     return;
   }
-  const workflowOutput = serializeWorkflowOutputForGovernance(output);
-  const minimalPayload = {
+  const basePayload = {
     event_type: WorkflowEventType.WORKFLOW_COMPLETED,
     run_id: runId,
     workflow_id: workflowId,
-    workflow_output: workflowOutput,
     workflow_type: workflowType
   } as const;
+  const workflowOutput = serializeWorkflowOutputForGovernance(output);
   const telemetryPayload = buildWorkflowCompletedTelemetryPayload(
     options,
     workflowId,
-    minimalPayload,
+    runId,
+    {
+      ...basePayload,
+      workflow_output: workflowOutput
+    },
     output,
     streamMeta
   );
-  const sizeSafePayload = buildWorkflowCompletedSizeSafePayload(
-    minimalPayload,
+  const compactPayload = buildWorkflowCompletedCompactPayload(
+    basePayload,
+    workflowOutput,
+    output,
+    streamMeta
+  );
+  const ultraMinimalPayload = buildWorkflowCompletedUltraMinimalPayload(
+    basePayload,
     output,
     streamMeta
   );
@@ -440,8 +451,8 @@ async function finalizeAgentSuccess(
   const verdict = await evaluateAgentEvent(
     options,
     telemetryPayload,
-    minimalPayload,
-    sizeSafePayload
+    compactPayload,
+    ultraMinimalPayload
   );
 
   if (verdict && Verdict.shouldStop(verdict.verdict)) {
@@ -451,14 +462,14 @@ async function finalizeAgentSuccess(
   }
 }
 
-function buildWorkflowCompletedSizeSafePayload(
+function buildWorkflowCompletedCompactPayload(
   basePayload: {
     event_type: WorkflowEventType.WORKFLOW_COMPLETED;
     run_id: string;
     workflow_id: string;
-    workflow_output: unknown;
     workflow_type: string;
   },
+  workflowOutput: unknown,
   output: unknown,
   streamMeta?: AgentStreamMeta
 ): Record<string, unknown> & { event_type: WorkflowEventType } {
@@ -504,7 +515,7 @@ function buildWorkflowCompletedSizeSafePayload(
           span_count: 0
         })
   };
-  const compactOutput = compactWorkflowOutput(basePayload.workflow_output);
+  const compactOutput = compactWorkflowOutput(workflowOutput);
 
   if (compactOutput !== undefined) {
     payload.workflow_output = compactOutput;
@@ -513,9 +524,45 @@ function buildWorkflowCompletedSizeSafePayload(
   return payload;
 }
 
+function buildWorkflowCompletedUltraMinimalPayload(
+  basePayload: {
+    event_type: WorkflowEventType.WORKFLOW_COMPLETED;
+    run_id: string;
+    workflow_id: string;
+    workflow_type: string;
+  },
+  output: unknown,
+  streamMeta?: AgentStreamMeta
+): Record<string, unknown> & { event_type: WorkflowEventType } {
+  const endTimeMs = Date.now();
+  const startTimeMs = streamMeta?.startTimeMs;
+  const durationMs =
+    typeof startTimeMs === "number" ? Math.max(0, endTimeMs - startTimeMs) : undefined;
+  const usage = extractUsageMetrics(output);
+  const modelInfo = extractModelInfo(output);
+
+  return {
+    ...basePayload,
+    ...(typeof durationMs === "number" ? { duration_ms: durationMs } : {}),
+    ...(typeof startTimeMs === "number" ? { start_time: startTimeMs } : {}),
+    end_time: endTimeMs,
+    ...(typeof usage.inputTokens === "number"
+      ? { input_tokens: usage.inputTokens }
+      : {}),
+    ...(typeof usage.outputTokens === "number"
+      ? { output_tokens: usage.outputTokens }
+      : {}),
+    ...(typeof usage.totalTokens === "number"
+      ? { total_tokens: usage.totalTokens }
+      : {}),
+    ...(modelInfo.modelId ? { model_id: modelInfo.modelId } : {})
+  };
+}
+
 function buildWorkflowCompletedTelemetryPayload(
   options: WrapToolOptions,
   workflowId: string,
+  runId: string,
   basePayload: {
     event_type: WorkflowEventType.WORKFLOW_COMPLETED;
     run_id: string;
@@ -533,7 +580,9 @@ function buildWorkflowCompletedTelemetryPayload(
   const usage = extractUsageMetrics(output);
   const modelInfo = extractModelInfo(output);
   const spans = buildWorkflowTelemetrySpans(
-    normalizeSpansForGovernance(options.spanProcessor.getBuffer(workflowId)?.spans ?? []),
+    normalizeSpansForGovernance(
+      options.spanProcessor.getBuffer(workflowId, runId)?.spans ?? []
+    ),
     modelInfo,
     usage,
     endTimeMs
@@ -1180,91 +1229,76 @@ async function evaluateAgentEvent(
   options: WrapToolOptions,
   payload: Record<string, unknown> & { event_type: WorkflowEventType },
   fallbackPayload?: Record<string, unknown> & { event_type: WorkflowEventType },
-  sizeSafePayload?: Record<string, unknown> & { event_type: WorkflowEventType }
+  minimalPayload?: Record<string, unknown> & { event_type: WorkflowEventType }
 ): Promise<GovernanceVerdictResponse | null> {
-  try {
-    const primaryResult = await options.client.evaluate({
-      source: "workflow-telemetry",
-      timestamp: new Date().toISOString(),
-      ...payload
-    });
+  const candidates = buildCandidatePayloads(
+    payload,
+    fallbackPayload,
+    minimalPayload
+  ).filter((candidate, index, all) => {
+    const isLast = index === all.length - 1;
+    return !isPayloadOverBudget(
+      candidate.payload,
+      options.config.maxEvaluatePayloadBytes,
+      isLast
+    );
+  });
+  let resolvedError: unknown = null;
 
-    if (primaryResult !== null) {
-      return primaryResult;
+  for (let index = 0; index < candidates.length; index += 1) {
+    const candidate = candidates[index];
+
+    if (!candidate) {
+      continue;
     }
 
-    if (fallbackPayload) {
-      const fallbackResult = await options.client.evaluate({
+    try {
+      const result = await options.client.evaluate({
         source: "workflow-telemetry",
         timestamp: new Date().toISOString(),
-        ...fallbackPayload
+        ...candidate.payload
       });
 
-      if (fallbackResult !== null || !sizeSafePayload) {
-        return fallbackResult;
+      if (result !== null) {
+        return result;
       }
-    }
 
-    if (sizeSafePayload) {
-      return await options.client.evaluate({
-        source: "workflow-telemetry",
-        timestamp: new Date().toISOString(),
-        ...sizeSafePayload
-      });
-    }
+      continue;
+    } catch (error) {
+      resolvedError = error;
+      const hasNext = index < candidates.length - 1;
 
-    return null;
-  } catch (initialError) {
-    let resolvedError: unknown = initialError;
-
-    if (fallbackPayload && isBadRequestSchemaError(initialError)) {
-      try {
-        return await options.client.evaluate({
-          source: "workflow-telemetry",
-          timestamp: new Date().toISOString(),
-          ...fallbackPayload
-        });
-      } catch (fallbackError) {
-        resolvedError = fallbackError;
+      if (hasNext && isRecoverableGovernanceError(error)) {
+        continue;
       }
-    }
 
-    if (sizeSafePayload && isPayloadTooLargeError(resolvedError)) {
-      try {
-        return await options.client.evaluate({
-          source: "workflow-telemetry",
-          timestamp: new Date().toISOString(),
-          ...sizeSafePayload
-        });
-      } catch (sizeSafeError) {
-        resolvedError = sizeSafeError;
-      }
+      break;
     }
-
-    if (options.config.onApiError === "fail_closed") {
-      return {
-        action: "stop",
-        alignmentScore: undefined,
-        approvalId: undefined,
-        behavioralViolations: undefined,
-        constraints: undefined,
-        governanceEventId: undefined,
-        guardrailsResult: undefined,
-        metadata: undefined,
-        policyId: undefined,
-        reason: `Governance API error: ${
-          resolvedError instanceof Error
-            ? resolvedError.message
-            : String(resolvedError)
-        }`,
-        riskScore: 0,
-        trustTier: undefined,
-        verdict: Verdict.HALT
-      } as GovernanceVerdictResponse;
-    }
-
-    return null;
   }
+
+  if (options.config.onApiError === "fail_closed") {
+    return {
+      action: "stop",
+      alignmentScore: undefined,
+      approvalId: undefined,
+      behavioralViolations: undefined,
+      constraints: undefined,
+      governanceEventId: undefined,
+      guardrailsResult: undefined,
+      metadata: undefined,
+      policyId: undefined,
+      reason: `Governance API error: ${
+        resolvedError instanceof Error
+          ? resolvedError.message
+          : String(resolvedError)
+      }`,
+      riskScore: 0,
+      trustTier: undefined,
+      verdict: Verdict.HALT
+    } as GovernanceVerdictResponse;
+  }
+
+  return null;
 }
 
 function isBadRequestSchemaError(error: unknown): boolean {
@@ -1281,6 +1315,86 @@ function isPayloadTooLargeError(error: unknown): boolean {
       error.message
     )
   );
+}
+
+function isTransientGovernanceError(error: unknown): boolean {
+  if (!(error instanceof GovernanceAPIError)) {
+    return false;
+  }
+
+  return (
+    /HTTP\s(429|5\d\d)\b/i.test(error.message) ||
+    /(context deadline exceeded|temporarily unavailable|timeout|timed out|connection reset|econnreset|etimedout|upstream connect error)/i.test(
+      error.message
+    )
+  );
+}
+
+function isRecoverableGovernanceError(error: unknown): boolean {
+  return (
+    isBadRequestSchemaError(error) ||
+    isPayloadTooLargeError(error) ||
+    isTransientGovernanceError(error)
+  );
+}
+
+function buildCandidatePayloads(
+  payload: Record<string, unknown> & { event_type: WorkflowEventType },
+  fallbackPayload?: Record<string, unknown> & { event_type: WorkflowEventType },
+  minimalPayload?: Record<string, unknown> & { event_type: WorkflowEventType }
+): Array<{
+  payload: Record<string, unknown> & { event_type: WorkflowEventType };
+}> {
+  const candidates = [
+    payload,
+    fallbackPayload,
+    minimalPayload
+  ].filter(
+    (
+      value
+    ): value is Record<string, unknown> & { event_type: WorkflowEventType } =>
+      value !== undefined
+  );
+  const deduped: Array<{
+    payload: Record<string, unknown> & { event_type: WorkflowEventType };
+  }> = [];
+  const seen = new Set<string>();
+
+  for (const candidate of candidates) {
+    const key = safeStringify(candidate);
+
+    if (!seen.has(key)) {
+      deduped.push({
+        payload: candidate
+      });
+      seen.add(key);
+    }
+  }
+
+  return deduped;
+}
+
+function isPayloadOverBudget(
+  payload: Record<string, unknown>,
+  maxBytes: number,
+  isLastFallback: boolean
+): boolean {
+  const serialized = safeStringify(payload);
+  const sizeBytes = Buffer.byteLength(serialized, "utf8");
+
+  if (sizeBytes <= maxBytes || isLastFallback) {
+    return false;
+  }
+
+  return true;
+}
+
+function safeStringify(payload: Record<string, unknown>): string {
+  try {
+    return JSON.stringify(payload);
+  } catch {
+    return "{}";
+  }
 }
 
 function serializeError(error: unknown): Record<string, unknown> {
@@ -1303,7 +1417,7 @@ function ensureAgentSpanBuffer(
   workflowId: string,
   workflowType: string
 ): void {
-  const existing = options.spanProcessor.getBuffer(workflowId);
+  const existing = options.spanProcessor.getBuffer(workflowId, runId);
 
   if (!existing || existing.runId !== runId) {
     options.spanProcessor.registerWorkflow(

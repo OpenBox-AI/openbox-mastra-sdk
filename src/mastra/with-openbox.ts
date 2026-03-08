@@ -372,6 +372,8 @@ function buildClientOptions(
     ...(customFetch ? { fetch: customFetch } : {}),
     apiKey: config.apiKey,
     apiUrl: config.apiUrl,
+    evaluateMaxRetries: config.evaluateMaxRetries,
+    evaluateRetryBaseDelayMs: config.evaluateRetryBaseDelayMs,
     onApiError: config.onApiError,
     timeoutSeconds: config.governanceTimeout
   };

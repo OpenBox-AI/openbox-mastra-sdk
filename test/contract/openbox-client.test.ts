@@ -209,6 +209,61 @@ describe("OpenBoxClient.evaluate", () => {
       client.evaluate({ event_type: "WorkflowStarted" })
     ).resolves.toBeNull();
   });
+
+  it("retries transient evaluate failures with bounded backoff", async () => {
+    let attempts = 0;
+
+    server.use(
+      http.post("https://api.openbox.ai/api/v1/governance/evaluate", () => {
+        attempts += 1;
+
+        if (attempts < 3) {
+          return HttpResponse.text("Service Unavailable", { status: 503 });
+        }
+
+        return HttpResponse.json({ verdict: "allow" });
+      })
+    );
+
+    const client = new OpenBoxClient({
+      apiKey: "obx_test_eval_key",
+      apiUrl: "https://api.openbox.ai",
+      evaluateMaxRetries: 2,
+      evaluateRetryBaseDelayMs: 0,
+      onApiError: "fail_closed"
+    });
+
+    await expect(
+      client.evaluate({ event_type: "WorkflowStarted" })
+    ).resolves.toMatchObject({
+      verdict: Verdict.ALLOW
+    });
+    expect(attempts).toBe(3);
+  });
+
+  it("does not retry non-transient evaluate failures", async () => {
+    let attempts = 0;
+
+    server.use(
+      http.post("https://api.openbox.ai/api/v1/governance/evaluate", () => {
+        attempts += 1;
+        return HttpResponse.text("Bad Request", { status: 400 });
+      })
+    );
+
+    const client = new OpenBoxClient({
+      apiKey: "obx_test_eval_key",
+      apiUrl: "https://api.openbox.ai",
+      evaluateMaxRetries: 3,
+      evaluateRetryBaseDelayMs: 0,
+      onApiError: "fail_closed"
+    });
+
+    await expect(
+      client.evaluate({ event_type: "WorkflowStarted" })
+    ).rejects.toBeInstanceOf(GovernanceAPIError);
+    expect(attempts).toBe(1);
+  });
 });
 
 describe("OpenBoxClient.pollApproval", () => {

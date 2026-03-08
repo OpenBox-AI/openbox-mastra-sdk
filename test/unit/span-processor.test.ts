@@ -73,6 +73,76 @@ describe("OpenBoxSpanProcessor", () => {
     expect(processor.getBuffer("wf-123")).toBeUndefined();
   });
 
+  it("keeps workflow buffers isolated by run id", () => {
+    const processor = new OpenBoxSpanProcessor();
+    const runABuffer = new WorkflowSpanBuffer({
+      runId: "run-a",
+      taskQueue: "test-queue",
+      workflowId: "wf-123",
+      workflowType: "TestWorkflow"
+    });
+    const runBBuffer = new WorkflowSpanBuffer({
+      runId: "run-b",
+      taskQueue: "test-queue",
+      workflowId: "wf-123",
+      workflowType: "TestWorkflow"
+    });
+
+    processor.registerWorkflow("wf-123", runABuffer);
+    processor.registerWorkflow("wf-123", runBBuffer);
+
+    processor.registerTrace(
+      "00000000000000000000000000000aa1",
+      "wf-123",
+      "act-a",
+      "run-a"
+    );
+    processor.registerTrace(
+      "00000000000000000000000000000bb2",
+      "wf-123",
+      "act-b",
+      "run-b"
+    );
+
+    processor.onEnd(
+      createSpan({
+        context: {
+          spanId: 0xaaaaaa,
+          traceId: 0
+        },
+        name: "span-a",
+        spanContext: () => ({
+          spanId: "aaaaaaaaaaaaaaaa",
+          traceId: "00000000000000000000000000000aa1"
+        })
+      }) as never
+    );
+    processor.onEnd(
+      createSpan({
+        context: {
+          spanId: 0xbbbbbb,
+          traceId: 0
+        },
+        name: "span-b",
+        spanContext: () => ({
+          spanId: "bbbbbbbbbbbbbbbb",
+          traceId: "00000000000000000000000000000bb2"
+        })
+      }) as never
+    );
+
+    expect(runABuffer.spans).toHaveLength(1);
+    expect(runABuffer.spans[0]).toMatchObject({
+      activityId: "act-a",
+      name: "span-a"
+    });
+    expect(runBBuffer.spans).toHaveLength(1);
+    expect(runBBuffer.spans[0]).toMatchObject({
+      activityId: "act-b",
+      name: "span-b"
+    });
+  });
+
   it("stores verdicts and mirrors them onto an existing buffer", () => {
     const processor = new OpenBoxSpanProcessor();
     const buffer = new WorkflowSpanBuffer({
