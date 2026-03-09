@@ -88,6 +88,15 @@ Advanced telemetry options accepted by `withOpenBox()`:
 
 `withOpenBox()` always excludes the configured OpenBox API URL from HTTP body capture to avoid self-instrumenting governance requests.
 
+## Activity Type Normalization
+
+The SDK normalizes emitted `activity_type` values to camelCase for consistency across Mastra wrappers.
+
+- `Search crypto coins` -> `searchCryptoCoins`
+- `uppercase-step` -> `uppercaseStep`
+
+Use normalized values when configuring `skipActivityTypes` and downstream governance filters.
+
 ## App Targets
 
 The zero-code entrypoint currently supports:

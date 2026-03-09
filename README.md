@@ -105,6 +105,11 @@ Supported config inputs:
 - `instrumentFileIo`
 - `validate`
 
+Activity naming:
+
+- `activity_type` values emitted by wrappers are normalized to camelCase (for example `Search crypto coins` -> `searchCryptoCoins`).
+- `skipActivityTypes` matching uses these normalized camelCase names.
+
 Environment variable equivalents:
 
 - `OPENBOX_EVALUATE_MAX_RETRIES`

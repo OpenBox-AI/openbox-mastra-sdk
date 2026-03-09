@@ -387,6 +387,7 @@ function resolveActivityDescriptor(
   workflowId: string;
   workflowType: string;
 } {
+  const normalizedType = normalizeActivityType(type);
   const activeContext = getOpenBoxExecutionContext();
   const runId =
     runtimeContext.workflow?.runId ??
@@ -405,13 +406,39 @@ function resolveActivityDescriptor(
 
   return {
     activityId,
-    activityType: type,
+    activityType: normalizedType,
     attempt: activeContext?.attempt ?? 1,
     runId,
     taskQueue: activeContext?.taskQueue ?? "mastra",
     workflowId,
     workflowType
   };
+}
+
+function normalizeActivityType(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return "activity";
+  }
+
+  if (/^[a-z][A-Za-z0-9]*$/.test(trimmed)) {
+    return trimmed;
+  }
+
+  const tokens = trimmed
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .split(/[^A-Za-z0-9]+/)
+    .filter(Boolean)
+    .map(token => token.toLowerCase());
+
+  if (tokens.length === 0) {
+    return "activity";
+  }
+
+  const [first, ...rest] = tokens;
+  return `${first}${rest
+    .map(token => token.charAt(0).toUpperCase() + token.slice(1))
+    .join("")}`;
 }
 
 async function evaluateActivityEvent(

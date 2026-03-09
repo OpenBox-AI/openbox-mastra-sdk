@@ -115,7 +115,7 @@ describe("wrapTool", () => {
           prompt: "secret prompt"
         }
       ],
-      activity_type: "process-prompt",
+      activity_type: "processPrompt",
       event_type: "ActivityStarted",
       run_id: "run-123",
       workflow_id: "wf-123"
@@ -129,7 +129,7 @@ describe("wrapTool", () => {
       activity_output: {
         result: "processed:[redacted]"
       },
-      activity_type: "process-prompt",
+      activity_type: "processPrompt",
       event_type: "ActivityCompleted",
       run_id: "run-123",
       status: "completed",
@@ -223,7 +223,7 @@ describe("wrapTool", () => {
     expect(suspendPayload).toMatchObject({
       openbox: {
         activityId: "wf-approve:delete-record",
-        activityType: "delete-record",
+        activityType: "deleteRecord",
         approvalId: "approval-123",
         reason: "Needs human review",
         runId: "run-approve",
@@ -301,5 +301,70 @@ describe("wrapTool", () => {
     ).rejects.toBeInstanceOf(GuardrailsValidationError);
 
     await server.close();
+  });
+
+  it("normalizes spaced activity type names to camelCase", async () => {
+    const server = await startOpenBoxServer({
+      evaluate() {
+        return { verdict: "allow" };
+      }
+    });
+
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_contract",
+      apiUrl: server.url,
+      validate: false
+    });
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+    const wrapped = wrapTool(
+      createTool({
+        description: "Search all available crypto coins by a keyword",
+        id: "Search crypto coins",
+        inputSchema: z.object({
+          keyword: z.string()
+        }),
+        outputSchema: z.object({
+          id: z.string()
+        }),
+        async execute(input) {
+          return {
+            id: input.keyword
+          };
+        }
+      }),
+      {
+        client,
+        config,
+        spanProcessor: new OpenBoxSpanProcessor()
+      }
+    );
+
+    await wrapped.execute?.(
+      { keyword: "bitcoin" },
+      {
+        workflow: {
+          runId: "run-camel",
+          setState: vi.fn(),
+          state: {},
+          suspend: vi.fn(async () => undefined),
+          workflowId: "wf-camel"
+        }
+      }
+    );
+
+    await server.close();
+
+    const startedEvent = server.requests
+      .filter(request => request.pathname === "/api/v1/governance/evaluate")
+      .map(request => request.body)
+      .find(payload => payload.event_type === "ActivityStarted");
+
+    expect(startedEvent).toBeDefined();
+    expect(startedEvent?.activity_type).toBe("searchCryptoCoins");
   });
 });

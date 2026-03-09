@@ -10,7 +10,7 @@
     "destination": "Vendor Escrow",
     "status": "sent"
   },
-  "activity_type": "transfer-funds",
+  "activity_type": "transferFunds",
   "attempt": 1,
   "event_type": "ActivityCompleted",
   "run_id": "run-example-001",

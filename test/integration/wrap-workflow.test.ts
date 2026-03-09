@@ -101,7 +101,7 @@ describe("wrapWorkflow", () => {
           value: "hello"
         }
       ],
-      activity_type: "uppercase-step"
+      activity_type: "uppercaseStep"
     });
     expect(stepCompleted).toMatchObject({
       activity_output: {
