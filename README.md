@@ -110,6 +110,12 @@ Activity naming:
 - `activity_type` values emitted by wrappers are normalized to camelCase (for example `Search crypto coins` -> `searchCryptoCoins`).
 - `skipActivityTypes` matching uses these normalized camelCase names.
 
+Agent signal events:
+
+- `wrapAgent()` emits `SignalReceived` with `signal_name: "user_input"` for `generate()` / `stream()` starts.
+- Resume paths emit `SignalReceived` with `signal_name: "resume"`.
+- Use `skipSignals` to suppress either signal when needed.
+
 Environment variable equivalents:
 
 - `OPENBOX_EVALUATE_MAX_RETRIES`

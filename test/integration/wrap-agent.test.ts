@@ -67,10 +67,35 @@ describe("wrapAgent", () => {
         .map(request => request.body.event_type)
     ).toEqual([
       "WorkflowStarted",
+      "SignalReceived",
       "WorkflowCompleted",
       "WorkflowStarted",
+      "SignalReceived",
       "WorkflowCompleted"
     ]);
+
+    const inputSignals = server.requests
+      .filter(request => request.pathname === "/api/v1/governance/evaluate")
+      .map(request => request.body)
+      .filter(body => body.event_type === "SignalReceived");
+
+    expect(inputSignals).toHaveLength(2);
+    expect(inputSignals[0]).toMatchObject({
+      event_type: "SignalReceived",
+      run_id: "agent-generate-run",
+      signal_args: "hello",
+      signal_name: "user_input",
+      workflow_id: "agent:assistant-agent",
+      workflow_type: "assistant-agent"
+    });
+    expect(inputSignals[1]).toMatchObject({
+      event_type: "SignalReceived",
+      run_id: "agent-stream-run",
+      signal_args: "hello",
+      signal_name: "user_input",
+      workflow_id: "agent:assistant-agent",
+      workflow_type: "assistant-agent"
+    });
   });
 
   it("polls OpenBox approval before resuming agent execution", async () => {
@@ -244,6 +269,7 @@ describe("wrapAgent", () => {
         .map(request => request.body.event_type)
     ).toEqual([
       "WorkflowStarted",
+      "SignalReceived",
       "ActivityStarted",
       "SignalReceived",
       "WorkflowCompleted"
@@ -1164,7 +1190,7 @@ describe("wrapAgent", () => {
       .filter(request => request.pathname === "/api/v1/governance/evaluate")
       .map(request => request.body.event_type);
 
-    expect(preCompletionEvents).toEqual(["WorkflowStarted"]);
+    expect(preCompletionEvents).toEqual(["WorkflowStarted", "SignalReceived"]);
 
     const fullOutput = await stream.getFullOutput();
     expect(fullOutput).toMatchObject({

@@ -226,12 +226,14 @@ The SDK must emit canonical workflow-boundary governance events, adapted to Mast
 - workflow start -> `WorkflowStarted`
 - workflow success -> `WorkflowCompleted`
 - workflow failure -> `WorkflowFailed`
+- agent `generate()` / `stream()` input -> `SignalReceived`
 - workflow resume after suspension -> `SignalReceived`
 - tool or workflow step start -> `ActivityStarted`
 - tool or workflow step completion/failure -> `ActivityCompleted`
 
 ### Resume mapping locked by this spec
 
+- agent `generate()` and `stream()` emit `SignalReceived` with `signal_name = user_input`
 - workflow `resume()` and `resumeStream()` emit `SignalReceived`
 - agent `resumeGenerate()` and `resumeStream()` emit `SignalReceived`
 - default Mastra resume signal name is `resume`

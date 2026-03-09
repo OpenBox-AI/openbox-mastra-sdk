@@ -26,6 +26,7 @@ import type { WrapToolOptions } from "./wrap-tool.js";
 
 const OPENBOX_WRAPPED_AGENT = Symbol.for("openbox.mastra.wrapAgent");
 const OPENBOX_AGENT_STREAM_META = Symbol.for("openbox.mastra.wrapAgent.streamMeta");
+const AGENT_INPUT_SIGNAL_NAME = "user_input";
 
 interface AgentStreamMeta {
   startTimeMs: number;
@@ -240,6 +241,29 @@ async function executeAgentLifecycle<T>({
       task_queue: "mastra",
       workflow_id: workflowId,
       workflow_input: serializeValue(messages),
+      workflow_type: workflowType
+    });
+
+    if (verdict && Verdict.shouldStop(verdict.verdict)) {
+      throw new GovernanceHaltError(
+        verdict.reason ?? "Agent blocked by governance"
+      );
+    }
+  }
+
+  if (
+    phase === "start" &&
+    messages !== undefined &&
+    !options.config.skipWorkflowTypes.has(workflowType) &&
+    !options.config.skipSignals.has(AGENT_INPUT_SIGNAL_NAME)
+  ) {
+    const verdict = await evaluateAgentEvent(options, {
+      event_type: WorkflowEventType.SIGNAL_RECEIVED,
+      run_id: runId,
+      signal_args: serializeValue(messages),
+      signal_name: AGENT_INPUT_SIGNAL_NAME,
+      task_queue: "mastra",
+      workflow_id: workflowId,
       workflow_type: workflowType
     });
 

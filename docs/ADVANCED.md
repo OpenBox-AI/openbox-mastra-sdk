@@ -97,6 +97,15 @@ The SDK normalizes emitted `activity_type` values to camelCase for consistency a
 
 Use normalized values when configuring `skipActivityTypes` and downstream governance filters.
 
+## Agent Signal Emission
+
+To align with governance systems that evaluate behavioral/goal checks on signal events:
+
+- `wrapAgent().generate()` and `wrapAgent().stream()` emit `SignalReceived` with `signal_name: "user_input"` and `signal_args` from the provided messages.
+- `wrapAgent().resumeGenerate()` and `wrapAgent().resumeStream()` emit `SignalReceived` with `signal_name: "resume"` and `signal_args` from resume data.
+
+Use `skipSignals` to opt out per signal name.
+
 ## App Targets
 
 The zero-code entrypoint currently supports:

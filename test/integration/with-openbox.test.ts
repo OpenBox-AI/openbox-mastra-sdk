@@ -142,6 +142,7 @@ describe("withOpenBox", () => {
       "ActivityCompleted",
       "WorkflowCompleted",
       "WorkflowStarted",
+      "SignalReceived",
       "WorkflowCompleted"
     ]);
   });
@@ -308,6 +309,7 @@ describe("withOpenBox", () => {
       "ActivityStarted",
       "ActivityCompleted",
       "WorkflowStarted",
+      "SignalReceived",
       "WorkflowCompleted"
     ]);
   });

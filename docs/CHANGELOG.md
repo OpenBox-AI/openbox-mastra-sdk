@@ -5,6 +5,7 @@
 - Added evaluate retry/backoff controls in `OpenBoxClient` with transient error classification.
 - Added payload-budget controls (`maxEvaluatePayloadBytes`) for governance evaluate dispatch.
 - Normalized emitted `activity_type` values to camelCase across wrapped tools/workflow steps.
+- Added agent input signal emission (`SignalReceived` with `signal_name: user_input`) for `generate()` and `stream()` runs.
 - Added tiered `WorkflowCompleted` fallback payload strategy:
   - full telemetry
   - compact payload
