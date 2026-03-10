@@ -8,6 +8,7 @@
 - Human approval flows using Mastra suspend/resume
 - Guardrail redaction and validation for inputs and outputs
 - OpenTelemetry span buffering with HTTP, database, and opt-in file I/O capture
+- Hook-level governance evaluate dispatch for HTTP, DB query, and file operations (`started`/`completed`)
 - Workflow, activity, and resume event emission with skip filters and start-event toggles
 - Zero-code wiring with `withOpenBox()` plus manual wiring APIs
 - Production hardening for large sessions:
@@ -128,6 +129,11 @@ Security defaults:
 - HTTP bodies and headers are not stored in OTel span attributes
 - file I/O instrumentation is off by default
 - database instrumentation is on by default
+
+Hook-level event behavior:
+
+- `ActivityCompleted` boundary events are emitted with `span_count: 0` and `spans: []`.
+- Operation-level telemetry is emitted through hook-triggered evaluate events with `hook_trigger`.
 
 ## Example
 

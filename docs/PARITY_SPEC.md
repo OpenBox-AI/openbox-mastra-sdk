@@ -249,9 +249,15 @@ The SDK must emit canonical workflow-boundary governance events, adapted to Mast
 - attempt count where available
 - timestamps in RFC3339 UTC form
 - status/error payloads for completed and failed events
-- span count and buffered spans where available
+- span count and spans
 - input and output payloads after guardrail redaction is applied
 - correlation identifiers needed to join governance events to traces
+- hook events must include `hook_trigger` with:
+  - `type`
+  - `stage`
+  - `attribute_key_identifiers`
+  - type-specific metadata (for example method/url for HTTP)
+- activity boundary completion events must emit `span_count: 0` and `spans: []` when hook-level operation telemetry is enabled
 
 ### Ordering and determinism
 
@@ -327,6 +333,12 @@ The SDK must provide canonical telemetry buffering with stronger Node integratio
 - correlate `trace_id` and `span_id` with workflow/tool/step identifiers
 - store request/response bodies and headers separately from span attributes
 - attach buffered telemetry to governance event payloads
+- emit hook-level governance evaluate events for instrumented operations:
+  - HTTP request started/completed
+  - DB query started/completed
+  - file operation started/completed
+- mark hook-governed spans so boundary payloads avoid duplicate span transport
+- propagate hook abort/halt state within the same activity execution context
 
 ### Privacy posture
 

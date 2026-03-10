@@ -281,6 +281,52 @@ describe("OpenBoxSpanProcessor", () => {
     expect(processor.getPendingBody("abcdef0123456789")).toBeUndefined();
   });
 
+  it("stores activity context and resolves it by trace id", () => {
+    const processor = new OpenBoxSpanProcessor();
+    const traceId = "0000000000000000123456789abcdef0";
+    const workflowId = "wf-123";
+    const activityId = "act-789";
+    const contextPayload = {
+      activity_type: "searchCryptoCoins",
+      run_id: "run-456",
+      workflow_id: workflowId
+    };
+
+    processor.registerTrace(traceId, workflowId, activityId, "run-456");
+    processor.setActivityContext(workflowId, activityId, contextPayload);
+
+    expect(processor.getActivityContextByTrace(traceId)).toEqual(contextPayload);
+
+    processor.clearActivityContext(workflowId, activityId);
+    expect(processor.getActivityContextByTrace(traceId)).toBeUndefined();
+  });
+
+  it("skips buffering spans marked as governed", () => {
+    const processor = new OpenBoxSpanProcessor();
+    const buffer = new WorkflowSpanBuffer({
+      runId: "run-456",
+      taskQueue: "test-queue",
+      workflowId: "wf-123",
+      workflowType: "TestWorkflow"
+    });
+
+    processor.registerWorkflow("wf-123", buffer);
+    processor.markGoverned("abcdef0123456789");
+    processor.onEnd(
+      createSpan({
+        attributes: {
+          "openbox.workflow_id": "wf-123"
+        },
+        spanContext: () => ({
+          spanId: "abcdef0123456789",
+          traceId: "0000000000000000123456789abcdef0"
+        })
+      }) as never
+    );
+
+    expect(buffer.spans).toEqual([]);
+  });
+
   it("merges trace-scoped HTTP privacy data into matching HTTP spans", () => {
     const processor = new OpenBoxSpanProcessor();
     const buffer = new WorkflowSpanBuffer({

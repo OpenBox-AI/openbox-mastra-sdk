@@ -64,6 +64,28 @@ export async function executeGovernedActivity<TInput, TOutput>({
   let inputForExecution = cloneValue(input);
 
   ensureSpanBuffer(descriptor, dependencies.spanProcessor);
+  dependencies.spanProcessor.clearActivityAbort(
+    descriptor.workflowId,
+    descriptor.activityId
+  );
+  dependencies.spanProcessor.clearHaltRequested(
+    descriptor.workflowId,
+    descriptor.activityId
+  );
+  dependencies.spanProcessor.setActivityContext(
+    descriptor.workflowId,
+    descriptor.activityId,
+    {
+      activity_id: descriptor.activityId,
+      activity_input: inputForEvent,
+      activity_type: descriptor.activityType,
+      attempt: descriptor.attempt,
+      run_id: descriptor.runId,
+      task_queue: descriptor.taskQueue,
+      workflow_id: descriptor.workflowId,
+      workflow_type: descriptor.workflowType
+    }
+  );
 
   const startVerdict = dependencies.config.sendActivityStartEvent
     ? await evaluateActivityEvent(dependencies, {
@@ -172,85 +194,101 @@ export async function executeGovernedActivity<TInput, TOutput>({
         error = serializeError(caughtError);
         throw caughtError;
       } finally {
-        const spans = collectActivitySpans(
-          dependencies.spanProcessor,
-          descriptor.workflowId,
-          descriptor.activityId,
-          descriptor.runId
-        );
-        const completedVerdict = await evaluateActivityEvent(dependencies, {
-          activity_input: serializeActivityInputForEvent(inputForExecution),
-          activity_output: serializeValue(output),
-          activity_type: descriptor.activityType,
-          attempt: descriptor.attempt,
-          duration_ms: undefined,
-          end_time: undefined,
-          error,
-          event_type: WorkflowEventType.ACTIVITY_COMPLETED,
-          run_id: descriptor.runId,
-          span_count: spans.length,
-          spans,
-          start_time: undefined,
-          status: error ? "failed" : "completed",
-          task_queue: descriptor.taskQueue,
-          workflow_id: descriptor.workflowId,
-          workflow_type: descriptor.workflowType
-        });
+        try {
+          const wasAborted = dependencies.spanProcessor.getActivityAbort(
+            descriptor.workflowId,
+            descriptor.activityId
+          );
 
-        applyStopVerdict(completedVerdict);
-        assertGuardrailsValid(
-          completedVerdict,
-          "Guardrails output validation failed"
-        );
+          if (!wasAborted) {
+            const completedVerdict = await evaluateActivityEvent(dependencies, {
+              activity_input: serializeActivityInputForEvent(inputForExecution),
+              activity_output: serializeValue(output),
+              activity_type: descriptor.activityType,
+              attempt: descriptor.attempt,
+              duration_ms: undefined,
+              end_time: undefined,
+              error,
+              event_type: WorkflowEventType.ACTIVITY_COMPLETED,
+              run_id: descriptor.runId,
+              span_count: 0,
+              spans: [],
+              start_time: undefined,
+              status: error ? "failed" : "completed",
+              task_queue: descriptor.taskQueue,
+              workflow_id: descriptor.workflowId,
+              workflow_type: descriptor.workflowType
+            });
 
-        if (
-          completedVerdict?.guardrailsResult?.inputType === "activity_output" &&
-          completedVerdict.guardrailsResult.redactedInput !== undefined
-        ) {
-          output = applyRedaction(
-            output,
-            completedVerdict.guardrailsResult.redactedInput
-          ) as TOutput;
-        }
-
-        if (
-          dependencies.config.hitlEnabled &&
-          Verdict.requiresApproval(completedVerdict?.verdict ?? Verdict.ALLOW)
-        ) {
-          const suspend =
-            runtimeContext.workflow?.suspend ?? runtimeContext.agent?.suspend;
-
-          if (!suspend) {
-            throw new ApprovalPendingError(
-              completedVerdict?.reason ??
-                "Activity output requires human approval"
+            applyStopVerdict(completedVerdict);
+            assertGuardrailsValid(
+              completedVerdict,
+              "Guardrails output validation failed"
             );
-          }
 
-          const approvalPayload = {
-            openbox: {
-              activityId: descriptor.activityId,
-              activityType: descriptor.activityType,
-              approvalId: completedVerdict?.approvalId,
-              reason: completedVerdict?.reason,
-              requestedAt: rfc3339Now(),
-              runId: descriptor.runId,
-              workflowId: descriptor.workflowId,
-              workflowType: descriptor.workflowType
+            if (
+              completedVerdict?.guardrailsResult?.inputType === "activity_output" &&
+              completedVerdict.guardrailsResult.redactedInput !== undefined
+            ) {
+              output = applyRedaction(
+                output,
+                completedVerdict.guardrailsResult.redactedInput
+              ) as TOutput;
             }
-          };
 
-          setPendingApproval({
-            activityId: descriptor.activityId,
-            activityType: descriptor.activityType,
-            approvalId: completedVerdict?.approvalId,
-            requestedAt: approvalPayload.openbox.requestedAt,
-            runId: descriptor.runId,
-            workflowId: descriptor.workflowId,
-            workflowType: descriptor.workflowType
-          });
+            if (
+              dependencies.config.hitlEnabled &&
+              Verdict.requiresApproval(completedVerdict?.verdict ?? Verdict.ALLOW)
+            ) {
+              const suspend =
+                runtimeContext.workflow?.suspend ?? runtimeContext.agent?.suspend;
 
-          output = (await suspend(approvalPayload)) as TOutput | undefined;
+              if (!suspend) {
+                throw new ApprovalPendingError(
+                  completedVerdict?.reason ??
+                    "Activity output requires human approval"
+                );
+              }
+
+              const approvalPayload = {
+                openbox: {
+                  activityId: descriptor.activityId,
+                  activityType: descriptor.activityType,
+                  approvalId: completedVerdict?.approvalId,
+                  reason: completedVerdict?.reason,
+                  requestedAt: rfc3339Now(),
+                  runId: descriptor.runId,
+                  workflowId: descriptor.workflowId,
+                  workflowType: descriptor.workflowType
+                }
+              };
+
+              setPendingApproval({
+                activityId: descriptor.activityId,
+                activityType: descriptor.activityType,
+                approvalId: completedVerdict?.approvalId,
+                requestedAt: approvalPayload.openbox.requestedAt,
+                runId: descriptor.runId,
+                workflowId: descriptor.workflowId,
+                workflowType: descriptor.workflowType
+              });
+
+              output = (await suspend(approvalPayload)) as TOutput | undefined;
+            }
+          }
+        } finally {
+          dependencies.spanProcessor.clearActivityAbort(
+            descriptor.workflowId,
+            descriptor.activityId
+          );
+          dependencies.spanProcessor.clearHaltRequested(
+            descriptor.workflowId,
+            descriptor.activityId
+          );
+          dependencies.spanProcessor.clearActivityContext(
+            descriptor.workflowId,
+            descriptor.activityId
+          );
         }
       }
 
@@ -532,30 +570,6 @@ function ensureSpanBuffer(
       })
     );
   }
-}
-
-function collectActivitySpans(
-  spanProcessor: OpenBoxSpanProcessor,
-  workflowId: string,
-  activityId: string,
-  runId: string
-): Record<string, unknown>[] {
-  const buffer = spanProcessor.getBuffer(workflowId, runId);
-
-  if (!buffer) {
-    return [];
-  }
-
-  return normalizeSpansForGovernance(
-    buffer.spans.filter(span => {
-      return (
-        span.activityId === activityId ||
-        (span.attributes as Record<string, unknown> | undefined)?.[
-          "openbox.activity_id"
-        ] === activityId
-      );
-    })
-  );
 }
 
 function normalizeSpanForGovernance(

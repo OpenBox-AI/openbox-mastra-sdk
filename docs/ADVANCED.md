@@ -21,7 +21,7 @@ Typical sequence:
 1. Parse config with `parseOpenBoxConfig()` or initialize with `initializeOpenBox()`.
 2. Construct `OpenBoxClient`.
 3. Construct `OpenBoxSpanProcessor`.
-4. Call `setupOpenBoxOpenTelemetry()`.
+4. Call `setupOpenBoxOpenTelemetry()` and pass `governanceClient` to enable hook-level evaluate events.
 5. Wrap tools, workflows, and agents with the same `client/config/spanProcessor` tuple.
 
 ## Zero-Code Runtime Access
@@ -87,6 +87,16 @@ Advanced telemetry options accepted by `withOpenBox()`:
 - `spanProcessor`: prebuilt span processor instance
 
 `withOpenBox()` always excludes the configured OpenBox API URL from HTTP body capture to avoid self-instrumenting governance requests.
+
+For manual `setupOpenBoxOpenTelemetry()` wiring, hook-level governance controls are:
+
+- `governanceClient`: `OpenBoxClient` used for hook-level `evaluate` calls
+- `onHookApiError`: override hook error policy (`fail_open` or `fail_closed`)
+
+Current DB hook-level coverage:
+
+- `@opentelemetry/instrumentation-pg`: started/completed hook dispatch via request/response hooks
+- `@opentelemetry/instrumentation-oracledb`: started/completed hook dispatch via request/response hooks
 
 ## Activity Type Normalization
 

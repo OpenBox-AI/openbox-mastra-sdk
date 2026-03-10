@@ -135,18 +135,10 @@ describe("wrapTool", () => {
       status: "completed",
       workflow_id: "wf-123"
     });
-    expect(completedEvent).toHaveProperty("spans");
-    const spans = (completedEvent as { spans?: Array<Record<string, unknown>> }).spans ?? [];
-    if (spans.length > 0) {
-      expect(spans[0]).toHaveProperty("span_id");
-      expect(spans[0]).toHaveProperty("trace_id");
-      expect(spans[0]).toHaveProperty("start_time");
-      expect(spans[0]).toHaveProperty("end_time");
-      expect(spans[0]).not.toHaveProperty("spanId");
-      expect(spans[0]).not.toHaveProperty("traceId");
-      expect(spans[0]).not.toHaveProperty("startTime");
-      expect(spans[0]).not.toHaveProperty("endTime");
-    }
+    expect(completedEvent).toMatchObject({
+      span_count: 0,
+      spans: []
+    });
   });
 
   it("suspends execution when governance requires approval", async () => {

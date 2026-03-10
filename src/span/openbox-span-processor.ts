@@ -88,8 +88,12 @@ type SpanLike = Pick<
 };
 
 export class OpenBoxSpanProcessor implements SpanProcessor {
+  readonly #abortedActivities = new Map<string, string>();
+  readonly #activityContext = new Map<string, Record<string, unknown>>();
   readonly #bodyData = new Map<string, StoredSpanBody>();
   readonly #buffers = new Map<string, WorkflowSpanBuffer>();
+  readonly #governedSpanIds = new Set<string>();
+  readonly #haltRequests = new Map<string, string>();
   readonly #activeWorkflowRunKey = new Map<string, string>();
   readonly #traceBodyData = new Map<string, StoredTraceBody[]>();
   readonly #ignoredUrlPrefixes: Set<string>;
@@ -136,6 +140,90 @@ export class OpenBoxSpanProcessor implements SpanProcessor {
     }
   }
 
+  public setActivityContext(
+    workflowId: string,
+    activityId: string,
+    context: Record<string, unknown>
+  ): void {
+    this.#activityContext.set(
+      toActivityKey(workflowId, activityId),
+      {
+        ...context
+      }
+    );
+  }
+
+  public getActivityContext(
+    workflowId: string,
+    activityId: string
+  ): Record<string, unknown> | undefined {
+    return this.#activityContext.get(toActivityKey(workflowId, activityId));
+  }
+
+  public getActivityContextByTrace(
+    traceId: number | string
+  ): Record<string, unknown> | undefined {
+    const normalizedTraceId = normalizeHexId(traceId, 32);
+    const workflowId = this.#traceToWorkflow.get(normalizedTraceId);
+    const activityId = this.#traceToActivity.get(normalizedTraceId);
+
+    if (!workflowId || !activityId) {
+      return undefined;
+    }
+
+    return this.getActivityContext(workflowId, activityId);
+  }
+
+  public clearActivityContext(workflowId: string, activityId: string): void {
+    this.#activityContext.delete(toActivityKey(workflowId, activityId));
+  }
+
+  public setActivityAbort(
+    workflowId: string,
+    activityId: string,
+    reason: string
+  ): void {
+    this.#abortedActivities.set(toActivityKey(workflowId, activityId), reason);
+  }
+
+  public getActivityAbort(
+    workflowId: string,
+    activityId: string
+  ): string | undefined {
+    return this.#abortedActivities.get(toActivityKey(workflowId, activityId));
+  }
+
+  public clearActivityAbort(workflowId: string, activityId: string): void {
+    this.#abortedActivities.delete(toActivityKey(workflowId, activityId));
+  }
+
+  public setHaltRequested(
+    workflowId: string,
+    activityId: string,
+    reason: string
+  ): void {
+    this.#haltRequests.set(toActivityKey(workflowId, activityId), reason);
+  }
+
+  public getHaltRequested(
+    workflowId: string,
+    activityId: string
+  ): string | undefined {
+    return this.#haltRequests.get(toActivityKey(workflowId, activityId));
+  }
+
+  public clearHaltRequested(workflowId: string, activityId: string): void {
+    this.#haltRequests.delete(toActivityKey(workflowId, activityId));
+  }
+
+  public markGoverned(spanId: number | string): void {
+    this.#governedSpanIds.add(normalizeHexId(spanId, 16));
+
+    if (this.#governedSpanIds.size > 10_000) {
+      this.#governedSpanIds.clear();
+    }
+  }
+
   public getBuffer(workflowId: string, runId?: string): WorkflowSpanBuffer | undefined {
     if (runId) {
       const scoped = this.#buffers.get(toWorkflowRunKey(workflowId, runId));
@@ -177,6 +265,7 @@ export class OpenBoxSpanProcessor implements SpanProcessor {
     if (runId) {
       this.#removeRunScopedBuffer(workflowId, runId);
       this.#verdicts.delete(toWorkflowRunKey(workflowId, runId));
+      this.#deleteWorkflowScopedMaps(workflowId);
       return;
     }
 
@@ -192,6 +281,7 @@ export class OpenBoxSpanProcessor implements SpanProcessor {
     this.#workflowRunKeys.delete(workflowId);
     this.#activeWorkflowRunKey.delete(workflowId);
     this.#verdicts.delete(workflowId);
+    this.#deleteWorkflowScopedMaps(workflowId);
   }
 
   public setVerdict(
@@ -285,6 +375,13 @@ export class OpenBoxSpanProcessor implements SpanProcessor {
 
   public onEnd(span: ReadableSpan): void {
     const spanLike = span as unknown as SpanLike;
+    const spanId = getSpanId(spanLike);
+
+    if (spanId && this.#governedSpanIds.delete(spanId)) {
+      this.#bodyData.delete(spanId);
+      this.fallbackProcessor?.onEnd(span);
+      return;
+    }
 
     if (this.#shouldIgnoreSpan(spanLike)) {
       this.fallbackProcessor?.onEnd(span);
@@ -294,7 +391,6 @@ export class OpenBoxSpanProcessor implements SpanProcessor {
     this.#registerCorrelation(spanLike);
 
     const traceId = getTraceId(spanLike);
-    const spanId = getSpanId(spanLike);
     const attributes = toRecord(spanLike.attributes);
     const workflowId =
       toStringAttribute(attributes["openbox.workflow_id"]) ??
@@ -589,12 +685,38 @@ export class OpenBoxSpanProcessor implements SpanProcessor {
       this.#activeWorkflowRunKey.delete(workflowId);
     }
   }
+
+  #deleteWorkflowScopedMaps(workflowId: string): void {
+    const prefix = `${workflowId}::`;
+
+    for (const key of this.#activityContext.keys()) {
+      if (key.startsWith(prefix)) {
+        this.#activityContext.delete(key);
+      }
+    }
+
+    for (const key of this.#abortedActivities.keys()) {
+      if (key.startsWith(prefix)) {
+        this.#abortedActivities.delete(key);
+      }
+    }
+
+    for (const key of this.#haltRequests.keys()) {
+      if (key.startsWith(prefix)) {
+        this.#haltRequests.delete(key);
+      }
+    }
+  }
 }
 
 export const WorkflowSpanProcessor = OpenBoxSpanProcessor;
 
 function toWorkflowRunKey(workflowId: string, runId: string): string {
   return `${workflowId}::${runId}`;
+}
+
+function toActivityKey(workflowId: string, activityId: string): string {
+  return `${workflowId}::${activityId}`;
 }
 
 function formatHex(value: number, width: number): string {

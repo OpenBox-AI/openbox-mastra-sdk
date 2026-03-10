@@ -11,6 +11,9 @@
   - compact payload
   - ultra-minimal payload
 - Added run-scoped span buffer isolation for concurrent runs sharing a workflow id.
+- Added hook-level governance evaluate dispatch for HTTP/DB/file operations with `hook_trigger` payloads.
+- Added span processor activity-context/abort/halt/governed-span tracking APIs for hook orchestration.
+- Updated activity boundary completion payloads to send `span_count: 0` and `spans: []`.
 - Expanded unit, contract, and integration coverage for retries, fallback tiers, payload budgeting, and concurrency isolation.
 
 ## 0.1.0

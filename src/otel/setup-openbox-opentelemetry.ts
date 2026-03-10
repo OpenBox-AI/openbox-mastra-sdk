@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 
 import { context, trace } from "@opentelemetry/api";
@@ -7,7 +8,14 @@ import type {
 } from "@opentelemetry/instrumentation";
 import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
 
+import type { OpenBoxApiErrorPolicy, OpenBoxClient } from "../client/index.js";
+import { getOpenBoxExecutionContext } from "../governance/context.js";
 import { OpenBoxSpanProcessor } from "../span/index.js";
+import {
+  GovernanceHaltError,
+  Verdict,
+  WorkflowEventType
+} from "../types/index.js";
 
 const DB_INSTRUMENTATION_NAMES = new Map<string, string[]>([
   ["pg", ["@opentelemetry/instrumentation-pg"]],
@@ -145,9 +153,11 @@ export interface OpenBoxTelemetryOptions {
   captureHttpBodies?: boolean | undefined;
   dbLibraries?: ReadonlySet<string> | undefined;
   fileSkipPatterns?: string[] | undefined;
+  governanceClient?: OpenBoxClient | undefined;
   ignoredUrls?: string[] | undefined;
   instrumentDatabases?: boolean | undefined;
   instrumentFileIo?: boolean | undefined;
+  onHookApiError?: OpenBoxApiErrorPolicy | undefined;
   spanProcessor: OpenBoxSpanProcessor;
 }
 
@@ -157,6 +167,17 @@ export interface OpenBoxTelemetryController {
   tracerProvider: NodeTracerProvider;
 }
 
+interface HookGovernanceRuntime {
+  client: OpenBoxClient;
+  onApiError: OpenBoxApiErrorPolicy;
+  spanProcessor: OpenBoxSpanProcessor;
+}
+
+type HookSpan = NonNullable<ReturnType<typeof trace.getActiveSpan>> & {
+  attributes?: Record<string, unknown>;
+  name?: string;
+};
+
 let activeFetchRestore: (() => void) | undefined;
 let activeFileRestore: (() => void) | undefined;
 let activeUnregister: (() => void) | undefined;
@@ -165,9 +186,11 @@ export function setupOpenBoxOpenTelemetry({
   captureHttpBodies = true,
   dbLibraries,
   fileSkipPatterns = DEFAULT_FILE_SKIP_PATTERNS,
+  governanceClient,
   ignoredUrls = [],
   instrumentDatabases = true,
   instrumentFileIo = false,
+  onHookApiError,
   spanProcessor
 }: OpenBoxTelemetryOptions): OpenBoxTelemetryController {
   teardownActiveTelemetry();
@@ -186,10 +209,22 @@ export function setupOpenBoxOpenTelemetry({
   });
 
   tracerProvider.register();
+  const hookGovernance = governanceClient
+    ? {
+        client: governanceClient,
+        onApiError:
+          onHookApiError ?? governanceClient.onApiError ?? "fail_open",
+        spanProcessor
+      }
+    : undefined;
 
   const instrumentations: Instrumentation<InstrumentationConfig>[] = [
     ...selectHttpInstrumentations(ignoredUrls, captureHttpBodies),
-    ...selectDatabaseInstrumentations(instrumentDatabases, dbLibraries),
+    ...selectDatabaseInstrumentations(
+      instrumentDatabases,
+      dbLibraries,
+      hookGovernance
+    ),
     ...selectFileInstrumentation(instrumentFileIo, fileSkipPatterns)
   ];
 
@@ -199,11 +234,15 @@ export function setupOpenBoxOpenTelemetry({
   });
 
   if (captureHttpBodies) {
-    activeFetchRestore = patchFetch(spanProcessor, ignoredUrls);
+    activeFetchRestore = patchFetch(
+      spanProcessor,
+      ignoredUrls,
+      hookGovernance
+    );
   }
 
   if (instrumentFileIo) {
-    activeFileRestore = patchFileIo(fileSkipPatterns);
+    activeFileRestore = patchFileIo(fileSkipPatterns, hookGovernance);
   }
 
   return {
@@ -253,7 +292,8 @@ function selectHttpInstrumentations(
 
 function selectDatabaseInstrumentations(
   instrumentDatabases: boolean,
-  dbLibraries?: ReadonlySet<string>
+  dbLibraries?: ReadonlySet<string>,
+  hookGovernance?: HookGovernanceRuntime
 ): Instrumentation<InstrumentationConfig>[] {
   if (!instrumentDatabases) {
     return [];
@@ -278,7 +318,15 @@ function selectDatabaseInstrumentations(
         )
     : [...DB_INSTRUMENTATION_DEFINITIONS.values()];
 
-  return definitions.map(definition => loadInstrumentation(definition));
+  return definitions.map(definition =>
+    loadInstrumentation(
+      definition,
+      createDatabaseInstrumentationConfig(
+        definition.moduleName,
+        hookGovernance
+      )
+    )
+  );
 }
 
 function selectFileInstrumentation(
@@ -320,9 +368,267 @@ function selectFileInstrumentation(
   return [instrumentation];
 }
 
+function createDatabaseInstrumentationConfig(
+  moduleName: string,
+  hookGovernance?: HookGovernanceRuntime
+): unknown {
+  if (!hookGovernance) {
+    return undefined;
+  }
+
+  const queryStartTimes = new Map<string, number>();
+  const emitStarted = (
+    span: HookSpan,
+    details: {
+      dbName?: string | undefined;
+      dbOperation?: string | undefined;
+      dbStatement?: string | undefined;
+      dbSystem?: string | undefined;
+      serverAddress?: string | undefined;
+      serverPort?: number | undefined;
+    }
+  ) => {
+    const spanId = span.spanContext().spanId;
+    const startTimeNs = Date.now() * 1_000_000;
+    queryStartTimes.set(spanId, startTimeNs);
+    void emitDatabaseHookGovernance({
+      details,
+      hookGovernance,
+      span,
+      stage: "started",
+      startTimeNs
+    });
+  };
+  const emitCompleted = (
+    span: HookSpan,
+    details: {
+      dbName?: string | undefined;
+      dbOperation?: string | undefined;
+      dbStatement?: string | undefined;
+      dbSystem?: string | undefined;
+      error?: string | undefined;
+      serverAddress?: string | undefined;
+      serverPort?: number | undefined;
+    }
+  ) => {
+    const spanId = span.spanContext().spanId;
+    const startTimeNs =
+      queryStartTimes.get(spanId) ?? Date.now() * 1_000_000;
+
+    queryStartTimes.delete(spanId);
+
+    void emitDatabaseHookGovernance({
+      details,
+      hookGovernance,
+      span,
+      stage: "completed",
+      startTimeNs
+    });
+  };
+
+  if (moduleName === "@opentelemetry/instrumentation-pg") {
+    return {
+      enhancedDatabaseReporting: true,
+      requestHook(
+        span: HookSpan,
+        info: {
+          connection?: {
+            database?: string;
+            host?: string;
+            port?: number;
+          };
+          query?: {
+            text?: string;
+          };
+        }
+      ) {
+        const dbStatement =
+          info.query?.text ?? toStringValue(getSpanAttribute(span, "db.statement"));
+
+        emitStarted(span, {
+          dbName:
+            info.connection?.database ??
+            toStringValue(getSpanAttribute(span, "db.name")),
+          dbOperation:
+            parseDbOperation(dbStatement) ??
+            toStringValue(getSpanAttribute(span, "db.operation")),
+          dbStatement,
+          dbSystem: toStringValue(getSpanAttribute(span, "db.system")) ?? "postgresql",
+          serverAddress:
+            info.connection?.host ??
+            toStringValue(getSpanAttribute(span, "server.address")) ??
+            toStringValue(getSpanAttribute(span, "net.peer.name")),
+          serverPort:
+            toNumberValue(getSpanAttribute(span, "server.port")) ??
+            toNumberValue(getSpanAttribute(span, "net.peer.port")) ??
+            info.connection?.port
+        });
+      },
+      responseHook(
+        span: HookSpan
+      ) {
+        const dbStatement = toStringValue(getSpanAttribute(span, "db.statement"));
+
+        emitCompleted(span, {
+          dbName: toStringValue(getSpanAttribute(span, "db.name")),
+          dbOperation:
+            parseDbOperation(dbStatement) ??
+            toStringValue(getSpanAttribute(span, "db.operation")),
+          dbStatement,
+          dbSystem: toStringValue(getSpanAttribute(span, "db.system")) ?? "postgresql",
+          error:
+            toStringValue(getSpanAttribute(span, "error.type")) ??
+            toStringValue(getSpanAttribute(span, "exception.message")),
+          serverAddress:
+            toStringValue(getSpanAttribute(span, "server.address")) ??
+            toStringValue(getSpanAttribute(span, "net.peer.name")),
+          serverPort:
+            toNumberValue(getSpanAttribute(span, "server.port")) ??
+            toNumberValue(getSpanAttribute(span, "net.peer.port"))
+        });
+      }
+    };
+  }
+
+  if (moduleName === "@opentelemetry/instrumentation-oracledb") {
+    return {
+      enhancedDatabaseReporting: true,
+      requestHook(
+        span: HookSpan,
+        info: {
+          connection?: {
+            hostName?: string;
+            port?: number;
+            serviceName?: string;
+          };
+          inputArgs?: unknown[];
+        }
+      ) {
+        const dbStatement = Array.isArray(info.inputArgs)
+          ? toStringValue(info.inputArgs[0])
+          : undefined;
+
+        emitStarted(span, {
+          dbName:
+            info.connection?.serviceName ??
+            toStringValue(getSpanAttribute(span, "db.name")),
+          dbOperation:
+            parseDbOperation(dbStatement) ??
+            toStringValue(getSpanAttribute(span, "db.operation")),
+          dbStatement:
+            dbStatement ?? toStringValue(getSpanAttribute(span, "db.statement")),
+          dbSystem: toStringValue(getSpanAttribute(span, "db.system")) ?? "oracle",
+          serverAddress:
+            info.connection?.hostName ??
+            toStringValue(getSpanAttribute(span, "server.address")) ??
+            toStringValue(getSpanAttribute(span, "net.peer.name")),
+          serverPort:
+            toNumberValue(getSpanAttribute(span, "server.port")) ??
+            toNumberValue(getSpanAttribute(span, "net.peer.port")) ??
+            info.connection?.port
+        });
+      },
+      responseHook(
+        span: HookSpan
+      ) {
+        const dbStatement = toStringValue(getSpanAttribute(span, "db.statement"));
+
+        emitCompleted(span, {
+          dbName: toStringValue(getSpanAttribute(span, "db.name")),
+          dbOperation:
+            parseDbOperation(dbStatement) ??
+            toStringValue(getSpanAttribute(span, "db.operation")),
+          dbStatement,
+          dbSystem: toStringValue(getSpanAttribute(span, "db.system")) ?? "oracle",
+          error:
+            toStringValue(getSpanAttribute(span, "error.type")) ??
+            toStringValue(getSpanAttribute(span, "exception.message")),
+          serverAddress:
+            toStringValue(getSpanAttribute(span, "server.address")) ??
+            toStringValue(getSpanAttribute(span, "net.peer.name")),
+          serverPort:
+            toNumberValue(getSpanAttribute(span, "server.port")) ??
+            toNumberValue(getSpanAttribute(span, "net.peer.port"))
+        });
+      }
+    };
+  }
+
+  return undefined;
+}
+
+async function emitDatabaseHookGovernance(input: {
+  details: {
+    dbName?: string | undefined;
+    dbOperation?: string | undefined;
+    dbStatement?: string | undefined;
+    dbSystem?: string | undefined;
+    error?: string | undefined;
+    serverAddress?: string | undefined;
+    serverPort?: number | undefined;
+  };
+  hookGovernance: HookGovernanceRuntime;
+  span: HookSpan;
+  stage: "completed" | "started";
+  startTimeNs: number;
+}): Promise<void> {
+  const spanContext = input.span.spanContext();
+  const nowNs = Date.now() * 1_000_000;
+  const dbOperation = input.details.dbOperation ?? "query";
+
+  const hookTrigger: Record<string, unknown> = {
+    attribute_key_identifiers: ["db.system", "db.operation", "db.statement"],
+    db_name: input.details.dbName,
+    db_operation: dbOperation,
+    db_statement: input.details.dbStatement,
+    db_system: input.details.dbSystem ?? "unknown",
+    server_address: input.details.serverAddress,
+    server_port: input.details.serverPort,
+    stage: input.stage,
+    type: "db_query"
+  };
+
+  if (input.stage === "completed") {
+    hookTrigger.duration_ms = Math.max(
+      0,
+      Math.round((nowNs - input.startTimeNs) / 1_000_000)
+    );
+    hookTrigger.error = input.details.error;
+  }
+
+  await evaluateHookGovernance(input.hookGovernance, {
+    activeSpan: input.span,
+    hookTrigger,
+    span: createHookSpan({
+      attributes: {
+        "db.name": input.details.dbName ?? "unknown",
+        "db.operation": dbOperation,
+        "db.statement": input.details.dbStatement ?? "",
+        "db.system": input.details.dbSystem ?? "unknown",
+        ...(input.details.serverAddress
+          ? { "server.address": input.details.serverAddress }
+          : {}),
+        ...(typeof input.details.serverPort === "number"
+          ? { "server.port": input.details.serverPort }
+          : {})
+      },
+      endTimeNs: nowNs,
+      kind: "CLIENT",
+      name: input.span.name ?? `DB ${dbOperation}`,
+      semanticType: `db_${dbOperation.toLowerCase()}`,
+      stage: input.stage,
+      startTimeNs: input.startTimeNs,
+      traceId: spanContext.traceId
+    }),
+    stage: input.stage,
+    traceId: spanContext.traceId
+  });
+}
+
 function patchFetch(
   spanProcessor: OpenBoxSpanProcessor,
-  ignoredUrls: string[]
+  ignoredUrls: string[],
+  hookGovernance?: HookGovernanceRuntime
 ): () => void {
   const originalFetch = globalThis.fetch;
 
@@ -349,10 +655,42 @@ function patchFetch(
 
     const requestBody = await captureRequestBody(request);
     const requestHeaders = headersToRecord(request.headers);
+    const spanContext = activeSpan.spanContext();
+    const startTimeNs = Date.now() * 1_000_000;
+
+    await evaluateHookGovernance(hookGovernance, {
+      activeSpan,
+      hookTrigger: {
+        attribute_key_identifiers: ["http.method", "http.url"],
+        method: request.method,
+        request_body: requestBody,
+        request_headers: requestHeaders,
+        stage: "started",
+        type: "http_request",
+        url
+      },
+      span: createHookSpan({
+        attributes: {
+          "http.method": request.method,
+          "http.url": url
+        },
+        endTimeNs: startTimeNs,
+        kind: "CLIENT",
+        name: `HTTP ${request.method}`,
+        requestBody,
+        requestHeaders,
+        semanticType: `http_${request.method.toLowerCase()}`,
+        stage: "started",
+        startTimeNs: startTimeNs,
+        traceId: spanContext.traceId
+      }),
+      stage: "started",
+      traceId: spanContext.traceId
+    });
+
     const response = await originalFetch(request);
     const responseHeaders = headersToRecord(response.headers);
     const responseBody = await captureResponseBody(response);
-    const spanContext = activeSpan.spanContext();
 
     spanProcessor.storeTraceBody(spanContext.traceId, {
       method: request.method,
@@ -361,6 +699,43 @@ function patchFetch(
       responseBody,
       responseHeaders,
       url
+    });
+    const endTimeNs = Date.now() * 1_000_000;
+
+    await evaluateHookGovernance(hookGovernance, {
+      activeSpan,
+      hookTrigger: {
+        attribute_key_identifiers: ["http.method", "http.url"],
+        method: request.method,
+        request_body: requestBody,
+        request_headers: requestHeaders,
+        response_body: responseBody,
+        response_headers: responseHeaders,
+        stage: "completed",
+        status_code: response.status,
+        type: "http_request",
+        url
+      },
+      span: createHookSpan({
+        attributes: {
+          "http.method": request.method,
+          "http.status_code": response.status,
+          "http.url": url
+        },
+        endTimeNs,
+        kind: "CLIENT",
+        name: `HTTP ${request.method}`,
+        requestBody,
+        requestHeaders,
+        responseBody,
+        responseHeaders,
+        semanticType: `http_${request.method.toLowerCase()}`,
+        stage: "completed",
+        startTimeNs,
+        traceId: spanContext.traceId
+      }),
+      stage: "completed",
+      traceId: spanContext.traceId
     });
 
     return response;
@@ -468,7 +843,10 @@ function disableGlobalTraceApi(): void {
   traceApi.disable?.();
 }
 
-function patchFileIo(fileSkipPatterns: string[]): () => void {
+function patchFileIo(
+  fileSkipPatterns: string[],
+  hookGovernance?: HookGovernanceRuntime
+): () => void {
   const require = createRequire(import.meta.url);
   const fsPromises = require("node:fs/promises") as typeof import("node:fs/promises");
   const fsModule = require("node:fs") as typeof import("node:fs");
@@ -492,10 +870,68 @@ function patchFileIo(fileSkipPatterns: string[]): () => void {
       return tracer.startActiveSpan("file.read", async span => {
         span.setAttribute("file.path", filePath);
         span.setAttribute("file.operation", "read");
+        const spanContext = span.spanContext();
+        const startTimeNs = Date.now() * 1_000_000;
+
+        await evaluateHookGovernance(hookGovernance, {
+          activeSpan: span,
+          hookTrigger: {
+            attribute_key_identifiers: ["file.path", "file.operation"],
+            file_operation: "read",
+            file_path: filePath,
+            stage: "started",
+            type: "file_operation"
+          },
+          span: createHookSpan({
+            attributes: {
+              "file.operation": "read",
+              "file.path": filePath
+            },
+            endTimeNs: startTimeNs,
+            kind: "INTERNAL",
+            name: "file.read",
+            semanticType: "file_read",
+            stage: "started",
+            startTimeNs,
+            traceId: spanContext.traceId
+          }),
+          stage: "started",
+          traceId: spanContext.traceId
+        });
 
         try {
           const result = await originalReadFile(...args);
-          span.setAttribute("file.bytes", getByteLength(result));
+          const bytes = getByteLength(result);
+          const endTimeNs = Date.now() * 1_000_000;
+          span.setAttribute("file.bytes", bytes);
+
+          await evaluateHookGovernance(hookGovernance, {
+            activeSpan: span,
+            hookTrigger: {
+              attribute_key_identifiers: ["file.path", "file.operation"],
+              bytes_read: bytes,
+              file_operation: "read",
+              file_path: filePath,
+              stage: "completed",
+              type: "file_operation"
+            },
+            span: createHookSpan({
+              attributes: {
+                "file.bytes": bytes,
+                "file.operation": "read",
+                "file.path": filePath
+              },
+              endTimeNs,
+              kind: "INTERNAL",
+              name: "file.read",
+              semanticType: "file_read",
+              stage: "completed",
+              startTimeNs,
+              traceId: spanContext.traceId
+            }),
+            stage: "completed",
+            traceId: spanContext.traceId
+          });
 
           return result;
         } finally {
@@ -519,10 +955,72 @@ function patchFileIo(fileSkipPatterns: string[]): () => void {
       return tracer.startActiveSpan("file.write", async span => {
         span.setAttribute("file.path", filePath);
         span.setAttribute("file.operation", "write");
-        span.setAttribute("file.bytes", getByteLength(data));
+        const bytes = getByteLength(data);
+        const spanContext = span.spanContext();
+        const startTimeNs = Date.now() * 1_000_000;
+        span.setAttribute("file.bytes", bytes);
+
+        await evaluateHookGovernance(hookGovernance, {
+          activeSpan: span,
+          hookTrigger: {
+            attribute_key_identifiers: ["file.path", "file.operation"],
+            bytes_written: bytes,
+            file_operation: "write",
+            file_path: filePath,
+            stage: "started",
+            type: "file_operation"
+          },
+          span: createHookSpan({
+            attributes: {
+              "file.bytes": bytes,
+              "file.operation": "write",
+              "file.path": filePath
+            },
+            endTimeNs: startTimeNs,
+            kind: "INTERNAL",
+            name: "file.write",
+            semanticType: "file_write",
+            stage: "started",
+            startTimeNs,
+            traceId: spanContext.traceId
+          }),
+          stage: "started",
+          traceId: spanContext.traceId
+        });
 
         try {
-          return await originalWriteFile(...args);
+          const result = await originalWriteFile(...args);
+          const endTimeNs = Date.now() * 1_000_000;
+
+          await evaluateHookGovernance(hookGovernance, {
+            activeSpan: span,
+            hookTrigger: {
+              attribute_key_identifiers: ["file.path", "file.operation"],
+              bytes_written: bytes,
+              file_operation: "write",
+              file_path: filePath,
+              stage: "completed",
+              type: "file_operation"
+            },
+            span: createHookSpan({
+              attributes: {
+                "file.bytes": bytes,
+                "file.operation": "write",
+                "file.path": filePath
+              },
+              endTimeNs,
+              kind: "INTERNAL",
+              name: "file.write",
+              semanticType: "file_write",
+              stage: "completed",
+              startTimeNs,
+              traceId: spanContext.traceId
+            }),
+            stage: "completed",
+            traceId: spanContext.traceId
+          });
+
+          return result;
         } finally {
           span.end();
         }
@@ -559,6 +1057,260 @@ function getByteLength(value: unknown): number {
 
 function shouldSkipFilePath(filePath: string, fileSkipPatterns: string[]): boolean {
   return fileSkipPatterns.some(pattern => filePath.includes(pattern));
+}
+
+async function evaluateHookGovernance(
+  hookGovernance: HookGovernanceRuntime | undefined,
+  input: {
+    activeSpan: HookSpan;
+    hookTrigger: Record<string, unknown>;
+    span: Record<string, unknown>;
+    stage: "completed" | "started";
+    traceId: string;
+  }
+): Promise<void> {
+  if (!hookGovernance) {
+    return;
+  }
+
+  const activityContext = resolveActivityContext(
+    hookGovernance.spanProcessor,
+    input.traceId
+  );
+
+  if (!activityContext) {
+    return;
+  }
+
+  hookGovernance.spanProcessor.markGoverned(
+    input.activeSpan.spanContext().spanId
+  );
+
+  const payload: Record<string, unknown> = {
+    activity_id: activityContext.activityId,
+    activity_type: activityContext.activityType,
+    event_type:
+      input.stage === "started"
+        ? WorkflowEventType.ACTIVITY_STARTED
+        : WorkflowEventType.ACTIVITY_COMPLETED,
+    hook_trigger: input.hookTrigger,
+    run_id: activityContext.runId,
+    source: "workflow-telemetry",
+    span_count: 1,
+    spans: [input.span],
+    task_queue: activityContext.taskQueue,
+    timestamp: new Date().toISOString(),
+    workflow_id: activityContext.workflowId,
+    workflow_type: activityContext.workflowType
+  };
+
+  if (typeof activityContext.attempt === "number") {
+    payload.attempt = activityContext.attempt;
+  }
+
+  if (activityContext.activityInput !== undefined) {
+    payload.activity_input = activityContext.activityInput;
+  }
+
+  let verdict;
+
+  try {
+    verdict = await hookGovernance.client.evaluate(payload);
+  } catch (error) {
+    if (hookGovernance.onApiError === "fail_open") {
+      return;
+    }
+
+    throw new GovernanceHaltError(
+      `Governance API error: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+  }
+
+  if (!verdict || !Verdict.shouldStop(verdict.verdict)) {
+    return;
+  }
+
+  const reason = verdict.reason ?? "Hook blocked by governance";
+
+  hookGovernance.spanProcessor.setActivityAbort(
+    activityContext.workflowId,
+    activityContext.activityId,
+    reason
+  );
+
+  if (verdict.verdict === Verdict.HALT) {
+    hookGovernance.spanProcessor.setHaltRequested(
+      activityContext.workflowId,
+      activityContext.activityId,
+      reason
+    );
+  }
+
+  throw new GovernanceHaltError(`Governance blocked: ${reason}`);
+}
+
+function resolveActivityContext(
+  spanProcessor: OpenBoxSpanProcessor,
+  traceId: string
+): {
+  activityId: string;
+  activityInput?: unknown;
+  activityType: string;
+  attempt?: number;
+  runId: string;
+  taskQueue: string;
+  workflowId: string;
+  workflowType: string;
+} | undefined {
+  const executionContext = getOpenBoxExecutionContext();
+
+  if (
+    executionContext?.activityId &&
+    executionContext.activityType &&
+    executionContext.workflowId &&
+    executionContext.workflowType &&
+    executionContext.runId
+  ) {
+    return {
+      activityId: executionContext.activityId,
+      activityType: executionContext.activityType,
+      runId: executionContext.runId,
+      taskQueue: executionContext.taskQueue ?? "mastra",
+      workflowId: executionContext.workflowId,
+      workflowType: executionContext.workflowType,
+      ...(typeof executionContext.attempt === "number"
+        ? { attempt: executionContext.attempt }
+        : {})
+    };
+  }
+
+  const spanContext = spanProcessor.getActivityContextByTrace(traceId);
+
+  if (!spanContext) {
+    return undefined;
+  }
+
+  const activityId = toStringValue(spanContext.activity_id);
+  const activityType = toStringValue(spanContext.activity_type);
+  const workflowId = toStringValue(spanContext.workflow_id);
+  const workflowType = toStringValue(spanContext.workflow_type);
+  const runId = toStringValue(spanContext.run_id);
+
+  if (!activityId || !activityType || !workflowId || !workflowType || !runId) {
+    return undefined;
+  }
+
+  return {
+    activityId,
+    activityInput: spanContext.activity_input,
+    activityType,
+    runId,
+    taskQueue: toStringValue(spanContext.task_queue) ?? "mastra",
+    workflowId,
+    workflowType,
+    ...(typeof spanContext.attempt === "number"
+      ? { attempt: spanContext.attempt }
+      : {})
+  };
+}
+
+function createHookSpan(input: {
+  attributes: Record<string, unknown>;
+  endTimeNs: number;
+  kind: string;
+  name: string;
+  requestBody?: string | undefined;
+  requestHeaders?: Record<string, string> | undefined;
+  responseBody?: string | undefined;
+  responseHeaders?: Record<string, string> | undefined;
+  semanticType: string;
+  stage: "completed" | "started";
+  startTimeNs: number;
+  traceId: string;
+}): Record<string, unknown> {
+  const span: Record<string, unknown> = {
+    attributes: input.attributes,
+    duration_ns: Math.max(0, input.endTimeNs - input.startTimeNs),
+    end_time: input.endTimeNs,
+    events: [],
+    kind: input.kind,
+    name: input.name,
+    semantic_type: input.semanticType,
+    span_id: normalizeHexId(undefined, 16),
+    stage: input.stage,
+    start_time: input.startTimeNs,
+    status: {
+      code: "OK"
+    },
+    trace_id: normalizeHexId(input.traceId, 32)
+  };
+
+  if (input.requestBody !== undefined) {
+    span.request_body = input.requestBody;
+  }
+
+  if (input.responseBody !== undefined) {
+    span.response_body = input.responseBody;
+  }
+
+  if (input.requestHeaders !== undefined) {
+    span.request_headers = input.requestHeaders;
+  }
+
+  if (input.responseHeaders !== undefined) {
+    span.response_headers = input.responseHeaders;
+  }
+
+  return span;
+}
+
+function normalizeHexId(
+  value: string | undefined,
+  width: number
+): string {
+  const base = (value ?? randomUUID().replaceAll("-", "")).toLowerCase();
+  const filtered = base.replace(/[^a-f0-9]/g, "");
+
+  if (filtered.length >= width) {
+    return filtered.slice(0, width);
+  }
+
+  return filtered.padEnd(width, "0");
+}
+
+function toStringValue(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function toNumberValue(value: unknown): number | undefined {
+  return typeof value === "number" ? value : undefined;
+}
+
+function getSpanAttribute(
+  span: {
+    attributes?: Record<string, unknown>;
+  },
+  key: string
+): unknown {
+  return span.attributes?.[key];
+}
+
+function parseDbOperation(statement: string | undefined): string | undefined {
+  if (!statement) {
+    return undefined;
+  }
+
+  const trimmed = statement.trim();
+
+  if (!trimmed) {
+    return undefined;
+  }
+
+  const [operation] = trimmed.split(/\s+/);
+
+  return operation?.toUpperCase();
 }
 
 function loadInstrumentation(

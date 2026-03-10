@@ -113,9 +113,11 @@ async function createRuntime(options: WithOpenBoxOptions): Promise<OpenBoxRuntim
     captureHttpBodies: config.httpCapture,
     dbLibraries: options.dbLibraries,
     fileSkipPatterns: options.fileSkipPatterns,
+    governanceClient: client,
     ignoredUrls,
     instrumentDatabases: config.instrumentDatabases,
     instrumentFileIo: config.instrumentFileIo,
+    onHookApiError: config.onApiError,
     spanProcessor
   });
   let shutdownComplete = false;
