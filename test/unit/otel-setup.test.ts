@@ -199,7 +199,7 @@ describe("setupOpenBoxOpenTelemetry", () => {
       url: downstreamUrl
     });
     expect(started).toMatchObject({
-      activity_id: "act-123",
+      activity_id: "act-123::hook:http_request:started",
       activity_input: [
         {
           keyword: "bitcoin"
@@ -211,7 +211,7 @@ describe("setupOpenBoxOpenTelemetry", () => {
       workflow_type: "crypto-agent"
     });
     expect(completed).toMatchObject({
-      activity_id: "act-123",
+      activity_id: "act-123::hook:http_request:completed",
       activity_input: [
         {
           keyword: "bitcoin"

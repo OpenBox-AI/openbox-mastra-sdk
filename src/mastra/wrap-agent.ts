@@ -475,18 +475,21 @@ async function finalizeAgentSuccess(
       workflow_output: workflowOutput
     },
     resolvedOutput,
-    streamMeta
+    streamMeta,
+    defaultModelInfo
   );
   const compactPayload = buildWorkflowCompletedCompactPayload(
     basePayload,
     workflowOutput,
     resolvedOutput,
-    streamMeta
+    streamMeta,
+    defaultModelInfo
   );
   const ultraMinimalPayload = buildWorkflowCompletedUltraMinimalPayload(
     basePayload,
     resolvedOutput,
-    streamMeta
+    streamMeta,
+    defaultModelInfo
   );
 
   const verdict = await evaluateAgentEvent(
@@ -512,14 +515,15 @@ function buildWorkflowCompletedCompactPayload(
   },
   workflowOutput: unknown,
   output: unknown,
-  streamMeta?: AgentStreamMeta
+  streamMeta?: AgentStreamMeta,
+  fallbackModelInfo: AgentModelInfo = {}
 ): Record<string, unknown> & { event_type: WorkflowEventType } {
   const endTimeMs = Date.now();
   const startTimeMs = streamMeta?.startTimeMs;
   const durationMs =
     typeof startTimeMs === "number" ? Math.max(0, endTimeMs - startTimeMs) : undefined;
   const usage = extractUsageMetrics(output);
-  const modelInfo = extractModelInfo(output);
+  const modelInfo = extractModelInfo(output, fallbackModelInfo);
   const syntheticSpans = buildWorkflowTelemetrySpans(
     [],
     modelInfo,
@@ -573,14 +577,15 @@ function buildWorkflowCompletedUltraMinimalPayload(
     workflow_type: string;
   },
   output: unknown,
-  streamMeta?: AgentStreamMeta
+  streamMeta?: AgentStreamMeta,
+  fallbackModelInfo: AgentModelInfo = {}
 ): Record<string, unknown> & { event_type: WorkflowEventType } {
   const endTimeMs = Date.now();
   const startTimeMs = streamMeta?.startTimeMs;
   const durationMs =
     typeof startTimeMs === "number" ? Math.max(0, endTimeMs - startTimeMs) : undefined;
   const usage = extractUsageMetrics(output);
-  const modelInfo = extractModelInfo(output);
+  const modelInfo = extractModelInfo(output, fallbackModelInfo);
 
   return {
     ...basePayload,
@@ -612,14 +617,15 @@ function buildWorkflowCompletedTelemetryPayload(
     workflow_type: string;
   },
   output: unknown,
-  streamMeta?: AgentStreamMeta
+  streamMeta?: AgentStreamMeta,
+  fallbackModelInfo: AgentModelInfo = {}
 ): Record<string, unknown> & { event_type: WorkflowEventType } {
   const endTimeMs = Date.now();
   const startTimeMs = streamMeta?.startTimeMs;
   const durationMs =
     typeof startTimeMs === "number" ? Math.max(0, endTimeMs - startTimeMs) : undefined;
   const usage = extractUsageMetrics(output);
-  const modelInfo = extractModelInfo(output);
+  const modelInfo = extractModelInfo(output, fallbackModelInfo);
   const spans = buildWorkflowTelemetrySpans(
     normalizeSpansForGovernance(
       options.spanProcessor.getBuffer(workflowId, runId)?.spans ?? []
@@ -783,12 +789,18 @@ function truncateString(value: string, maxChars: number): string {
   return `${value.slice(0, Math.max(0, maxChars - 16))}...[truncated]`;
 }
 
-function extractModelInfo(output: unknown): {
+function extractModelInfo(
+  output: unknown,
+  fallback: AgentModelInfo = {}
+): {
   modelId?: string;
   provider?: string;
 } {
   if (!output || typeof output !== "object") {
-    return {};
+    return {
+      ...(fallback.modelId ? { modelId: fallback.modelId } : {}),
+      ...(fallback.provider ? { provider: fallback.provider } : {})
+    };
   }
 
   const record = output as Record<string, unknown>;
@@ -831,7 +843,9 @@ function extractModelInfo(output: unknown): {
 
   return {
     ...(modelId ? { modelId } : {}),
-    ...(provider ? { provider } : {})
+    ...(!modelId && fallback.modelId ? { modelId: fallback.modelId } : {}),
+    ...(provider ? { provider } : {}),
+    ...(!provider && fallback.provider ? { provider: fallback.provider } : {})
   };
 }
 

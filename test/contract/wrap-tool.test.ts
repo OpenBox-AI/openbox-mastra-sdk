@@ -140,8 +140,15 @@ describe("wrapTool", () => {
       workflow_id: "wf-123"
     });
     expect(completedEvent).toMatchObject({
-      span_count: 0,
-      spans: []
+      span_count: 1
+    });
+    expect(completedEvent).toBeDefined();
+    const completedSpans = (completedEvent?.spans as Array<Record<string, unknown>>) ?? [];
+    expect(Array.isArray(completedSpans)).toBe(true);
+    expect(completedSpans).toHaveLength(1);
+    expect(completedSpans[0]).toMatchObject({
+      kind: "INTERNAL",
+      semantic_type: "tool_execution"
     });
   });
 
@@ -503,6 +510,114 @@ describe("wrapTool", () => {
     await telemetry.shutdown();
     await server.close();
     downstream.close();
+  });
+
+  it("uses hook-scoped activity IDs so hook completion cannot shadow final completion", async () => {
+    const server = await startOpenBoxServer({
+      evaluate() {
+        return { verdict: "allow" };
+      }
+    });
+    const downstream = createServer((request, response) => {
+      request.resume();
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ ok: true }));
+    });
+
+    await new Promise<void>(resolve => {
+      downstream.listen(0, "127.0.0.1", () => resolve());
+    });
+
+    const address = downstream.address();
+
+    if (!address || typeof address === "string") {
+      throw new Error("Expected downstream server address");
+    }
+
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_hook_activity_ids",
+      apiUrl: server.url,
+      validate: false
+    });
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+    const spanProcessor = new OpenBoxSpanProcessor();
+    const telemetry = setupOpenBoxOpenTelemetry({
+      captureHttpBodies: true,
+      governanceClient: client,
+      instrumentDatabases: false,
+      instrumentFileIo: false,
+      spanProcessor
+    });
+    const wrapped = wrapTool(
+      createTool({
+        description: "Fetch remote data",
+        id: "fetch-remote-data",
+        inputSchema: z.object({
+          id: z.string()
+        }),
+        outputSchema: z.object({
+          ok: z.boolean()
+        }),
+        async execute() {
+          const response = await fetch(`http://127.0.0.1:${address.port}/data`);
+
+          return (await response.json()) as { ok: boolean };
+        }
+      }),
+      {
+        client,
+        config,
+        spanProcessor
+      }
+    );
+
+    const result = await wrapped.execute?.(
+      { id: "coin-1" },
+      {
+        workflow: {
+          runId: "run-hook-ids",
+          setState: vi.fn(),
+          state: {},
+          suspend: vi.fn(async () => undefined),
+          workflowId: "wf-hook-ids"
+        }
+      }
+    );
+
+    await telemetry.shutdown();
+    await server.close();
+    downstream.close();
+
+    expect(result).toEqual({ ok: true });
+
+    const payloads = server.requests
+      .filter(request => request.pathname === "/api/v1/governance/evaluate")
+      .map(request => request.body);
+    const hookCompleted = payloads.find(
+      payload =>
+        payload.event_type === "ActivityCompleted" &&
+        payload.hook_trigger &&
+        (payload.hook_trigger as Record<string, unknown>).stage === "completed"
+    );
+    const finalCompleted = payloads.find(
+      payload =>
+        payload.event_type === "ActivityCompleted" &&
+        Object.prototype.hasOwnProperty.call(payload, "activity_output")
+    );
+
+    expect(hookCompleted).toBeDefined();
+    expect(finalCompleted).toBeDefined();
+    expect(hookCompleted?.activity_id).toBe(
+      "wf-hook-ids:fetch-remote-data::hook:http_request:completed"
+    );
+    expect(finalCompleted?.activity_id).toBe("wf-hook-ids:fetch-remote-data");
+    expect(finalCompleted?.activity_id).not.toBe(hookCompleted?.activity_id);
+    expect(finalCompleted?.activity_output).toEqual({ ok: true });
   });
 
   it("normalizes spaced activity type names to camelCase", async () => {

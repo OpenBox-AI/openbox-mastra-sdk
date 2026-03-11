@@ -258,7 +258,7 @@ The SDK must emit canonical workflow-boundary governance events, adapted to Mast
   - `stage`
   - `attribute_key_identifiers`
   - type-specific metadata (for example method/url for HTTP)
-- activity boundary completion events must emit `span_count: 0` and `spans: []` when hook-level operation telemetry is enabled
+- activity boundary completion events must emit at least one timing span so latency distribution metrics can be computed even when hook-level provider spans are unavailable
 
 ### Ordering and determinism
 

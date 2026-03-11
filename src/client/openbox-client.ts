@@ -302,14 +302,21 @@ function summarizeEvaluatePayload(
   payload: Record<string, unknown>
 ): Record<string, unknown> {
   return {
+    activity_id: payload.activity_id,
     activity_type: payload.activity_type,
     event_type: payload.event_type,
-    has_activity_input: Object.hasOwn(payload, "activity_input"),
-    has_activity_output: Object.hasOwn(payload, "activity_output"),
-    has_error: Object.hasOwn(payload, "error"),
-    has_signal_args: Object.hasOwn(payload, "signal_args"),
-    has_workflow_input: Object.hasOwn(payload, "workflow_input"),
-    has_workflow_output: Object.hasOwn(payload, "workflow_output"),
+    has_activity_input: payload.activity_input !== undefined,
+    has_activity_output: payload.activity_output !== undefined,
+    has_error: payload.error !== undefined,
+    has_signal_args: payload.signal_args !== undefined,
+    has_workflow_input: payload.workflow_input !== undefined,
+    has_workflow_output: payload.workflow_output !== undefined,
+    hook_stage:
+      payload.hook_trigger &&
+      typeof payload.hook_trigger === "object" &&
+      "stage" in payload.hook_trigger
+        ? (payload.hook_trigger as Record<string, unknown>).stage
+        : undefined,
     run_id: payload.run_id,
     workflow_id: payload.workflow_id,
     workflow_type: payload.workflow_type

@@ -89,6 +89,7 @@ export async function executeGovernedActivity<TInput, TOutput>({
 
   const startVerdict = dependencies.config.sendActivityStartEvent
     ? await evaluateActivityEvent(dependencies, {
+        activity_id: descriptor.activityId,
         activity_input: inputForEvent,
         activity_type: descriptor.activityType,
         attempt: descriptor.attempt,
@@ -170,6 +171,7 @@ export async function executeGovernedActivity<TInput, TOutput>({
       let error: Record<string, unknown> | undefined;
       let haltReason: string | undefined;
       let output: TOutput | undefined;
+      const activityStartMs = Date.now();
 
       try {
         output = await trace
@@ -235,21 +237,30 @@ export async function executeGovernedActivity<TInput, TOutput>({
             descriptor.workflowId,
             descriptor.activityId
           );
+          const activityEndMs = Date.now();
+          const durationMs = Math.max(0, activityEndMs - activityStartMs);
+          const timingSpan = createSyntheticActivityTimingSpan(
+            descriptor,
+            activityStartMs,
+            activityEndMs,
+            error
+          );
 
           if (!wasAborted) {
             const completedVerdict = await evaluateActivityEvent(dependencies, {
+              activity_id: descriptor.activityId,
               activity_input: serializeActivityInputForEvent(inputForExecution),
               activity_output: serializeValue(output),
               activity_type: descriptor.activityType,
               attempt: descriptor.attempt,
-              duration_ms: undefined,
-              end_time: undefined,
+              duration_ms: durationMs,
+              end_time: activityEndMs,
               error,
               event_type: WorkflowEventType.ACTIVITY_COMPLETED,
               run_id: descriptor.runId,
-              span_count: 0,
-              spans: [],
-              start_time: undefined,
+              span_count: 1,
+              spans: [timingSpan],
+              start_time: activityStartMs,
               status: error ? "failed" : "completed",
               task_queue: descriptor.taskQueue,
               workflow_id: descriptor.workflowId,
@@ -522,6 +533,58 @@ function normalizeActivityType(value: string): string {
   return `${first}${rest
     .map(token => token.charAt(0).toUpperCase() + token.slice(1))
     .join("")}`;
+}
+
+function createSyntheticActivityTimingSpan(
+  descriptor: {
+    activityId: string;
+    activityType: string;
+    runId: string;
+    workflowId: string;
+    workflowType: string;
+  },
+  startTimeMs: number,
+  endTimeMs: number,
+  error: Record<string, unknown> | undefined
+): Record<string, unknown> {
+  const startTimeNs = Math.max(0, Math.floor(startTimeMs * 1_000_000));
+  const endTimeNs = Math.max(startTimeNs + 1, Math.floor(endTimeMs * 1_000_000));
+  const statusDescription =
+    typeof error?.message === "string" ? error.message : undefined;
+
+  return {
+    attributes: {
+      "openbox.activity_id": descriptor.activityId,
+      "openbox.activity_type": descriptor.activityType,
+      "openbox.run_id": descriptor.runId,
+      "openbox.synthetic": true,
+      "openbox.workflow_id": descriptor.workflowId,
+      "openbox.workflow_type": descriptor.workflowType
+    },
+    duration_ns: Math.max(1, endTimeNs - startTimeNs),
+    end_time: endTimeNs,
+    events: [],
+    kind: "INTERNAL",
+    name: `openbox.synthetic.activity.${descriptor.activityType}`,
+    semantic_type: "tool_execution",
+    span_id: randomHex(16),
+    start_time: startTimeNs,
+    status: {
+      code: error ? "ERROR" : "OK",
+      ...(statusDescription ? { description: statusDescription } : {})
+    },
+    trace_id: randomHex(32)
+  };
+}
+
+function randomHex(width: number): string {
+  const value = randomUUID().replaceAll("-", "").toLowerCase();
+
+  if (value.length >= width) {
+    return value.slice(0, width);
+  }
+
+  return value.padEnd(width, "0");
 }
 
 async function evaluateActivityEvent(

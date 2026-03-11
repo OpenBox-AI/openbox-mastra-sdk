@@ -1243,7 +1243,11 @@ async function evaluateHookGovernance(
   );
 
   const payload: Record<string, unknown> = {
-    activity_id: activityContext.activityId,
+    activity_id: buildHookActivityId(
+      activityContext.activityId,
+      input.hookTrigger.type,
+      input.stage
+    ),
     activity_type: activityContext.activityType,
     event_type:
       input.stage === "started"
@@ -1317,6 +1321,20 @@ async function evaluateHookGovernance(
   }
 
   throw new GovernanceHaltError(`Governance blocked: ${reason}`);
+}
+
+function buildHookActivityId(
+  baseActivityId: string,
+  hookType: unknown,
+  stage: "completed" | "started"
+): string {
+  const normalizedHookType =
+    typeof hookType === "string"
+      ? hookType.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_")
+      : "";
+  const safeHookType = normalizedHookType.length > 0 ? normalizedHookType : "hook";
+
+  return `${baseActivityId}::hook:${safeHookType}:${stage}`;
 }
 
 function resolveActivityContext(
