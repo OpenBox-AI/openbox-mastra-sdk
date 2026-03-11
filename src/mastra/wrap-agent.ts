@@ -32,6 +32,11 @@ interface AgentStreamMeta {
   startTimeMs: number;
 }
 
+interface AgentModelInfo {
+  modelId?: string;
+  provider?: string;
+}
+
 export function wrapAgent<TAgent>(agent: TAgent, options: WrapToolOptions): TAgent {
   const baseAgent = agent as Record<PropertyKey, unknown> & {
     generate?: (messages: unknown, options?: Record<string, unknown>) => Promise<any>;
@@ -58,6 +63,7 @@ export function wrapAgent<TAgent>(agent: TAgent, options: WrapToolOptions): TAge
   const originalStream = baseAgent.stream?.bind(baseAgent);
   const originalResumeGenerate = baseAgent.resumeGenerate?.bind(baseAgent);
   const originalResumeStream = baseAgent.resumeStream?.bind(baseAgent);
+  const defaultModelInfo = extractAgentModelInfo(baseAgent);
 
   if (originalGenerate) {
     baseAgent.generate = async (messages, executionOptions = {}) => {
@@ -75,7 +81,8 @@ export function wrapAgent<TAgent>(agent: TAgent, options: WrapToolOptions): TAge
           phase: "start",
           runId,
           workflowId,
-          workflowType
+          workflowType,
+          defaultModelInfo
         }
       );
     };
@@ -96,7 +103,8 @@ export function wrapAgent<TAgent>(agent: TAgent, options: WrapToolOptions): TAge
           phase: "start",
           runId,
           workflowId,
-          workflowType
+          workflowType,
+          defaultModelInfo
         }
       );
 
@@ -120,7 +128,8 @@ export function wrapAgent<TAgent>(agent: TAgent, options: WrapToolOptions): TAge
               workflowId,
               workflowType,
               fullOutput,
-              streamMeta
+              streamMeta,
+              defaultModelInfo
             );
           }
         });
@@ -148,7 +157,8 @@ export function wrapAgent<TAgent>(agent: TAgent, options: WrapToolOptions): TAge
         phase: "resume",
         runId: runId ?? randomUUID(),
         workflowId,
-        workflowType
+        workflowType,
+        defaultModelInfo
       });
     };
   }
@@ -171,7 +181,8 @@ export function wrapAgent<TAgent>(agent: TAgent, options: WrapToolOptions): TAge
         phase: "resume",
         runId: runId ?? randomUUID(),
         workflowId,
-        workflowType
+        workflowType,
+        defaultModelInfo
       });
 
       if (output && typeof output === "object") {
@@ -195,7 +206,8 @@ export function wrapAgent<TAgent>(agent: TAgent, options: WrapToolOptions): TAge
               workflowId,
               workflowType,
               fullOutput,
-              streamMeta
+              streamMeta,
+              defaultModelInfo
             );
           }
         });
@@ -220,7 +232,8 @@ async function executeAgentLifecycle<T>({
   phase,
   runId,
   workflowId,
-  workflowType
+  workflowType,
+  defaultModelInfo
 }: {
   messages?: unknown;
   operation: () => Promise<T>;
@@ -229,6 +242,7 @@ async function executeAgentLifecycle<T>({
   runId: string;
   workflowId: string;
   workflowType: string;
+  defaultModelInfo: AgentModelInfo;
 }): Promise<T> {
   if (
     phase === "start" &&
@@ -333,7 +347,8 @@ async function executeAgentLifecycle<T>({
             result,
             {
               startTimeMs
-            }
+            },
+            defaultModelInfo
           );
         }
 
@@ -437,18 +452,20 @@ async function finalizeAgentSuccess(
   workflowId: string,
   workflowType: string,
   output: unknown,
-  streamMeta?: AgentStreamMeta
+  streamMeta?: AgentStreamMeta,
+  defaultModelInfo: AgentModelInfo = {}
 ): Promise<void> {
   if (options.config.skipWorkflowTypes.has(workflowType)) {
     return;
   }
+  const resolvedOutput = applyDefaultModelInfo(output, defaultModelInfo);
   const basePayload = {
     event_type: WorkflowEventType.WORKFLOW_COMPLETED,
     run_id: runId,
     workflow_id: workflowId,
     workflow_type: workflowType
   } as const;
-  const workflowOutput = serializeWorkflowOutputForGovernance(output);
+  const workflowOutput = serializeWorkflowOutputForGovernance(resolvedOutput);
   const telemetryPayload = buildWorkflowCompletedTelemetryPayload(
     options,
     workflowId,
@@ -457,18 +474,18 @@ async function finalizeAgentSuccess(
       ...basePayload,
       workflow_output: workflowOutput
     },
-    output,
+    resolvedOutput,
     streamMeta
   );
   const compactPayload = buildWorkflowCompletedCompactPayload(
     basePayload,
     workflowOutput,
-    output,
+    resolvedOutput,
     streamMeta
   );
   const ultraMinimalPayload = buildWorkflowCompletedUltraMinimalPayload(
     basePayload,
-    output,
+    resolvedOutput,
     streamMeta
   );
 
@@ -815,6 +832,69 @@ function extractModelInfo(output: unknown): {
   return {
     ...(modelId ? { modelId } : {}),
     ...(provider ? { provider } : {})
+  };
+}
+
+function extractAgentModelInfo(
+  agentRecord: Record<PropertyKey, unknown>
+): AgentModelInfo {
+  const model =
+    agentRecord.model && typeof agentRecord.model === "object"
+      ? (agentRecord.model as Record<string, unknown>)
+      : undefined;
+  const config =
+    model?.config && typeof model.config === "object"
+      ? (model.config as Record<string, unknown>)
+      : undefined;
+  const modelIdCandidates = [model?.modelId, config?.modelId];
+  const providerCandidates = [config?.provider, model?.provider];
+  let modelId: string | undefined;
+  let provider: string | undefined;
+
+  for (const candidate of modelIdCandidates) {
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
+      modelId = candidate;
+      break;
+    }
+  }
+
+  for (const candidate of providerCandidates) {
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
+      provider = candidate;
+      break;
+    }
+  }
+
+  return {
+    ...(modelId ? { modelId } : {}),
+    ...(provider ? { provider } : {})
+  };
+}
+
+function applyDefaultModelInfo(
+  output: unknown,
+  fallback: AgentModelInfo
+): unknown {
+  if (!output || typeof output !== "object") {
+    return output;
+  }
+
+  const record = output as Record<string, unknown>;
+  const hasModelId =
+    typeof record.modelId === "string" &&
+    (record.modelId as string).trim().length > 0;
+  const hasProvider =
+    typeof record.provider === "string" &&
+    (record.provider as string).trim().length > 0;
+
+  if ((hasModelId || !fallback.modelId) && (hasProvider || !fallback.provider)) {
+    return output;
+  }
+
+  return {
+    ...record,
+    ...(!hasModelId && fallback.modelId ? { modelId: fallback.modelId } : {}),
+    ...(!hasProvider && fallback.provider ? { provider: fallback.provider } : {})
   };
 }
 

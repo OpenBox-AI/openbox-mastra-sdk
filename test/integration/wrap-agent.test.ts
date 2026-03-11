@@ -600,6 +600,91 @@ describe("wrapAgent", () => {
     expect(parsedResponse.usage?.output_tokens).toBe(6);
   });
 
+  it("emits synthetic usage span with agent model fallback when output modelId is missing", async () => {
+    const server = await startOpenBoxServer({
+      evaluate() {
+        return { verdict: "allow" };
+      }
+    });
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_agent",
+      apiUrl: server.url,
+      validate: false
+    });
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+    const spanProcessor = new OpenBoxSpanProcessor();
+    const fakeAgent = wrapAgent(
+      {
+        id: "telemetry-agent-model-fallback",
+        model: {
+          config: {
+            provider: "openai.responses"
+          },
+          modelId: "gpt-4o-mini"
+        },
+        name: "Telemetry Agent Model Fallback",
+        async generate(
+          _messages?: unknown,
+          _executionOptions?: Record<string, unknown>
+        ) {
+          return {
+            finishReason: "stop",
+            text: "ok",
+            usage: {
+              inputTokens: 15,
+              outputTokens: 5,
+              totalTokens: 20
+            }
+          };
+        }
+      },
+      {
+        client,
+        config,
+        spanProcessor
+      }
+    );
+
+    await fakeAgent.generate("hello", {
+      runId: "agent-telemetry-model-fallback-run"
+    });
+
+    await server.close();
+
+    const completedEvent = server.requests
+      .filter(request => request.pathname === "/api/v1/governance/evaluate")
+      .map(request => request.body)
+      .find(body => body.event_type === "WorkflowCompleted");
+    expect(completedEvent).toHaveProperty("model_id", "gpt-4o-mini");
+    const spans = (completedEvent as { spans?: Array<Record<string, unknown>> }).spans ?? [];
+    const syntheticUsageSpan = spans.find(span => {
+      const attributes =
+        span.attributes && typeof span.attributes === "object"
+          ? (span.attributes as Record<string, unknown>)
+          : undefined;
+      return attributes?.["http.url"] === "https://api.openai.com/v1/responses";
+    });
+
+    expect(syntheticUsageSpan).toBeDefined();
+    const responseBody = (syntheticUsageSpan as { response_body?: unknown })
+      .response_body;
+    const parsedResponse = JSON.parse(responseBody as string) as {
+      model?: string;
+      usage?: {
+        input_tokens?: number;
+        output_tokens?: number;
+      };
+    };
+    expect(parsedResponse.model).toBe("gpt-4o-mini");
+    expect(parsedResponse.usage?.input_tokens).toBe(15);
+    expect(parsedResponse.usage?.output_tokens).toBe(5);
+  });
+
   it("falls back to compact workflow completion payload when telemetry schema is rejected", async () => {
     let workflowCompletedAttempts = 0;
     const server = await startOpenBoxServer({

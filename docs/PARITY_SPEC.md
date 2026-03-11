@@ -44,6 +44,7 @@ The SDK must export both zero-code and manual wiring APIs.
 - `OpenBoxClient`
 - `OpenBoxSpanProcessor`
 - `setupOpenBoxOpenTelemetry(options)`
+- `traced(asyncFn, options)`
 - `wrapTool(tool, options)`
 - `wrapAgent(agent, options)`
 - `wrapWorkflow(workflow, options)`
@@ -337,6 +338,7 @@ The SDK must provide canonical telemetry buffering with stronger Node integratio
   - HTTP request started/completed
   - DB query started/completed
   - file operation started/completed
+  - traced function call started/completed
 - mark hook-governed spans so boundary payloads avoid duplicate span transport
 - propagate hook abort/halt state within the same activity execution context
 

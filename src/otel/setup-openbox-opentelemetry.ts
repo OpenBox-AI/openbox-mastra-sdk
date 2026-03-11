@@ -168,6 +168,14 @@ export interface OpenBoxTelemetryController {
   tracerProvider: NodeTracerProvider;
 }
 
+export interface OpenBoxTracedOptions {
+  captureArgs?: boolean | undefined;
+  captureResult?: boolean | undefined;
+  module?: string | undefined;
+  name?: string | undefined;
+  tracerName?: string | undefined;
+}
+
 interface HookGovernanceRuntime {
   client: OpenBoxClient;
   onApiError: OpenBoxApiErrorPolicy;
@@ -183,6 +191,7 @@ const APPROVAL_ABORT_PREFIX = "__openbox_approval__:";
 
 let activeFetchRestore: (() => void) | undefined;
 let activeFileRestore: (() => void) | undefined;
+let activeHookGovernanceRuntime: HookGovernanceRuntime | undefined;
 let activeUnregister: (() => void) | undefined;
 
 export function setupOpenBoxOpenTelemetry({
@@ -220,6 +229,7 @@ export function setupOpenBoxOpenTelemetry({
         spanProcessor
       }
     : undefined;
+  activeHookGovernanceRuntime = hookGovernance;
 
   const instrumentations: Instrumentation<InstrumentationConfig>[] = [
     ...selectHttpInstrumentations(ignoredUrls, captureHttpBodies),
@@ -256,6 +266,133 @@ export function setupOpenBoxOpenTelemetry({
       disableGlobalTraceApi();
     },
     tracerProvider
+  };
+}
+
+export function traced<TArgs extends unknown[], TResult>(
+  fn: (...args: TArgs) => Promise<TResult>,
+  options: OpenBoxTracedOptions = {}
+): (...args: TArgs) => Promise<TResult> {
+  return async function openBoxTraced(this: unknown, ...args: TArgs): Promise<TResult> {
+    const hookGovernance = activeHookGovernanceRuntime;
+
+    if (!hookGovernance) {
+      return fn.apply(this, args);
+    }
+
+    const functionName = options.name ?? fn.name ?? "anonymous";
+    const moduleName = options.module ?? "unknown";
+    const tracer = trace.getTracer(options.tracerName ?? "openbox.tracing");
+
+    return tracer.startActiveSpan(`function.${functionName}`, async span => {
+      const spanContext = span.spanContext();
+      const startTimeNs = Date.now() * 1_000_000;
+      span.setAttribute("code.function", functionName);
+      span.setAttribute("code.namespace", moduleName);
+      let fnStarted = false;
+
+      try {
+        await evaluateHookGovernance(hookGovernance, {
+          activeSpan: span,
+          hookTrigger: {
+            attribute_key_identifiers: ["code.function", "code.namespace"],
+            ...(options.captureArgs
+              ? { args: sanitizeForGovernancePayload(args) }
+              : {}),
+            function: functionName,
+            module: moduleName,
+            stage: "started",
+            type: "function_call"
+          },
+          span: createHookSpan({
+            attributes: {
+              "code.function": functionName,
+              "code.namespace": moduleName
+            },
+            endTimeNs: startTimeNs,
+            kind: "INTERNAL",
+            name: `function.${functionName}`,
+            semanticType: "function_call",
+            stage: "started",
+            startTimeNs,
+            traceId: spanContext.traceId
+          }),
+          stage: "started",
+          traceId: spanContext.traceId
+        });
+
+        fnStarted = true;
+        const result = await fn.apply(this, args);
+        const endTimeNs = Date.now() * 1_000_000;
+
+        await evaluateHookGovernance(hookGovernance, {
+          activeSpan: span,
+          hookTrigger: {
+            attribute_key_identifiers: ["code.function", "code.namespace"],
+            function: functionName,
+            module: moduleName,
+            ...(options.captureResult
+              ? { result: sanitizeForGovernancePayload(result) }
+              : {}),
+            stage: "completed",
+            type: "function_call"
+          },
+          span: createHookSpan({
+            attributes: {
+              "code.function": functionName,
+              "code.namespace": moduleName
+            },
+            endTimeNs,
+            kind: "INTERNAL",
+            name: `function.${functionName}`,
+            semanticType: "function_call",
+            stage: "completed",
+            startTimeNs,
+            traceId: spanContext.traceId
+          }),
+          stage: "completed",
+          traceId: spanContext.traceId
+        });
+
+        return result;
+      } catch (error) {
+        if (fnStarted) {
+          const endTimeNs = Date.now() * 1_000_000;
+
+          await evaluateHookGovernance(hookGovernance, {
+            activeSpan: span,
+            hookTrigger: {
+              attribute_key_identifiers: ["code.function", "code.namespace"],
+              error:
+                error instanceof Error ? error.message : String(error),
+              function: functionName,
+              module: moduleName,
+              stage: "completed",
+              type: "function_call"
+            },
+            span: createHookSpan({
+              attributes: {
+                "code.function": functionName,
+                "code.namespace": moduleName
+              },
+              endTimeNs,
+              kind: "INTERNAL",
+              name: `function.${functionName}`,
+              semanticType: "function_call",
+              stage: "completed",
+              startTimeNs,
+              traceId: spanContext.traceId
+            }),
+            stage: "completed",
+            traceId: spanContext.traceId
+          });
+        }
+
+        throw error;
+      } finally {
+        span.end();
+      }
+    });
   };
 }
 
@@ -837,6 +974,7 @@ function teardownActiveTelemetry(): void {
   activeFetchRestore = undefined;
   activeFileRestore?.();
   activeFileRestore = undefined;
+  activeHookGovernanceRuntime = undefined;
   activeUnregister?.();
   activeUnregister = undefined;
 }
@@ -1203,8 +1341,19 @@ function resolveActivityContext(
     executionContext.workflowType &&
     executionContext.runId
   ) {
+    const spanActivityContext = spanProcessor.getActivityContext(
+      executionContext.workflowId,
+      executionContext.activityId
+    );
+
     return {
       activityId: executionContext.activityId,
+      ...(spanActivityContext &&
+      Object.prototype.hasOwnProperty.call(spanActivityContext, "activity_input")
+        ? {
+            activityInput: spanActivityContext.activity_input
+          }
+        : {}),
       activityType: executionContext.activityType,
       runId: executionContext.runId,
       taskQueue: executionContext.taskQueue ?? "mastra",
@@ -1341,6 +1490,48 @@ function parseDbOperation(statement: string | undefined): string | undefined {
   const [operation] = trimmed.split(/\s+/);
 
   return operation?.toUpperCase();
+}
+
+function sanitizeForGovernancePayload(value: unknown): unknown {
+  const seen = new WeakSet<object>();
+
+  try {
+    return JSON.parse(
+      JSON.stringify(value, (_key, entry: unknown) => {
+        if (typeof entry === "bigint") {
+          return entry.toString();
+        }
+
+        if (typeof entry === "function") {
+          return `[function ${entry.name || "anonymous"}]`;
+        }
+
+        if (typeof entry === "symbol") {
+          return entry.toString();
+        }
+
+        if (entry instanceof Error) {
+          return {
+            message: entry.message,
+            name: entry.name,
+            stack: entry.stack
+          };
+        }
+
+        if (entry && typeof entry === "object") {
+          if (seen.has(entry as object)) {
+            return "[circular]";
+          }
+
+          seen.add(entry as object);
+        }
+
+        return entry;
+      })
+    );
+  } catch {
+    return String(value);
+  }
 }
 
 function loadInstrumentation(

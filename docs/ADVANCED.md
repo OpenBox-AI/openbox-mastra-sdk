@@ -92,11 +92,34 @@ For manual `setupOpenBoxOpenTelemetry()` wiring, hook-level governance controls 
 
 - `governanceClient`: `OpenBoxClient` used for hook-level `evaluate` calls
 - `onHookApiError`: override hook error policy (`fail_open` or `fail_closed`)
+- `traced(asyncFn, options)`: wraps async functions with hook-level `function_call` governance events
 
 Current DB hook-level coverage:
 
 - `@opentelemetry/instrumentation-pg`: started/completed hook dispatch via request/response hooks
 - `@opentelemetry/instrumentation-oracledb`: started/completed hook dispatch via request/response hooks
+
+## Traced Function Hooks
+
+Use `traced()` for function-level hook governance:
+
+```ts
+import { traced } from "@openbox-ai/openbox-mastra-sdk";
+
+const callModel = traced(
+  async (prompt: string) => {
+    return prompt.toUpperCase();
+  },
+  {
+    captureArgs: true,
+    captureResult: true,
+    module: "demo",
+    name: "callModel"
+  }
+);
+```
+
+When telemetry is initialized with a `governanceClient`, `traced()` emits `function_call` started/completed hook events.
 
 ## Activity Type Normalization
 

@@ -7,7 +7,8 @@ import {
   OpenBoxClient,
   OpenBoxSpanProcessor,
   parseOpenBoxConfig,
-  setupOpenBoxOpenTelemetry
+  setupOpenBoxOpenTelemetry,
+  traced
 } from "../../src/index.js";
 import { runWithOpenBoxExecutionContext } from "../../src/governance/context.js";
 import { startOpenBoxServer } from "../helpers/openbox-server.js";
@@ -117,6 +118,18 @@ describe("setupOpenBoxOpenTelemetry", () => {
       "act-123",
       "run-123"
     );
+    spanProcessor.setActivityContext("wf-123", "act-123", {
+      activity_id: "act-123",
+      activity_input: [
+        {
+          keyword: "bitcoin"
+        }
+      ],
+      activity_type: "searchCryptoCoins",
+      run_id: "run-123",
+      workflow_id: "wf-123",
+      workflow_type: "crypto-agent"
+    });
 
     await runWithOpenBoxExecutionContext(
       {
@@ -187,6 +200,11 @@ describe("setupOpenBoxOpenTelemetry", () => {
     });
     expect(started).toMatchObject({
       activity_id: "act-123",
+      activity_input: [
+        {
+          keyword: "bitcoin"
+        }
+      ],
       activity_type: "searchCryptoCoins",
       run_id: "run-123",
       workflow_id: "wf-123",
@@ -194,6 +212,11 @@ describe("setupOpenBoxOpenTelemetry", () => {
     });
     expect(completed).toMatchObject({
       activity_id: "act-123",
+      activity_input: [
+        {
+          keyword: "bitcoin"
+        }
+      ],
       activity_type: "searchCryptoCoins",
       run_id: "run-123",
       workflow_id: "wf-123",
@@ -314,6 +337,161 @@ describe("setupOpenBoxOpenTelemetry", () => {
     await controller.shutdown();
     await openBoxServer.close();
     downstream.close();
+  });
+
+  it("emits started/completed hook governance events for traced function calls", async () => {
+    const openBoxServer = await startOpenBoxServer({
+      evaluate() {
+        return { verdict: "allow" };
+      }
+    });
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_hook_events_function",
+      apiUrl: openBoxServer.url,
+      validate: false
+    });
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+    const spanProcessor = new OpenBoxSpanProcessor();
+    const controller = setupOpenBoxOpenTelemetry({
+      captureHttpBodies: false,
+      governanceClient: client,
+      instrumentDatabases: false,
+      instrumentFileIo: false,
+      spanProcessor
+    });
+    const tracedFn = traced(
+      async (a: number, b: number) => a + b,
+      {
+        captureArgs: true,
+        captureResult: true,
+        module: "math",
+        name: "sum"
+      }
+    );
+
+    const result = await runWithOpenBoxExecutionContext(
+      {
+        activityId: "act-fn-123",
+        activityType: "calculateTotals",
+        attempt: 1,
+        runId: "run-fn-123",
+        source: "tool",
+        taskQueue: "mastra",
+        workflowId: "wf-fn-123",
+        workflowType: "crypto-agent"
+      },
+      async () => tracedFn(2, 3)
+    );
+
+    await controller.shutdown();
+    await openBoxServer.close();
+
+    expect(result).toBe(5);
+
+    const hookEvents = openBoxServer.requests
+      .filter(request => request.pathname === "/api/v1/governance/evaluate")
+      .map(request => request.body)
+      .filter(
+        payload =>
+          payload.hook_trigger !== undefined &&
+          (payload.hook_trigger as Record<string, unknown>).type ===
+            "function_call"
+      );
+
+    expect(hookEvents).toHaveLength(2);
+    const started = hookEvents.find(
+      payload =>
+        (payload.hook_trigger as Record<string, unknown>).stage === "started"
+    );
+    const completed = hookEvents.find(
+      payload =>
+        (payload.hook_trigger as Record<string, unknown>).stage === "completed"
+    );
+
+    expect(started?.hook_trigger).toMatchObject({
+      attribute_key_identifiers: ["code.function", "code.namespace"],
+      args: [2, 3],
+      function: "sum",
+      module: "math",
+      type: "function_call"
+    });
+    expect(completed?.hook_trigger).toMatchObject({
+      attribute_key_identifiers: ["code.function", "code.namespace"],
+      function: "sum",
+      module: "math",
+      result: 5,
+      type: "function_call"
+    });
+  });
+
+  it("raises ApprovalPendingError for traced function calls when governance requires approval", async () => {
+    const openBoxServer = await startOpenBoxServer({
+      evaluate(body) {
+        if (
+          body.hook_trigger &&
+          (body.hook_trigger as Record<string, unknown>).type ===
+            "function_call" &&
+          (body.hook_trigger as Record<string, unknown>).stage === "started"
+        ) {
+          return {
+            reason: "Function execution requires approval",
+            verdict: "require_approval"
+          };
+        }
+
+        return { verdict: "allow" };
+      }
+    });
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_hook_approval_function",
+      apiUrl: openBoxServer.url,
+      validate: false
+    });
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+    const spanProcessor = new OpenBoxSpanProcessor();
+    const controller = setupOpenBoxOpenTelemetry({
+      captureHttpBodies: false,
+      governanceClient: client,
+      instrumentDatabases: false,
+      instrumentFileIo: false,
+      spanProcessor
+    });
+    const tracedFn = traced(
+      async () => 42,
+      {
+        module: "math",
+        name: "constant"
+      }
+    );
+
+    await expect(
+      runWithOpenBoxExecutionContext(
+        {
+          activityId: "act-fn-approval-123",
+          activityType: "calculateTotals",
+          attempt: 1,
+          runId: "run-fn-approval-123",
+          source: "tool",
+          taskQueue: "mastra",
+          workflowId: "wf-fn-approval-123",
+          workflowType: "crypto-agent"
+        },
+        async () => tracedFn()
+      )
+    ).rejects.toBeInstanceOf(ApprovalPendingError);
+
+    await controller.shutdown();
+    await openBoxServer.close();
   });
 
   it("emits started/completed hook governance events for database queries", async () => {

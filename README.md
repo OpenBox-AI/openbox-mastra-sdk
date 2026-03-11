@@ -8,7 +8,7 @@
 - Human approval flows using Mastra suspend/resume
 - Guardrail redaction and validation for inputs and outputs
 - OpenTelemetry span buffering with HTTP, database, and opt-in file I/O capture
-- Hook-level governance evaluate dispatch for HTTP, DB query, and file operations (`started`/`completed`)
+- Hook-level governance evaluate dispatch for HTTP, DB query, file, and traced function-call operations (`started`/`completed`)
 - Workflow, activity, and resume event emission with skip filters and start-event toggles
 - Zero-code wiring with `withOpenBox()` plus manual wiring APIs
 - Production hardening for large sessions:
@@ -80,6 +80,7 @@ Manual wiring:
 - `OpenBoxClient`
 - `OpenBoxSpanProcessor`
 - `setupOpenBoxOpenTelemetry(options)`
+- `traced(asyncFn, options)`
 - `wrapTool(tool, options)`
 - `wrapWorkflow(workflow, options)`
 - `wrapAgent(agent, options)`
