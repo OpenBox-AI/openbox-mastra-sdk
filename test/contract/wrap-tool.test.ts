@@ -1,11 +1,15 @@
+import { createServer } from "node:http";
+
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
 
 import {
   GuardrailsValidationError,
+  GovernanceHaltError,
   OpenBoxClient,
   OpenBoxSpanProcessor,
   parseOpenBoxConfig,
+  setupOpenBoxOpenTelemetry,
   wrapTool
 } from "../../src/index.js";
 import { startOpenBoxServer } from "../helpers/openbox-server.js";
@@ -293,6 +297,212 @@ describe("wrapTool", () => {
     ).rejects.toBeInstanceOf(GuardrailsValidationError);
 
     await server.close();
+  });
+
+  it("suspends when hook-level HTTP governance requires approval during execution", async () => {
+    const server = await startOpenBoxServer({
+      evaluate(body) {
+        if (
+          body.hook_trigger &&
+          (body.hook_trigger as Record<string, unknown>).type === "http_request" &&
+          (body.hook_trigger as Record<string, unknown>).stage === "started"
+        ) {
+          return {
+            reason: "External request needs approval",
+            verdict: "require_approval"
+          };
+        }
+
+        return { verdict: "allow" };
+      }
+    });
+    const downstream = createServer((request, response) => {
+      request.resume();
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ ok: true }));
+    });
+
+    await new Promise<void>(resolve => {
+      downstream.listen(0, "127.0.0.1", () => resolve());
+    });
+
+    const address = downstream.address();
+
+    if (!address || typeof address === "string") {
+      throw new Error("Expected downstream server address");
+    }
+
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_hook_approval_suspend",
+      apiUrl: server.url,
+      validate: false
+    });
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+    const spanProcessor = new OpenBoxSpanProcessor();
+    const telemetry = setupOpenBoxOpenTelemetry({
+      captureHttpBodies: true,
+      governanceClient: client,
+      instrumentDatabases: false,
+      instrumentFileIo: false,
+      spanProcessor
+    });
+    const suspend = vi.fn(async () => undefined);
+    const wrapped = wrapTool(
+      createTool({
+        description: "Fetch remote data",
+        id: "fetch-remote-data",
+        inputSchema: z.object({
+          id: z.string()
+        }),
+        outputSchema: z.object({
+          ok: z.boolean()
+        }),
+        async execute() {
+          const response = await fetch(`http://127.0.0.1:${address.port}/data`);
+
+          return (await response.json()) as { ok: boolean };
+        }
+      }),
+      {
+        client,
+        config,
+        spanProcessor
+      }
+    );
+
+    const result = await wrapped.execute?.(
+      { id: "coin-1" },
+      {
+        workflow: {
+          runId: "run-hook-approval",
+          setState: vi.fn(),
+          state: {},
+          suspend,
+          workflowId: "wf-hook-approval"
+        }
+      }
+    );
+
+    await telemetry.shutdown();
+    await server.close();
+    downstream.close();
+
+    expect(result).toBeUndefined();
+    expect(suspend).toHaveBeenCalledTimes(1);
+    const suspendCall = suspend.mock.calls.at(0);
+    const suspendPayload = suspendCall
+      ? (suspendCall as unknown[])[0]
+      : undefined;
+
+    expect(suspendPayload).toMatchObject({
+      openbox: {
+        activityId: "wf-hook-approval:fetch-remote-data",
+        activityType: "fetchRemoteData",
+        reason: "External request needs approval",
+        runId: "run-hook-approval",
+        workflowId: "wf-hook-approval"
+      }
+    });
+  });
+
+  it("fails with GovernanceHaltError when hook-level HTTP governance returns HALT", async () => {
+    const server = await startOpenBoxServer({
+      evaluate(body) {
+        if (
+          body.hook_trigger &&
+          (body.hook_trigger as Record<string, unknown>).type === "http_request" &&
+          (body.hook_trigger as Record<string, unknown>).stage === "started"
+        ) {
+          return {
+            reason: "Emergency stop",
+            verdict: "halt"
+          };
+        }
+
+        return { verdict: "allow" };
+      }
+    });
+    const downstream = createServer((request, response) => {
+      request.resume();
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ ok: true }));
+    });
+
+    await new Promise<void>(resolve => {
+      downstream.listen(0, "127.0.0.1", () => resolve());
+    });
+
+    const address = downstream.address();
+
+    if (!address || typeof address === "string") {
+      throw new Error("Expected downstream server address");
+    }
+
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_hook_halt",
+      apiUrl: server.url,
+      validate: false
+    });
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+    const spanProcessor = new OpenBoxSpanProcessor();
+    const telemetry = setupOpenBoxOpenTelemetry({
+      captureHttpBodies: true,
+      governanceClient: client,
+      instrumentDatabases: false,
+      instrumentFileIo: false,
+      spanProcessor
+    });
+    const wrapped = wrapTool(
+      createTool({
+        description: "Fetch remote data",
+        id: "fetch-remote-data",
+        inputSchema: z.object({
+          id: z.string()
+        }),
+        outputSchema: z.object({
+          ok: z.boolean()
+        }),
+        async execute() {
+          const response = await fetch(`http://127.0.0.1:${address.port}/data`);
+
+          return (await response.json()) as { ok: boolean };
+        }
+      }),
+      {
+        client,
+        config,
+        spanProcessor
+      }
+    );
+
+    await expect(
+      wrapped.execute?.(
+        { id: "coin-1" },
+        {
+          workflow: {
+            runId: "run-hook-halt",
+            setState: vi.fn(),
+            state: {},
+            suspend: vi.fn(async () => undefined),
+            workflowId: "wf-hook-halt"
+          }
+        }
+      )
+    ).rejects.toBeInstanceOf(GovernanceHaltError);
+
+    await telemetry.shutdown();
+    await server.close();
+    downstream.close();
   });
 
   it("normalizes spaced activity type names to camelCase", async () => {

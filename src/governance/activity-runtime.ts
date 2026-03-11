@@ -168,6 +168,7 @@ export async function executeGovernedActivity<TInput, TOutput>({
     },
     async () => {
       let error: Record<string, unknown> | undefined;
+      let haltReason: string | undefined;
       let output: TOutput | undefined;
 
       try {
@@ -191,6 +192,41 @@ export async function executeGovernedActivity<TInput, TOutput>({
             }
           });
       } catch (caughtError) {
+        if (
+          caughtError instanceof ApprovalPendingError &&
+          dependencies.config.hitlEnabled
+        ) {
+          const suspend =
+            runtimeContext.workflow?.suspend ?? runtimeContext.agent?.suspend;
+
+          if (suspend) {
+            const approvalPayload = {
+              openbox: {
+                activityId: descriptor.activityId,
+                activityType: descriptor.activityType,
+                approvalId: undefined,
+                reason: caughtError.message,
+                requestedAt: rfc3339Now(),
+                runId: descriptor.runId,
+                workflowId: descriptor.workflowId,
+                workflowType: descriptor.workflowType
+              }
+            };
+
+            setPendingApproval({
+              activityId: descriptor.activityId,
+              activityType: descriptor.activityType,
+              approvalId: undefined,
+              requestedAt: approvalPayload.openbox.requestedAt,
+              runId: descriptor.runId,
+              workflowId: descriptor.workflowId,
+              workflowType: descriptor.workflowType
+            });
+
+            return (await suspend(approvalPayload)) as TOutput | undefined;
+          }
+        }
+
         error = serializeError(caughtError);
         throw caughtError;
       } finally {
@@ -276,6 +312,11 @@ export async function executeGovernedActivity<TInput, TOutput>({
               output = (await suspend(approvalPayload)) as TOutput | undefined;
             }
           }
+
+          haltReason = dependencies.spanProcessor.getHaltRequested(
+            descriptor.workflowId,
+            descriptor.activityId
+          );
         } finally {
           dependencies.spanProcessor.clearActivityAbort(
             descriptor.workflowId,
@@ -290,6 +331,10 @@ export async function executeGovernedActivity<TInput, TOutput>({
             descriptor.activityId
           );
         }
+      }
+
+      if (haltReason) {
+        throw new GovernanceHaltError(`Governance blocked: ${haltReason}`);
       }
 
       return output;

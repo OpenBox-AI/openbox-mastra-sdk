@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 import { context, trace } from "@opentelemetry/api";
 
 import {
+  ApprovalPendingError,
   OpenBoxClient,
   OpenBoxSpanProcessor,
   parseOpenBoxConfig,
@@ -213,6 +214,108 @@ describe("setupOpenBoxOpenTelemetry", () => {
     });
   });
 
+  it("raises ApprovalPendingError when hook-level governance returns REQUIRE_APPROVAL", async () => {
+    const openBoxServer = await startOpenBoxServer({
+      evaluate(body) {
+        if (
+          body.hook_trigger &&
+          (body.hook_trigger as Record<string, unknown>).stage === "started"
+        ) {
+          return {
+            reason: "Hook-level approval required",
+            verdict: "require_approval"
+          };
+        }
+
+        return { verdict: "allow" };
+      }
+    });
+    const downstream = createServer((request, response) => {
+      request.resume();
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ ok: true }));
+    });
+
+    await new Promise<void>(resolve => {
+      downstream.listen(0, "127.0.0.1", () => resolve());
+    });
+
+    const address = downstream.address();
+
+    if (!address || typeof address === "string") {
+      throw new Error("Expected downstream server address");
+    }
+
+    const downstreamUrl = `http://127.0.0.1:${address.port}/echo`;
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_hook_approval",
+      apiUrl: openBoxServer.url,
+      validate: false
+    });
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+    const spanProcessor = new OpenBoxSpanProcessor();
+    const controller = setupOpenBoxOpenTelemetry({
+      captureHttpBodies: true,
+      governanceClient: client,
+      instrumentDatabases: false,
+      instrumentFileIo: false,
+      spanProcessor
+    });
+    const tracer = trace.getTracer("openbox-test");
+    const rootSpan = tracer.startSpan("activity.searchCryptoCoins", {
+      attributes: {
+        "openbox.activity_id": "act-approval-123",
+        "openbox.run_id": "run-approval-123",
+        "openbox.workflow_id": "wf-approval-123"
+      }
+    });
+
+    spanProcessor.registerTrace(
+      rootSpan.spanContext().traceId,
+      "wf-approval-123",
+      "act-approval-123",
+      "run-approval-123"
+    );
+
+    await expect(
+      runWithOpenBoxExecutionContext(
+        {
+          activityId: "act-approval-123",
+          activityType: "searchCryptoCoins",
+          attempt: 1,
+          runId: "run-approval-123",
+          source: "tool",
+          taskQueue: "mastra",
+          workflowId: "wf-approval-123",
+          workflowType: "crypto-agent"
+        },
+        async () => {
+          return context.with(trace.setSpan(context.active(), rootSpan), async () => {
+            await fetch(downstreamUrl, {
+              body: JSON.stringify({
+                symbol: "btc"
+              }),
+              headers: {
+                "content-type": "application/json"
+              },
+              method: "POST"
+            });
+          });
+        }
+      )
+    ).rejects.toBeInstanceOf(ApprovalPendingError);
+
+    rootSpan.end();
+    await controller.shutdown();
+    await openBoxServer.close();
+    downstream.close();
+  });
+
   it("emits started/completed hook governance events for database queries", async () => {
     const openBoxServer = await startOpenBoxServer({
       evaluate() {
@@ -329,7 +432,19 @@ describe("setupOpenBoxOpenTelemetry", () => {
 
     dbSpan.end();
     rootSpan.end();
-    await new Promise(resolve => setTimeout(resolve, 25));
+    await waitFor(
+      () =>
+        openBoxServer.requests
+          .filter(request => request.pathname === "/api/v1/governance/evaluate")
+          .map(request => request.body)
+          .filter(
+            payload =>
+              payload.hook_trigger !== undefined &&
+              (payload.hook_trigger as Record<string, unknown>).type ===
+                "db_query"
+          ).length >= 2,
+      2000
+    );
     await controller.shutdown();
     await openBoxServer.close();
 
@@ -372,3 +487,20 @@ describe("setupOpenBoxOpenTelemetry", () => {
     );
   });
 });
+
+async function waitFor(
+  predicate: () => boolean,
+  timeoutMs: number
+): Promise<void> {
+  const start = Date.now();
+
+  while (Date.now() - start <= timeoutMs) {
+    if (predicate()) {
+      return;
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+
+  throw new Error(`Timed out waiting for condition after ${timeoutMs}ms`);
+}

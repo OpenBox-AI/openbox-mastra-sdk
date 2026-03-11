@@ -12,6 +12,7 @@ import type { OpenBoxApiErrorPolicy, OpenBoxClient } from "../client/index.js";
 import { getOpenBoxExecutionContext } from "../governance/context.js";
 import { OpenBoxSpanProcessor } from "../span/index.js";
 import {
+  ApprovalPendingError,
   GovernanceHaltError,
   Verdict,
   WorkflowEventType
@@ -177,6 +178,8 @@ type HookSpan = NonNullable<ReturnType<typeof trace.getActiveSpan>> & {
   attributes?: Record<string, unknown>;
   name?: string;
 };
+
+const APPROVAL_ABORT_PREFIX = "__openbox_approval__:";
 
 let activeFetchRestore: (() => void) | undefined;
 let activeFileRestore: (() => void) | undefined;
@@ -397,7 +400,7 @@ function createDatabaseInstrumentationConfig(
       span,
       stage: "started",
       startTimeNs
-    });
+    }).catch(() => undefined);
   };
   const emitCompleted = (
     span: HookSpan,
@@ -423,7 +426,7 @@ function createDatabaseInstrumentationConfig(
       span,
       stage: "completed",
       startTimeNs
-    });
+    }).catch(() => undefined);
   };
 
   if (moduleName === "@opentelemetry/instrumentation-pg") {
@@ -1082,6 +1085,21 @@ async function evaluateHookGovernance(
     return;
   }
 
+  const priorAbortReason = hookGovernance.spanProcessor.getActivityAbort(
+    activityContext.workflowId,
+    activityContext.activityId
+  );
+
+  if (priorAbortReason) {
+    if (priorAbortReason.startsWith(APPROVAL_ABORT_PREFIX)) {
+      throw new ApprovalPendingError(
+        priorAbortReason.slice(APPROVAL_ABORT_PREFIX.length)
+      );
+    }
+
+    throw new GovernanceHaltError(`Governance blocked: ${priorAbortReason}`);
+  }
+
   hookGovernance.spanProcessor.markGoverned(
     input.activeSpan.spanContext().spanId
   );
@@ -1128,17 +1146,29 @@ async function evaluateHookGovernance(
     );
   }
 
-  if (!verdict || !Verdict.shouldStop(verdict.verdict)) {
+  if (
+    !verdict ||
+    (!Verdict.shouldStop(verdict.verdict) &&
+      !Verdict.requiresApproval(verdict.verdict))
+  ) {
     return;
   }
 
   const reason = verdict.reason ?? "Hook blocked by governance";
 
+  const abortReason = Verdict.requiresApproval(verdict.verdict)
+    ? `${APPROVAL_ABORT_PREFIX}${reason}`
+    : reason;
+
   hookGovernance.spanProcessor.setActivityAbort(
     activityContext.workflowId,
     activityContext.activityId,
-    reason
+    abortReason
   );
+
+  if (Verdict.requiresApproval(verdict.verdict)) {
+    throw new ApprovalPendingError(reason);
+  }
 
   if (verdict.verdict === Verdict.HALT) {
     hookGovernance.spanProcessor.setHaltRequested(
