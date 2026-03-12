@@ -274,7 +274,7 @@ async function executeAgentLifecycle<T>({
     const verdict = await evaluateAgentEvent(options, {
       event_type: WorkflowEventType.SIGNAL_RECEIVED,
       run_id: runId,
-      signal_args: serializeValue(messages),
+      signal_args: serializeAgentSignalArgs(messages),
       signal_name: AGENT_INPUT_SIGNAL_NAME,
       task_queue: "mastra",
       workflow_id: workflowId,
@@ -787,6 +787,103 @@ function truncateString(value: string, maxChars: number): string {
   }
 
   return `${value.slice(0, Math.max(0, maxChars - 16))}...[truncated]`;
+}
+
+function serializeAgentSignalArgs(messages: unknown): unknown {
+  const latestUserPrompt = extractLatestUserPrompt(messages);
+
+  if (latestUserPrompt) {
+    return [latestUserPrompt];
+  }
+
+  const serialized = serializeValue(messages);
+
+  if (serialized == null) {
+    return [];
+  }
+
+  return Array.isArray(serialized) ? serialized : [serialized];
+}
+
+function extractLatestUserPrompt(messages: unknown): string | undefined {
+  const candidates = normalizeMessageCandidates(messages);
+
+  for (let index = candidates.length - 1; index >= 0; index -= 1) {
+    const entry = candidates[index];
+
+    if (!entry || typeof entry !== "object") {
+      continue;
+    }
+
+    const record = entry as Record<string, unknown>;
+    const role = typeof record.role === "string" ? record.role.toLowerCase() : undefined;
+
+    if (role && role !== "user") {
+      continue;
+    }
+
+    const text =
+      extractTextFromStructuredValue(record.content) ??
+      extractTextFromStructuredValue(record.parts) ??
+      extractTextFromStructuredValue(record.prompt) ??
+      extractTextFromStructuredValue(record.input);
+
+    if (text) {
+      return text;
+    }
+  }
+
+  return undefined;
+}
+
+function normalizeMessageCandidates(messages: unknown): unknown[] {
+  if (Array.isArray(messages)) {
+    return messages;
+  }
+
+  if (!messages || typeof messages !== "object") {
+    return [];
+  }
+
+  const record = messages as Record<string, unknown>;
+  return Array.isArray(record.messages) ? record.messages : [];
+}
+
+function extractTextFromStructuredValue(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  }
+
+  if (Array.isArray(value)) {
+    const parts = value
+      .map(item => extractTextFromStructuredValue(item))
+      .filter((item): item is string => typeof item === "string" && item.length > 0);
+
+    if (parts.length === 0) {
+      return undefined;
+    }
+
+    const combined = parts.join("\n").trim();
+    return combined.length > 0 ? combined : undefined;
+  }
+
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+
+  const record = value as Record<string, unknown>;
+  const text =
+    extractTextFromStructuredValue(record.text) ??
+    extractTextFromStructuredValue(record.content) ??
+    extractTextFromStructuredValue(record.parts) ??
+    extractTextFromStructuredValue(record.prompt);
+
+  if (!text) {
+    return undefined;
+  }
+
+  return text.trim().length > 0 ? text.trim() : undefined;
 }
 
 function extractModelInfo(

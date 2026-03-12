@@ -83,7 +83,7 @@ describe("wrapAgent", () => {
     expect(inputSignals[0]).toMatchObject({
       event_type: "SignalReceived",
       run_id: "agent-generate-run",
-      signal_args: "hello",
+      signal_args: ["hello"],
       signal_name: "user_input",
       workflow_id: "agent:assistant-agent",
       workflow_type: "assistant-agent"
@@ -91,10 +91,87 @@ describe("wrapAgent", () => {
     expect(inputSignals[1]).toMatchObject({
       event_type: "SignalReceived",
       run_id: "agent-stream-run",
-      signal_args: "hello",
+      signal_args: ["hello"],
       signal_name: "user_input",
       workflow_id: "agent:assistant-agent",
       workflow_type: "assistant-agent"
+    });
+  });
+
+  it("normalizes chat message arrays to latest user prompt in SignalReceived", async () => {
+    const server = await startOpenBoxServer({
+      evaluate() {
+        return { verdict: "allow" };
+      }
+    });
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_agent_signal_prompt",
+      apiUrl: server.url,
+      validate: false
+    });
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+    const agent = wrapAgent(
+      new Agent({
+        id: "assistant-agent-signal-prompt",
+        instructions: "Be concise.",
+        model: createMockModel({
+          mockText: "ready",
+          version: "v2"
+        }) as never,
+        name: "Assistant Agent Signal Prompt"
+      }),
+      {
+        client,
+        config,
+        spanProcessor: new OpenBoxSpanProcessor()
+      }
+    );
+
+    await agent.generate(
+      [
+        {
+          content: "earlier question",
+          role: "user"
+        },
+        {
+          content: "assistant response",
+          role: "assistant"
+        },
+        {
+          parts: [
+            {
+              text: "latest question",
+              type: "text"
+            }
+          ],
+          role: "user"
+        }
+      ] as never,
+      {
+        runId: "agent-signal-prompt-run"
+      }
+    );
+
+    await server.close();
+
+    const signalEvent = server.requests
+      .filter(request => request.pathname === "/api/v1/governance/evaluate")
+      .map(request => request.body)
+      .find(body => body.event_type === "SignalReceived");
+
+    expect(signalEvent).toBeDefined();
+    expect(signalEvent).toMatchObject({
+      event_type: "SignalReceived",
+      run_id: "agent-signal-prompt-run",
+      signal_args: ["latest question"],
+      signal_name: "user_input",
+      workflow_id: "agent:assistant-agent-signal-prompt",
+      workflow_type: "assistant-agent-signal-prompt"
     });
   });
 
