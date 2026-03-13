@@ -237,6 +237,124 @@ describe("setupOpenBoxOpenTelemetry", () => {
     });
   });
 
+  it("emits hook governance events for agent context without tool activity context", async () => {
+    const openBoxServer = await startOpenBoxServer({
+      evaluate() {
+        return { verdict: "allow" };
+      }
+    });
+    const downstream = createServer((request, response) => {
+      let body = "";
+
+      request.setEncoding("utf8");
+      request.on("data", chunk => {
+        body += chunk;
+      });
+      request.on("end", () => {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ echoed: body }));
+      });
+    });
+
+    await new Promise<void>(resolve => {
+      downstream.listen(0, "127.0.0.1", () => resolve());
+    });
+
+    const address = downstream.address();
+
+    if (!address || typeof address === "string") {
+      throw new Error("Expected downstream server address");
+    }
+
+    const downstreamUrl = `http://127.0.0.1:${address.port}/echo`;
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_hook_events_agent_context",
+      apiUrl: openBoxServer.url,
+      validate: false
+    });
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+    const spanProcessor = new OpenBoxSpanProcessor();
+    const controller = setupOpenBoxOpenTelemetry({
+      captureHttpBodies: true,
+      governanceClient: client,
+      instrumentDatabases: false,
+      instrumentFileIo: false,
+      spanProcessor
+    });
+    const tracer = trace.getTracer("openbox-test");
+    const rootSpan = tracer.startSpan("agent.run");
+
+    await runWithOpenBoxExecutionContext(
+      {
+        runId: "run-agent-1",
+        source: "agent",
+        taskQueue: "mastra",
+        workflowId: "wf-agent-1",
+        workflowType: "coding-agent"
+      },
+      async () => {
+        await context.with(trace.setSpan(context.active(), rootSpan), async () => {
+          const response = await fetch(downstreamUrl, {
+            body: JSON.stringify({
+              model: "gpt-4.1"
+            }),
+            headers: {
+              "content-type": "application/json"
+            },
+            method: "POST"
+          });
+
+          await response.text();
+        });
+      }
+    );
+
+    rootSpan.end();
+    await controller.shutdown();
+    await openBoxServer.close();
+    downstream.close();
+
+    const hookEvents = openBoxServer.requests
+      .filter(request => request.pathname === "/api/v1/governance/evaluate")
+      .map(request => request.body)
+      .filter(payload => payload.hook_trigger !== undefined);
+
+    expect(hookEvents).toHaveLength(2);
+
+    const started = hookEvents.find(
+      payload =>
+        payload.event_type === "ActivityStarted" &&
+        payload.hook_trigger &&
+        (payload.hook_trigger as Record<string, unknown>).stage === "started"
+    );
+    const completed = hookEvents.find(
+      payload =>
+        payload.event_type === "ActivityCompleted" &&
+        payload.hook_trigger &&
+        (payload.hook_trigger as Record<string, unknown>).stage === "completed"
+    );
+
+    expect(started).toMatchObject({
+      activity_id: "wf-agent-1::agent-llm::hook:http_request:started",
+      activity_type: "agentLlmCompletion",
+      run_id: "run-agent-1",
+      workflow_id: "wf-agent-1",
+      workflow_type: "coding-agent"
+    });
+    expect(completed).toMatchObject({
+      activity_id: "wf-agent-1::agent-llm::hook:http_request:completed",
+      activity_type: "agentLlmCompletion",
+      run_id: "run-agent-1",
+      workflow_id: "wf-agent-1",
+      workflow_type: "coding-agent"
+    });
+  });
+
   it("raises ApprovalPendingError when hook-level governance returns REQUIRE_APPROVAL", async () => {
     const openBoxServer = await startOpenBoxServer({
       evaluate(body) {

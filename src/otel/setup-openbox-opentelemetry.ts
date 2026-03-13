@@ -1383,6 +1383,25 @@ function resolveActivityContext(
     };
   }
 
+  if (
+    executionContext?.source === "agent" &&
+    executionContext.workflowId &&
+    executionContext.workflowType &&
+    executionContext.runId
+  ) {
+    return {
+      activityId: `${executionContext.workflowId}::agent-llm`,
+      activityType: "agentLlmCompletion",
+      runId: executionContext.runId,
+      taskQueue: executionContext.taskQueue ?? "mastra",
+      workflowId: executionContext.workflowId,
+      workflowType: executionContext.workflowType,
+      ...(typeof executionContext.attempt === "number"
+        ? { attempt: executionContext.attempt }
+        : {})
+    };
+  }
+
   const spanContext = spanProcessor.getActivityContextByTrace(traceId);
 
   if (!spanContext) {

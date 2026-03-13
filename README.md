@@ -137,6 +137,9 @@ Hook-level event behavior:
 - `ActivityCompleted` boundary events include a synthetic timing span (`semantic_type: tool_execution`) so latency metrics remain populated even when no provider spans are buffered.
 - Hook-triggered events use scoped IDs: `<activity_id>::hook:<type>:<started|completed>`.
 - Operation-level telemetry is emitted through hook-triggered evaluate events with `hook_trigger`.
+- For agent-only LLM runs that do not execute tools, hook-triggered events use synthetic activity context:
+  - `activity_type: agentLlmCompletion`
+  - `activity_id: <workflow_id>::agent-llm`
 
 ## Example
 

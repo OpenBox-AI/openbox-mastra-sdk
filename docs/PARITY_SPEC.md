@@ -231,6 +231,7 @@ The SDK must emit canonical workflow-boundary governance events, adapted to Mast
 - workflow resume after suspension -> `SignalReceived`
 - tool or workflow step start -> `ActivityStarted`
 - tool or workflow step completion/failure -> `ActivityCompleted`
+- agent-only hook telemetry (no tool context) -> `ActivityStarted` / `ActivityCompleted` with synthetic `activity_type = agentLlmCompletion`
 
 ### Resume mapping locked by this spec
 
@@ -258,6 +259,9 @@ The SDK must emit canonical workflow-boundary governance events, adapted to Mast
   - `stage`
   - `attribute_key_identifiers`
   - type-specific metadata (for example method/url for HTTP)
+- when hook telemetry executes under agent workflow context without a tool activity context:
+  - `activity_type` must be `agentLlmCompletion`
+  - `activity_id` base must be `<workflow_id>::agent-llm` before hook suffixing
 - activity boundary completion events must emit at least one timing span so latency distribution metrics can be computed even when hook-level provider spans are unavailable
 
 ### Ordering and determinism

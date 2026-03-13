@@ -37,6 +37,11 @@ interface AgentModelInfo {
   provider?: string;
 }
 
+interface ParsedModelIdentifier {
+  modelId?: string;
+  provider?: string;
+}
+
 export function wrapAgent<TAgent>(agent: TAgent, options: WrapToolOptions): TAgent {
   const baseAgent = agent as Record<PropertyKey, unknown> & {
     generate?: (messages: unknown, options?: Record<string, unknown>) => Promise<any>;
@@ -909,31 +914,26 @@ function extractModelInfo(
     response?.modelMetadata && typeof response.modelMetadata === "object"
       ? (response.modelMetadata as Record<string, unknown>)
       : undefined;
-  const modelIdCandidates = [
+  const parsedModelInfo = resolveModelInfoFromCandidates([
     response?.modelId,
     modelMetadata?.modelId,
-    record.modelId
-  ];
+    response?.model,
+    record.modelId,
+    record.model
+  ]);
   const providerCandidates = [
     modelMetadata?.provider,
     response?.provider,
     record.provider,
+    parsedModelInfo.provider,
     extractProviderHint(record)
   ];
-
-  let modelId: string | undefined;
+  const modelId: string | undefined = parsedModelInfo.modelId;
   let provider: string | undefined;
-
-  for (const candidate of modelIdCandidates) {
-    if (typeof candidate === "string" && candidate.trim().length > 0) {
-      modelId = candidate;
-      break;
-    }
-  }
 
   for (const candidate of providerCandidates) {
     if (typeof candidate === "string" && candidate.trim().length > 0) {
-      provider = candidate;
+      provider = normalizeProvider(candidate);
       break;
     }
   }
@@ -949,6 +949,7 @@ function extractModelInfo(
 function extractAgentModelInfo(
   agentRecord: Record<PropertyKey, unknown>
 ): AgentModelInfo {
+  const directModelInfo = resolveModelInfoFromCandidates([agentRecord.model]);
   const model =
     agentRecord.model && typeof agentRecord.model === "object"
       ? (agentRecord.model as Record<string, unknown>)
@@ -957,21 +958,26 @@ function extractAgentModelInfo(
     model?.config && typeof model.config === "object"
       ? (model.config as Record<string, unknown>)
       : undefined;
-  const modelIdCandidates = [model?.modelId, config?.modelId];
-  const providerCandidates = [config?.provider, model?.provider];
-  let modelId: string | undefined;
+  const nestedModelInfo = resolveModelInfoFromCandidates([
+    model?.modelId,
+    config?.modelId,
+    model?.id,
+    model?.name,
+    model?.model
+  ]);
+  const providerCandidates = [
+    nestedModelInfo.provider,
+    config?.provider,
+    model?.provider,
+    directModelInfo.provider
+  ];
+  const modelId: string | undefined =
+    directModelInfo.modelId ?? nestedModelInfo.modelId;
   let provider: string | undefined;
-
-  for (const candidate of modelIdCandidates) {
-    if (typeof candidate === "string" && candidate.trim().length > 0) {
-      modelId = candidate;
-      break;
-    }
-  }
 
   for (const candidate of providerCandidates) {
     if (typeof candidate === "string" && candidate.trim().length > 0) {
-      provider = candidate;
+      provider = normalizeProvider(candidate);
       break;
     }
   }
@@ -1012,6 +1018,15 @@ function applyDefaultModelInfo(
 function extractProviderHint(
   outputRecord: Record<string, unknown>
 ): string | undefined {
+  const parsedModelInfo = resolveModelInfoFromCandidates([
+    outputRecord.modelId,
+    outputRecord.model
+  ]);
+
+  if (parsedModelInfo.provider) {
+    return parsedModelInfo.provider;
+  }
+
   const directProvider = inferProviderFromMetadata(outputRecord.providerMetadata);
 
   if (directProvider) {
@@ -1107,6 +1122,93 @@ function inferProviderFromMetadata(metadata: unknown): string | undefined {
   }
 
   return undefined;
+}
+
+function resolveModelInfoFromCandidates(
+  candidates: unknown[]
+): ParsedModelIdentifier {
+  let modelId: string | undefined;
+  let provider: string | undefined;
+
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string" || candidate.trim().length === 0) {
+      continue;
+    }
+
+    const parsed = parseModelIdentifier(candidate);
+
+    if (!modelId && parsed.modelId) {
+      modelId = parsed.modelId;
+    }
+
+    if (!provider && parsed.provider) {
+      provider = parsed.provider;
+    }
+
+    if (modelId && provider) {
+      break;
+    }
+  }
+
+  return {
+    ...(modelId ? { modelId } : {}),
+    ...(provider ? { provider } : {})
+  };
+}
+
+function parseModelIdentifier(candidate: string): ParsedModelIdentifier {
+  const trimmed = candidate.trim();
+
+  if (!trimmed) {
+    return {};
+  }
+
+  const slashParts = trimmed.split("/");
+
+  if (slashParts.length >= 2) {
+    const possibleProvider = slashParts[0]?.trim();
+    const modelPart = slashParts.slice(1).join("/").trim();
+
+    if (possibleProvider && modelPart && isProviderToken(possibleProvider)) {
+      return {
+        modelId: modelPart,
+        provider: normalizeProvider(possibleProvider)
+      };
+    }
+  }
+
+  return {
+    modelId: trimmed
+  };
+}
+
+function isProviderToken(candidate: string): boolean {
+  const normalized = candidate.trim().toLowerCase();
+
+  return (
+    normalized.includes("openai") ||
+    normalized.includes("anthropic") ||
+    normalized.includes("google") ||
+    normalized.includes("gemini")
+  );
+}
+
+function normalizeProvider(candidate: string): string {
+  const normalized = candidate.trim().toLowerCase();
+
+  if (normalized.includes("openai")) {
+    return "openai";
+  }
+
+  if (normalized.includes("anthropic")) {
+    return "anthropic";
+  }
+
+  if (normalized.includes("google") || normalized.includes("gemini")) {
+    return "google";
+  }
+
+  return candidate.trim();
 }
 
 function buildWorkflowTelemetrySpans(
