@@ -793,7 +793,9 @@ function patchFetch(
       return originalFetch(request);
     }
 
-    const requestBody = await captureRequestBody(request);
+    const requestBody = normalizeHookBodyForTelemetry(
+      await captureRequestBody(request)
+    );
     const requestHeaders = headersToRecord(request.headers);
     const spanContext = activeSpan.spanContext();
     const startTimeNs = Date.now() * 1_000_000;
@@ -830,7 +832,9 @@ function patchFetch(
 
     const response = await originalFetch(request);
     const responseHeaders = headersToRecord(response.headers);
-    const responseBody = await captureResponseBody(response);
+    const responseBody = normalizeHookBodyForTelemetry(
+      await captureResponseBody(response)
+    );
 
     spanProcessor.storeTraceBody(spanContext.traceId, {
       method: request.method,
@@ -1241,6 +1245,8 @@ async function evaluateHookGovernance(
   hookGovernance.spanProcessor.markGoverned(
     input.activeSpan.spanContext().spanId
   );
+  const modelUsage = extractModelUsageFromHookSpan(input.span);
+  const telemetryModelId = toTelemetryModelId(modelUsage.modelId);
 
   const payload: Record<string, unknown> = {
     activity_id: buildHookActivityId(
@@ -1258,6 +1264,19 @@ async function evaluateHookGovernance(
     source: "workflow-telemetry",
     span_count: 1,
     spans: [input.span],
+    ...(modelUsage.modelId ? { model_id: modelUsage.modelId } : {}),
+    ...(telemetryModelId ? { model: telemetryModelId } : {}),
+    ...(modelUsage.provider ? { model_provider: modelUsage.provider } : {}),
+    ...(modelUsage.provider ? { provider: modelUsage.provider } : {}),
+    ...(typeof modelUsage.inputTokens === "number"
+      ? { input_tokens: modelUsage.inputTokens }
+      : {}),
+    ...(typeof modelUsage.outputTokens === "number"
+      ? { output_tokens: modelUsage.outputTokens }
+      : {}),
+    ...(typeof modelUsage.totalTokens === "number"
+      ? { total_tokens: modelUsage.totalTokens }
+      : {}),
     task_queue: activityContext.taskQueue,
     timestamp: new Date().toISOString(),
     workflow_id: activityContext.workflowId,
@@ -1321,6 +1340,526 @@ async function evaluateHookGovernance(
   }
 
   throw new GovernanceHaltError(`Governance blocked: ${reason}`);
+}
+
+function extractModelUsageFromHookSpan(span: Record<string, unknown>): {
+  inputTokens?: number;
+  modelId?: string;
+  outputTokens?: number;
+  provider?: string;
+  totalTokens?: number;
+} {
+  const requestBody = toStringValue(span.request_body ?? span.requestBody);
+  const responseBody = toStringValue(span.response_body ?? span.responseBody);
+  const requestRecords = parseHookBodyRecords(requestBody);
+  const responseRecords = parseHookBodyRecords(responseBody);
+  const modelFromResponse = extractModelFromRecords(responseRecords);
+  const modelFromRequest = extractModelFromRecords(requestRecords);
+  const modelId = modelFromResponse ?? modelFromRequest;
+  const usageFromResponse = extractUsageFromRecords(responseRecords);
+  const attributes =
+    span.attributes && typeof span.attributes === "object"
+      ? (span.attributes as Record<string, unknown>)
+      : undefined;
+  const providerFromRecords =
+    extractProviderFromRecords(responseRecords) ??
+    extractProviderFromRecords(requestRecords);
+  const providerFromUrl = inferProviderFromUrl(
+    toStringValue(attributes?.["http.url"] ?? attributes?.["url.full"])
+  );
+  const providerFromModel = inferProviderFromModelId(modelId);
+  const provider =
+    providerFromRecords ?? providerFromUrl ?? providerFromModel;
+
+  return {
+    ...(modelId ? { modelId } : {}),
+    ...(provider ? { provider } : {}),
+    ...(usageFromResponse?.inputTokens !== undefined
+      ? { inputTokens: usageFromResponse.inputTokens }
+      : {}),
+    ...(usageFromResponse?.outputTokens !== undefined
+      ? { outputTokens: usageFromResponse.outputTokens }
+      : {}),
+    ...(usageFromResponse?.totalTokens !== undefined
+      ? { totalTokens: usageFromResponse.totalTokens }
+      : {})
+  };
+}
+
+function parseHookBodyRecords(body: string | undefined): Array<Record<string, unknown>> {
+  if (!body) {
+    return [];
+  }
+
+  const records: Array<Record<string, unknown>> = [];
+  const direct = parseJsonRecord(body);
+
+  if (direct) {
+    records.push(direct);
+  }
+
+  for (const eventBody of parseSseDataBodies(body)) {
+    const parsed = parseJsonRecord(eventBody);
+
+    if (parsed) {
+      records.push(parsed);
+    }
+  }
+
+  return records;
+}
+
+function normalizeHookBodyForTelemetry(
+  body: string | undefined
+): string | undefined {
+  if (!body) {
+    return body;
+  }
+
+  const record = parseJsonRecord(body);
+
+  if (!record) {
+    return body;
+  }
+
+  let changed = false;
+
+  if (normalizeModelIdentifierInRecord(record)) {
+    changed = true;
+  }
+
+  const nestedResponse =
+    record.response && typeof record.response === "object" &&
+    !Array.isArray(record.response)
+      ? (record.response as Record<string, unknown>)
+      : undefined;
+
+  if (nestedResponse && normalizeModelIdentifierInRecord(nestedResponse)) {
+    changed = true;
+  }
+
+  if (!changed) {
+    return body;
+  }
+
+  return JSON.stringify(record);
+}
+
+function normalizeModelIdentifierInRecord(
+  record: Record<string, unknown>
+): boolean {
+  const modelValue =
+    typeof record.model === "string" ? record.model.trim() : undefined;
+
+  if (!modelValue) {
+    return false;
+  }
+
+  const parsedModel = parseModelIdentifier(modelValue);
+  const rawModelId = parsedModel.modelId ?? modelValue;
+  const telemetryModelId = toTelemetryModelId(rawModelId) ?? rawModelId;
+  let changed = false;
+
+  if (record.model !== telemetryModelId) {
+    record.model = telemetryModelId;
+    changed = true;
+  }
+
+  if (
+    rawModelId !== telemetryModelId &&
+    (typeof record.model_id !== "string" || record.model_id.trim().length === 0)
+  ) {
+    record.model_id = rawModelId;
+    changed = true;
+  }
+
+  if (parsedModel.provider) {
+    if (
+      typeof record.model_provider !== "string" ||
+      record.model_provider.trim().length === 0
+    ) {
+      record.model_provider = parsedModel.provider;
+      changed = true;
+    }
+
+    if (
+      typeof record.provider !== "string" ||
+      record.provider.trim().length === 0
+    ) {
+      record.provider = parsedModel.provider;
+      changed = true;
+    }
+  }
+
+  return changed;
+}
+
+function parseJsonRecord(raw: string): Record<string, unknown> | undefined {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return undefined;
+    }
+
+    return parsed as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseSseDataBodies(body: string): string[] {
+  const lines = body.split(/\r?\n/);
+  const payloads: string[] = [];
+  let currentDataLines: string[] = [];
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+
+    if (trimmed.length === 0) {
+      if (currentDataLines.length > 0) {
+        payloads.push(currentDataLines.join("\n"));
+        currentDataLines = [];
+      }
+      continue;
+    }
+
+    if (!trimmed.startsWith("data:")) {
+      continue;
+    }
+
+    const data = trimmed.slice(5).trimStart();
+
+    if (data.length > 0) {
+      currentDataLines.push(data);
+    }
+  }
+
+  if (currentDataLines.length > 0) {
+    payloads.push(currentDataLines.join("\n"));
+  }
+
+  return payloads.filter(payload => payload !== "[DONE]");
+}
+
+function extractModelFromRecords(
+  records: Array<Record<string, unknown>>
+): string | undefined {
+  for (const record of records) {
+    const nestedResponse =
+      record.response && typeof record.response === "object"
+        ? (record.response as Record<string, unknown>)
+        : undefined;
+    const candidates = [
+      record.model_id,
+      nestedResponse?.model_id,
+      record.model,
+      nestedResponse?.model
+    ];
+
+    for (const candidate of candidates) {
+      if (typeof candidate !== "string" || candidate.trim().length === 0) {
+        continue;
+      }
+
+      const parsed = parseModelIdentifier(candidate);
+
+      if (parsed.modelId) {
+        return parsed.modelId;
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function extractProviderFromRecords(
+  records: Array<Record<string, unknown>>
+): string | undefined {
+  for (const record of records) {
+    const nestedResponse =
+      record.response && typeof record.response === "object"
+        ? (record.response as Record<string, unknown>)
+        : undefined;
+    const candidates = [
+      record.provider,
+      record.model_provider,
+      nestedResponse?.provider,
+      nestedResponse?.model_provider,
+      record.model,
+      nestedResponse?.model
+    ];
+
+    for (const candidate of candidates) {
+      if (typeof candidate !== "string" || candidate.trim().length === 0) {
+        continue;
+      }
+
+      const parsed = parseModelIdentifier(candidate);
+
+      if (parsed.provider) {
+        return parsed.provider;
+      }
+
+      const normalized = normalizeProvider(candidate);
+
+      if (normalized) {
+        return normalized;
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function extractUsageFromRecords(
+  records: Array<Record<string, unknown>>
+): {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+} | undefined {
+  let inputTokens: number | undefined;
+  let outputTokens: number | undefined;
+  let totalTokens: number | undefined;
+
+  for (const record of records) {
+    const usage = extractUsageFromRecord(record);
+
+    if (!usage) {
+      continue;
+    }
+
+    if (inputTokens === undefined && usage.inputTokens !== undefined) {
+      inputTokens = usage.inputTokens;
+    }
+
+    if (outputTokens === undefined && usage.outputTokens !== undefined) {
+      outputTokens = usage.outputTokens;
+    }
+
+    if (totalTokens === undefined && usage.totalTokens !== undefined) {
+      totalTokens = usage.totalTokens;
+    }
+  }
+
+  if (
+    inputTokens === undefined &&
+    outputTokens === undefined &&
+    totalTokens === undefined
+  ) {
+    return undefined;
+  }
+
+  const resolvedTotalTokens =
+    totalTokens ??
+    (inputTokens !== undefined && outputTokens !== undefined
+      ? inputTokens + outputTokens
+      : undefined);
+
+  return {
+    ...(inputTokens !== undefined ? { inputTokens } : {}),
+    ...(outputTokens !== undefined ? { outputTokens } : {}),
+    ...(resolvedTotalTokens !== undefined
+      ? { totalTokens: resolvedTotalTokens }
+      : {})
+  };
+}
+
+function extractUsageFromRecord(
+  record: Record<string, unknown>
+): {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+} | undefined {
+  const nestedResponse =
+    record.response && typeof record.response === "object"
+      ? (record.response as Record<string, unknown>)
+      : undefined;
+  const candidates = [
+    record.usage,
+    nestedResponse?.usage,
+    record,
+    nestedResponse
+  ];
+
+  for (const candidate of candidates) {
+    const usage = parseUsageCandidate(candidate);
+
+    if (usage) {
+      return usage;
+    }
+  }
+
+  return undefined;
+}
+
+function parseUsageCandidate(candidate: unknown): {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+} | undefined {
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+    return undefined;
+  }
+
+  const record = candidate as Record<string, unknown>;
+  const inputTokens =
+    toNumberValue(record.input_tokens) ??
+    toNumberValue(record.prompt_tokens) ??
+    toNumberValue(record.inputTokens) ??
+    toNumberValue(record.promptTokens);
+  const outputTokens =
+    toNumberValue(record.output_tokens) ??
+    toNumberValue(record.completion_tokens) ??
+    toNumberValue(record.outputTokens) ??
+    toNumberValue(record.completionTokens);
+  const totalTokens =
+    toNumberValue(record.total_tokens) ?? toNumberValue(record.totalTokens);
+
+  if (
+    inputTokens === undefined &&
+    outputTokens === undefined &&
+    totalTokens === undefined
+  ) {
+    return undefined;
+  }
+
+  const resolvedTotalTokens =
+    totalTokens ??
+    (inputTokens !== undefined && outputTokens !== undefined
+      ? inputTokens + outputTokens
+      : undefined);
+
+  return {
+    ...(inputTokens !== undefined ? { inputTokens } : {}),
+    ...(outputTokens !== undefined ? { outputTokens } : {}),
+    ...(resolvedTotalTokens !== undefined
+      ? { totalTokens: resolvedTotalTokens }
+      : {})
+  };
+}
+
+function parseModelIdentifier(value: string): {
+  modelId?: string;
+  provider?: string;
+} {
+  const trimmed = value.trim();
+
+  if (!trimmed) {
+    return {};
+  }
+
+  const slashParts = trimmed.split("/");
+
+  if (slashParts.length >= 2) {
+    const possibleProvider = slashParts[0]?.trim();
+    const modelPart = slashParts.slice(1).join("/").trim();
+
+    if (possibleProvider && modelPart) {
+      const provider = normalizeProvider(possibleProvider);
+
+      if (provider) {
+        return {
+          modelId: modelPart,
+          provider
+        };
+      }
+    }
+  }
+
+  return {
+    modelId: trimmed
+  };
+}
+
+function normalizeProvider(candidate: string): string | undefined {
+  const normalized = candidate.trim().toLowerCase();
+
+  if (normalized.includes("openai")) {
+    return "openai";
+  }
+
+  if (normalized.includes("anthropic")) {
+    return "anthropic";
+  }
+
+  if (normalized.includes("google") || normalized.includes("gemini")) {
+    return "google";
+  }
+
+  return undefined;
+}
+
+function toTelemetryModelId(modelId: string | undefined): string | undefined {
+  if (typeof modelId !== "string") {
+    return undefined;
+  }
+
+  const trimmed = modelId.trim();
+
+  if (trimmed.length === 0) {
+    return undefined;
+  }
+
+  const sanitized = trimmed
+    .replace(/[.:/\\\s]+/g, "-")
+    .replace(/[^A-Za-z0-9_-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+  return sanitized.length > 0 ? sanitized : trimmed;
+}
+
+function inferProviderFromUrl(url: string | undefined): string | undefined {
+  if (!url) {
+    return undefined;
+  }
+
+  const normalized = url.toLowerCase();
+
+  if (normalized.includes("api.openai.com")) {
+    return "openai";
+  }
+
+  if (normalized.includes("api.anthropic.com")) {
+    return "anthropic";
+  }
+
+  if (normalized.includes("generativelanguage.googleapis.com")) {
+    return "google";
+  }
+
+  return undefined;
+}
+
+function inferProviderFromModelId(
+  modelId: string | undefined
+): string | undefined {
+  if (!modelId) {
+    return undefined;
+  }
+
+  const normalized = modelId.toLowerCase();
+
+  if (
+    normalized.startsWith("gpt-") ||
+    normalized.startsWith("o1") ||
+    normalized.startsWith("o3")
+  ) {
+    return "openai";
+  }
+
+  if (normalized.startsWith("claude-")) {
+    return "anthropic";
+  }
+
+  if (normalized.startsWith("gemini")) {
+    return "google";
+  }
+
+  return undefined;
 }
 
 function buildHookActivityId(

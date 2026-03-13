@@ -68,7 +68,6 @@ export function wrapAgent<TAgent>(agent: TAgent, options: WrapToolOptions): TAge
   const originalStream = baseAgent.stream?.bind(baseAgent);
   const originalResumeGenerate = baseAgent.resumeGenerate?.bind(baseAgent);
   const originalResumeStream = baseAgent.resumeStream?.bind(baseAgent);
-  const defaultModelInfo = extractAgentModelInfo(baseAgent);
 
   if (originalGenerate) {
     baseAgent.generate = async (messages, executionOptions = {}) => {
@@ -77,6 +76,10 @@ export function wrapAgent<TAgent>(agent: TAgent, options: WrapToolOptions): TAge
         ...executionOptions,
         runId
       };
+      const invocationModelInfo = resolveInvocationModelInfo(
+        baseAgent,
+        executionOptions
+      );
 
       return executeAgentLifecycle(
         {
@@ -87,7 +90,7 @@ export function wrapAgent<TAgent>(agent: TAgent, options: WrapToolOptions): TAge
           runId,
           workflowId,
           workflowType,
-          defaultModelInfo
+          defaultModelInfo: invocationModelInfo
         }
       );
     };
@@ -100,6 +103,10 @@ export function wrapAgent<TAgent>(agent: TAgent, options: WrapToolOptions): TAge
         ...executionOptions,
         runId
       };
+      const invocationModelInfo = resolveInvocationModelInfo(
+        baseAgent,
+        executionOptions
+      );
       const output = await executeAgentLifecycle(
         {
           messages,
@@ -109,7 +116,7 @@ export function wrapAgent<TAgent>(agent: TAgent, options: WrapToolOptions): TAge
           runId,
           workflowId,
           workflowType,
-          defaultModelInfo
+          defaultModelInfo: invocationModelInfo
         }
       );
 
@@ -134,7 +141,7 @@ export function wrapAgent<TAgent>(agent: TAgent, options: WrapToolOptions): TAge
               workflowType,
               fullOutput,
               streamMeta,
-              defaultModelInfo
+              invocationModelInfo
             );
           }
         });
@@ -155,6 +162,10 @@ export function wrapAgent<TAgent>(agent: TAgent, options: WrapToolOptions): TAge
         workflowType,
         resumeData
       );
+      const invocationModelInfo = resolveInvocationModelInfo(
+        baseAgent,
+        executionOptions
+      );
 
       return executeAgentLifecycle({
         operation: () => originalResumeGenerate(resumeData, executionOptions),
@@ -163,7 +174,7 @@ export function wrapAgent<TAgent>(agent: TAgent, options: WrapToolOptions): TAge
         runId: runId ?? randomUUID(),
         workflowId,
         workflowType,
-        defaultModelInfo
+        defaultModelInfo: invocationModelInfo
       });
     };
   }
@@ -171,6 +182,7 @@ export function wrapAgent<TAgent>(agent: TAgent, options: WrapToolOptions): TAge
   if (originalResumeStream) {
     baseAgent.resumeStream = async (resumeData, executionOptions = {}) => {
       const runId = executionOptions.runId ? String(executionOptions.runId) : undefined;
+      const resolvedRunId = runId ?? randomUUID();
 
       await handleAgentResume(
         options,
@@ -179,19 +191,22 @@ export function wrapAgent<TAgent>(agent: TAgent, options: WrapToolOptions): TAge
         workflowType,
         resumeData
       );
+      const invocationModelInfo = resolveInvocationModelInfo(
+        baseAgent,
+        executionOptions
+      );
 
       const output = await executeAgentLifecycle({
         operation: () => originalResumeStream(resumeData, executionOptions),
         options,
         phase: "resume",
-        runId: runId ?? randomUUID(),
+        runId: resolvedRunId,
         workflowId,
         workflowType,
-        defaultModelInfo
+        defaultModelInfo: invocationModelInfo
       });
 
       if (output && typeof output === "object") {
-        const resolvedRunId = runId ?? randomUUID();
         const streamMeta = getAgentStreamMeta(output);
         attachStreamLifecycleHandlers(output, {
           onFailure: async error => {
@@ -212,7 +227,7 @@ export function wrapAgent<TAgent>(agent: TAgent, options: WrapToolOptions): TAge
               workflowType,
               fullOutput,
               streamMeta,
-              defaultModelInfo
+              invocationModelInfo
             );
           }
         });
@@ -463,7 +478,15 @@ async function finalizeAgentSuccess(
   if (options.config.skipWorkflowTypes.has(workflowType)) {
     return;
   }
-  const resolvedOutput = applyDefaultModelInfo(output, defaultModelInfo);
+  const workflowSpans = normalizeSpansForGovernance(
+    options.spanProcessor.getBuffer(workflowId, runId)?.spans ?? []
+  );
+  const modelInfo = resolveWorkflowModelInfo(
+    output,
+    defaultModelInfo,
+    workflowSpans
+  );
+  const resolvedOutput = applyDefaultModelInfo(output, modelInfo);
   const basePayload = {
     event_type: WorkflowEventType.WORKFLOW_COMPLETED,
     run_id: runId,
@@ -472,29 +495,27 @@ async function finalizeAgentSuccess(
   } as const;
   const workflowOutput = serializeWorkflowOutputForGovernance(resolvedOutput);
   const telemetryPayload = buildWorkflowCompletedTelemetryPayload(
-    options,
-    workflowId,
-    runId,
     {
       ...basePayload,
       workflow_output: workflowOutput
     },
     resolvedOutput,
+    workflowSpans,
+    modelInfo,
     streamMeta,
-    defaultModelInfo
   );
   const compactPayload = buildWorkflowCompletedCompactPayload(
     basePayload,
     workflowOutput,
     resolvedOutput,
+    modelInfo,
     streamMeta,
-    defaultModelInfo
   );
   const ultraMinimalPayload = buildWorkflowCompletedUltraMinimalPayload(
     basePayload,
     resolvedOutput,
+    modelInfo,
     streamMeta,
-    defaultModelInfo
   );
 
   const verdict = await evaluateAgentEvent(
@@ -520,15 +541,15 @@ function buildWorkflowCompletedCompactPayload(
   },
   workflowOutput: unknown,
   output: unknown,
-  streamMeta?: AgentStreamMeta,
-  fallbackModelInfo: AgentModelInfo = {}
+  modelInfo: AgentModelInfo,
+  streamMeta?: AgentStreamMeta
 ): Record<string, unknown> & { event_type: WorkflowEventType } {
   const endTimeMs = Date.now();
   const startTimeMs = streamMeta?.startTimeMs;
   const durationMs =
     typeof startTimeMs === "number" ? Math.max(0, endTimeMs - startTimeMs) : undefined;
   const usage = extractUsageMetrics(output);
-  const modelInfo = extractModelInfo(output, fallbackModelInfo);
+  const telemetryModelId = toTelemetryModelId(modelInfo.modelId);
   const syntheticSpans = buildWorkflowTelemetrySpans(
     [],
     modelInfo,
@@ -556,6 +577,9 @@ function buildWorkflowCompletedCompactPayload(
       ? { total_tokens: usage.totalTokens }
       : {}),
     ...(modelInfo.modelId ? { model_id: modelInfo.modelId } : {}),
+    ...(telemetryModelId ? { model: telemetryModelId } : {}),
+    ...(modelInfo.provider ? { model_provider: modelInfo.provider } : {}),
+    ...(modelInfo.provider ? { provider: modelInfo.provider } : {}),
     ...(syntheticSpans.length > 0
       ? {
           span_count: syntheticSpans.length,
@@ -582,15 +606,15 @@ function buildWorkflowCompletedUltraMinimalPayload(
     workflow_type: string;
   },
   output: unknown,
-  streamMeta?: AgentStreamMeta,
-  fallbackModelInfo: AgentModelInfo = {}
+  modelInfo: AgentModelInfo,
+  streamMeta?: AgentStreamMeta
 ): Record<string, unknown> & { event_type: WorkflowEventType } {
   const endTimeMs = Date.now();
   const startTimeMs = streamMeta?.startTimeMs;
   const durationMs =
     typeof startTimeMs === "number" ? Math.max(0, endTimeMs - startTimeMs) : undefined;
   const usage = extractUsageMetrics(output);
-  const modelInfo = extractModelInfo(output, fallbackModelInfo);
+  const telemetryModelId = toTelemetryModelId(modelInfo.modelId);
 
   return {
     ...basePayload,
@@ -606,14 +630,14 @@ function buildWorkflowCompletedUltraMinimalPayload(
     ...(typeof usage.totalTokens === "number"
       ? { total_tokens: usage.totalTokens }
       : {}),
-    ...(modelInfo.modelId ? { model_id: modelInfo.modelId } : {})
+    ...(modelInfo.modelId ? { model_id: modelInfo.modelId } : {}),
+    ...(telemetryModelId ? { model: telemetryModelId } : {}),
+    ...(modelInfo.provider ? { model_provider: modelInfo.provider } : {}),
+    ...(modelInfo.provider ? { provider: modelInfo.provider } : {})
   };
 }
 
 function buildWorkflowCompletedTelemetryPayload(
-  options: WrapToolOptions,
-  workflowId: string,
-  runId: string,
   basePayload: {
     event_type: WorkflowEventType.WORKFLOW_COMPLETED;
     run_id: string;
@@ -622,19 +646,18 @@ function buildWorkflowCompletedTelemetryPayload(
     workflow_type: string;
   },
   output: unknown,
-  streamMeta?: AgentStreamMeta,
-  fallbackModelInfo: AgentModelInfo = {}
+  workflowSpans: Array<Record<string, unknown>>,
+  modelInfo: AgentModelInfo,
+  streamMeta?: AgentStreamMeta
 ): Record<string, unknown> & { event_type: WorkflowEventType } {
   const endTimeMs = Date.now();
   const startTimeMs = streamMeta?.startTimeMs;
   const durationMs =
     typeof startTimeMs === "number" ? Math.max(0, endTimeMs - startTimeMs) : undefined;
   const usage = extractUsageMetrics(output);
-  const modelInfo = extractModelInfo(output, fallbackModelInfo);
+  const telemetryModelId = toTelemetryModelId(modelInfo.modelId);
   const spans = buildWorkflowTelemetrySpans(
-    normalizeSpansForGovernance(
-      options.spanProcessor.getBuffer(workflowId, runId)?.spans ?? []
-    ),
+    workflowSpans,
     modelInfo,
     usage,
     endTimeMs
@@ -655,6 +678,9 @@ function buildWorkflowCompletedTelemetryPayload(
       ? { total_tokens: usage.totalTokens }
       : {}),
     ...(modelInfo.modelId ? { model_id: modelInfo.modelId } : {}),
+    ...(telemetryModelId ? { model: telemetryModelId } : {}),
+    ...(modelInfo.provider ? { model_provider: modelInfo.provider } : {}),
+    ...(modelInfo.provider ? { provider: modelInfo.provider } : {}),
     span_count: spans.length,
     spans
   };
@@ -988,6 +1014,27 @@ function extractAgentModelInfo(
   };
 }
 
+function resolveInvocationModelInfo(
+  agentRecord: Record<PropertyKey, unknown>,
+  executionOptions: Record<string, unknown>
+): AgentModelInfo {
+  const agentModelInfo = extractAgentModelInfo(agentRecord);
+  const optionsModelInfo = extractModelInfo(executionOptions, {});
+
+  return {
+    ...(optionsModelInfo.modelId
+      ? { modelId: optionsModelInfo.modelId }
+      : agentModelInfo.modelId
+        ? { modelId: agentModelInfo.modelId }
+        : {}),
+    ...(optionsModelInfo.provider
+      ? { provider: optionsModelInfo.provider }
+      : agentModelInfo.provider
+        ? { provider: agentModelInfo.provider }
+        : {})
+  };
+}
+
 function applyDefaultModelInfo(
   output: unknown,
   fallback: AgentModelInfo
@@ -1211,6 +1258,26 @@ function normalizeProvider(candidate: string): string {
   return candidate.trim();
 }
 
+function toTelemetryModelId(modelId: string | undefined): string | undefined {
+  if (typeof modelId !== "string") {
+    return undefined;
+  }
+
+  const trimmed = modelId.trim();
+
+  if (trimmed.length === 0) {
+    return undefined;
+  }
+
+  const sanitized = trimmed
+    .replace(/[.:/\\\s]+/g, "-")
+    .replace(/[^A-Za-z0-9_-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+  return sanitized.length > 0 ? sanitized : trimmed;
+}
+
 function buildWorkflowTelemetrySpans(
   spans: Array<Record<string, unknown>>,
   modelInfo: {
@@ -1252,6 +1319,7 @@ function buildWorkflowTelemetrySpans(
       modelId,
       outputTokens,
       providerUrl,
+      ...(modelInfo.provider ? { provider: modelInfo.provider } : {}),
       ...(traceId ? { traceId } : {})
     })
   ];
@@ -1278,39 +1346,59 @@ function hasParseableModelUsageSpan(
       return false;
     }
 
-    try {
-      const parsed = JSON.parse(responseBody) as {
-        model?: unknown;
-        usage?: {
-          completion_tokens?: unknown;
-          input_tokens?: unknown;
-          output_tokens?: unknown;
-          prompt_tokens?: unknown;
-        };
-      };
-
-      const modelPresent = typeof parsed.model === "string" && parsed.model.length > 0;
-      const usage = parsed.usage;
-      const hasPromptTokens =
-        typeof usage?.prompt_tokens === "number" && usage.prompt_tokens > 0;
-      const hasCompletionTokens =
-        typeof usage?.completion_tokens === "number" && usage.completion_tokens > 0;
-      const hasInputTokens =
-        typeof usage?.input_tokens === "number" && usage.input_tokens > 0;
-      const hasOutputTokens =
-        typeof usage?.output_tokens === "number" && usage.output_tokens > 0;
-
-      return (
-        modelPresent ||
-        hasPromptTokens ||
-        hasCompletionTokens ||
-        hasInputTokens ||
-        hasOutputTokens
-      );
-    } catch {
+    if (!hasUsageInBody(responseBody)) {
       return false;
     }
+
+    const modelFromResponse = extractModelIdFromBody(responseBody);
+
+    if (modelFromResponse) {
+      return true;
+    }
+
+    const requestBody = getStringField(span, "request_body", "requestBody");
+
+    if (!requestBody) {
+      return false;
+    }
+
+    return extractModelIdFromBody(requestBody) !== undefined;
   });
+}
+
+function hasUsageInBody(body: string): boolean {
+  try {
+    const parsed = JSON.parse(body) as {
+      usage?: {
+        completion_tokens?: unknown;
+        input_tokens?: unknown;
+        output_tokens?: unknown;
+        prompt_tokens?: unknown;
+      };
+    };
+
+    const usage = parsed.usage;
+    return (
+      typeof usage?.prompt_tokens === "number" ||
+      typeof usage?.completion_tokens === "number" ||
+      typeof usage?.input_tokens === "number" ||
+      typeof usage?.output_tokens === "number"
+    );
+  } catch {
+    return false;
+  }
+}
+
+function extractModelIdFromBody(body: string): string | undefined {
+  try {
+    const parsed = JSON.parse(body) as { model?: unknown };
+    const model =
+      typeof parsed.model === "string" ? parsed.model.trim() : undefined;
+
+    return model && model.length > 0 ? model : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function createSyntheticModelUsageSpan({
@@ -1318,6 +1406,7 @@ function createSyntheticModelUsageSpan({
   inputTokens,
   modelId,
   outputTokens,
+  provider,
   providerUrl,
   traceId
 }: {
@@ -1325,6 +1414,7 @@ function createSyntheticModelUsageSpan({
   inputTokens: number;
   modelId: string;
   outputTokens: number;
+  provider?: string;
   providerUrl: string;
   traceId?: string;
 }): Record<string, unknown> {
@@ -1332,6 +1422,7 @@ function createSyntheticModelUsageSpan({
   const startTimeNs = Math.max(0, endTimeNs - 1);
   const normalizedTraceId = normalizeHexId(traceId, 32);
   const spanId = normalizeHexId(undefined, 16);
+  const telemetryModelId = toTelemetryModelId(modelId) ?? modelId;
 
   return {
     attributes: {
@@ -1345,13 +1436,22 @@ function createSyntheticModelUsageSpan({
     kind: "CLIENT",
     name: "openbox.synthetic.model_usage",
     request_body: JSON.stringify({
-      model: modelId
+      model: telemetryModelId,
+      model_id: modelId,
+      ...(provider ? { model_provider: provider } : {}),
+      ...(provider ? { provider } : {})
     }),
     response_body: JSON.stringify({
-      model: modelId,
+      model: telemetryModelId,
+      model_id: modelId,
+      ...(provider ? { model_provider: provider } : {}),
+      ...(provider ? { provider } : {}),
       usage: {
+        completion_tokens: outputTokens,
         input_tokens: inputTokens,
-        output_tokens: outputTokens
+        output_tokens: outputTokens,
+        prompt_tokens: inputTokens,
+        total_tokens: inputTokens + outputTokens
       }
     }),
     semantic_type: "llm_completion",
@@ -1437,28 +1537,32 @@ function resolveSyntheticModelId(
   },
   spans: Array<Record<string, unknown>>
 ): string {
-  if (modelInfo.modelId) {
-    return modelInfo.modelId;
-  }
-
   for (const span of spans) {
+    const responseBody = getStringField(span, "response_body", "responseBody");
+
+    if (responseBody) {
+      const modelFromResponse = extractModelIdFromBody(responseBody);
+
+      if (modelFromResponse) {
+        return modelFromResponse;
+      }
+    }
+
     const requestBody = getStringField(span, "request_body", "requestBody");
 
     if (!requestBody) {
       continue;
     }
 
-    try {
-      const parsed = JSON.parse(requestBody) as {
-        model?: unknown;
-      };
+    const modelFromRequest = extractModelIdFromBody(requestBody);
 
-      if (typeof parsed.model === "string" && parsed.model.trim().length > 0) {
-        return parsed.model;
-      }
-    } catch {
-      continue;
+    if (modelFromRequest) {
+      return modelFromRequest;
     }
+  }
+
+  if (modelInfo.modelId) {
+    return modelInfo.modelId;
   }
 
   return "unknown-model";
@@ -1504,6 +1608,91 @@ function isLlmProviderUrl(url: string): boolean {
     url.includes("api.anthropic.com") ||
     url.includes("generativelanguage.googleapis.com")
   );
+}
+
+function resolveWorkflowModelInfo(
+  output: unknown,
+  fallbackModelInfo: AgentModelInfo,
+  spans: Array<Record<string, unknown>>
+): AgentModelInfo {
+  const outputModelInfo = extractModelInfo(output, {});
+  const spanModelInfo = extractModelInfoFromSpans(spans);
+
+  return {
+    ...(outputModelInfo.modelId
+      ? { modelId: outputModelInfo.modelId }
+      : spanModelInfo.modelId
+        ? { modelId: spanModelInfo.modelId }
+        : fallbackModelInfo.modelId
+          ? { modelId: fallbackModelInfo.modelId }
+          : {}),
+    ...(outputModelInfo.provider
+      ? { provider: outputModelInfo.provider }
+      : spanModelInfo.provider
+        ? { provider: spanModelInfo.provider }
+        : fallbackModelInfo.provider
+          ? { provider: fallbackModelInfo.provider }
+          : {})
+  };
+}
+
+function extractModelInfoFromSpans(
+  spans: Array<Record<string, unknown>>
+): AgentModelInfo {
+  let modelId: string | undefined;
+  let provider: string | undefined;
+
+  for (const span of spans) {
+    const attributes =
+      span.attributes && typeof span.attributes === "object"
+        ? (span.attributes as Record<string, unknown>)
+        : {};
+    const rawUrl = attributes["http.url"] ?? attributes["url.full"];
+    const url = typeof rawUrl === "string" ? rawUrl : undefined;
+
+    if (url && !provider) {
+      provider = inferProviderFromUrl(url);
+    }
+
+    const responseBody = getStringField(span, "response_body", "responseBody");
+
+    if (!modelId && responseBody) {
+      modelId = extractModelIdFromBody(responseBody);
+    }
+
+    const requestBody = getStringField(span, "request_body", "requestBody");
+
+    if (!modelId && requestBody) {
+      modelId = extractModelIdFromBody(requestBody);
+    }
+
+    if (modelId && provider) {
+      break;
+    }
+  }
+
+  return {
+    ...(modelId ? { modelId } : {}),
+    ...(provider ? { provider } : {})
+  };
+}
+
+function inferProviderFromUrl(url: string): string | undefined {
+  const normalized = url.toLowerCase();
+
+  if (normalized.includes("api.openai.com")) {
+    return "openai";
+  }
+
+  if (normalized.includes("api.anthropic.com")) {
+    return "anthropic";
+  }
+
+  if (normalized.includes("generativelanguage.googleapis.com")) {
+    return "google";
+  }
+
+  return undefined;
 }
 
 function normalizeHexId(

@@ -251,8 +251,29 @@ describe("setupOpenBoxOpenTelemetry", () => {
         body += chunk;
       });
       request.on("end", () => {
+        let model = "gpt-4.1";
+
+        try {
+          const parsed = JSON.parse(body) as { model?: unknown };
+
+          if (typeof parsed.model === "string" && parsed.model.trim().length > 0) {
+            model = parsed.model;
+          }
+        } catch {
+          // Ignore malformed request body in test fixture.
+        }
+
         response.writeHead(200, { "content-type": "application/json" });
-        response.end(JSON.stringify({ echoed: body }));
+        response.end(
+          JSON.stringify({
+            model,
+            usage: {
+              input_tokens: 42,
+              output_tokens: 7,
+              total_tokens: 49
+            }
+          })
+        );
       });
     });
 
@@ -342,6 +363,10 @@ describe("setupOpenBoxOpenTelemetry", () => {
     expect(started).toMatchObject({
       activity_id: "wf-agent-1::agent-llm::hook:http_request:started",
       activity_type: "agentLlmCompletion",
+      model: "gpt-4-1",
+      model_id: "gpt-4.1",
+      model_provider: "openai",
+      provider: "openai",
       run_id: "run-agent-1",
       workflow_id: "wf-agent-1",
       workflow_type: "coding-agent"
@@ -349,10 +374,48 @@ describe("setupOpenBoxOpenTelemetry", () => {
     expect(completed).toMatchObject({
       activity_id: "wf-agent-1::agent-llm::hook:http_request:completed",
       activity_type: "agentLlmCompletion",
+      input_tokens: 42,
+      model: "gpt-4-1",
+      model_id: "gpt-4.1",
+      model_provider: "openai",
+      output_tokens: 7,
+      provider: "openai",
       run_id: "run-agent-1",
+      total_tokens: 49,
       workflow_id: "wf-agent-1",
       workflow_type: "coding-agent"
     });
+    const startedSpan = (
+      started as { spans?: Array<Record<string, unknown>> } | undefined
+    )?.spans?.[0];
+    const completedSpan = (
+      completed as { spans?: Array<Record<string, unknown>> } | undefined
+    )?.spans?.[0];
+    const startedRequestBody = (
+      startedSpan as { request_body?: unknown } | undefined
+    )?.request_body;
+    const completedResponseBody = (
+      completedSpan as { response_body?: unknown } | undefined
+    )?.response_body;
+
+    expect(typeof startedRequestBody).toBe("string");
+    expect(typeof completedResponseBody).toBe("string");
+
+    const parsedStartedRequest = JSON.parse(startedRequestBody as string) as {
+      model?: string;
+      model_id?: string;
+    };
+    const parsedCompletedResponse = JSON.parse(
+      completedResponseBody as string
+    ) as {
+      model?: string;
+      model_id?: string;
+    };
+
+    expect(parsedStartedRequest.model).toBe("gpt-4-1");
+    expect(parsedStartedRequest.model_id).toBe("gpt-4.1");
+    expect(parsedCompletedResponse.model).toBe("gpt-4-1");
+    expect(parsedCompletedResponse.model_id).toBe("gpt-4.1");
   });
 
   it("raises ApprovalPendingError when hook-level governance returns REQUIRE_APPROVAL", async () => {

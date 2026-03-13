@@ -301,6 +301,8 @@ function isOpenBoxDebugEnabled(): boolean {
 function summarizeEvaluatePayload(
   payload: Record<string, unknown>
 ): Record<string, unknown> {
+  const spanSummary = summarizeSpans(payload.spans);
+
   return {
     activity_id: payload.activity_id,
     activity_type: payload.activity_type,
@@ -309,6 +311,7 @@ function summarizeEvaluatePayload(
     has_activity_output: payload.activity_output !== undefined,
     has_error: payload.error !== undefined,
     has_signal_args: payload.signal_args !== undefined,
+    has_spans: spanSummary.hasSpans,
     has_workflow_input: payload.workflow_input !== undefined,
     has_workflow_output: payload.workflow_output !== undefined,
     hook_stage:
@@ -318,8 +321,51 @@ function summarizeEvaluatePayload(
         ? (payload.hook_trigger as Record<string, unknown>).stage
         : undefined,
     run_id: payload.run_id,
+    span_count:
+      typeof payload.span_count === "number"
+        ? payload.span_count
+        : spanSummary.detectedSpanCount,
+    synthetic_model_usage_span: spanSummary.syntheticModelUsageSpan,
+    workflow_model_id:
+      typeof payload.model_id === "string" ? payload.model_id : undefined,
+    workflow_model_provider:
+      typeof payload.model_provider === "string"
+        ? payload.model_provider
+        : typeof payload.provider === "string"
+          ? payload.provider
+          : undefined,
     workflow_id: payload.workflow_id,
     workflow_type: payload.workflow_type
+  };
+}
+
+function summarizeSpans(
+  spans: unknown
+): {
+  detectedSpanCount: number;
+  hasSpans: boolean;
+  syntheticModelUsageSpan: boolean;
+} {
+  if (!Array.isArray(spans)) {
+    return {
+      detectedSpanCount: 0,
+      hasSpans: false,
+      syntheticModelUsageSpan: false
+    };
+  }
+
+  return {
+    detectedSpanCount: spans.length,
+    hasSpans: spans.length > 0,
+    syntheticModelUsageSpan: spans.some(span => {
+      if (!span || typeof span !== "object") {
+        return false;
+      }
+
+      return (
+        (span as Record<string, unknown>).name === "openbox.synthetic.model_usage"
+      );
+    })
   };
 }
 
