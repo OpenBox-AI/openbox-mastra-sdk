@@ -3,7 +3,8 @@ import type { AnyWorkflow, Step, WorkflowResult } from "@mastra/core/workflows";
 
 import {
   clearPendingApproval,
-  getPendingApproval
+  getPendingApproval,
+  markActivityApproved
 } from "../governance/approval-registry.js";
 import {
   executeGovernedActivity,
@@ -469,6 +470,7 @@ async function pollPendingApproval(
   );
 
   if (verdict === Verdict.ALLOW) {
+    markActivityApproved(pending.runId, pending.activityId);
     clearPendingApproval(run.runId);
     return;
   }

@@ -7,7 +7,9 @@ import type { OpenBoxClient } from "../client/index.js";
 import type { OpenBoxConfig } from "../config/index.js";
 import type { OpenBoxSpanProcessor } from "../span/index.js";
 import {
+  ApprovalExpiredError,
   ApprovalPendingError,
+  ApprovalRejectedError,
   GovernanceVerdictResponse,
   GovernanceHaltError,
   GuardrailsValidationError,
@@ -19,7 +21,13 @@ import {
   getOpenBoxExecutionContext,
   runWithOpenBoxExecutionContext
 } from "./context.js";
-import { setPendingApproval } from "./approval-registry.js";
+import {
+  clearActivityApproval,
+  clearPendingApproval,
+  isActivityApproved,
+  markActivityApproved,
+  setPendingApproval
+} from "./approval-registry.js";
 
 export interface WorkflowSuspendContext {
   runId: string;
@@ -122,14 +130,6 @@ export async function executeGovernedActivity<TInput, TOutput>({
     dependencies.config.hitlEnabled &&
     Verdict.requiresApproval(startVerdict?.verdict ?? Verdict.ALLOW)
   ) {
-    const suspend = runtimeContext.workflow?.suspend ?? runtimeContext.agent?.suspend;
-
-    if (!suspend) {
-      throw new ApprovalPendingError(
-        startVerdict?.reason ?? "Activity requires human approval"
-      );
-    }
-
     const approvalPayload = {
       openbox: {
         activityId: descriptor.activityId,
@@ -153,7 +153,13 @@ export async function executeGovernedActivity<TInput, TOutput>({
       workflowType: descriptor.workflowType
     });
 
-    return (await suspend(approvalPayload)) as TOutput | undefined;
+    const workflowSuspend = runtimeContext.workflow?.suspend;
+
+    if (workflowSuspend) {
+      return (await workflowSuspend(approvalPayload)) as TOutput | undefined;
+    }
+
+    await waitForApprovalInline(dependencies.client, descriptor, startVerdict?.reason);
   }
 
   return runWithOpenBoxExecutionContext(
@@ -198,35 +204,40 @@ export async function executeGovernedActivity<TInput, TOutput>({
           caughtError instanceof ApprovalPendingError &&
           dependencies.config.hitlEnabled
         ) {
-          const suspend =
-            runtimeContext.workflow?.suspend ?? runtimeContext.agent?.suspend;
-
-          if (suspend) {
-            const approvalPayload = {
-              openbox: {
-                activityId: descriptor.activityId,
-                activityType: descriptor.activityType,
-                approvalId: undefined,
-                reason: caughtError.message,
-                requestedAt: rfc3339Now(),
-                runId: descriptor.runId,
-                workflowId: descriptor.workflowId,
-                workflowType: descriptor.workflowType
-              }
-            };
-
-            setPendingApproval({
+          const approvalPayload = {
+            openbox: {
               activityId: descriptor.activityId,
               activityType: descriptor.activityType,
               approvalId: undefined,
-              requestedAt: approvalPayload.openbox.requestedAt,
+              reason: caughtError.message,
+              requestedAt: rfc3339Now(),
               runId: descriptor.runId,
               workflowId: descriptor.workflowId,
               workflowType: descriptor.workflowType
-            });
+            }
+          };
 
-            return (await suspend(approvalPayload)) as TOutput | undefined;
+          setPendingApproval({
+            activityId: descriptor.activityId,
+            activityType: descriptor.activityType,
+            approvalId: undefined,
+            requestedAt: approvalPayload.openbox.requestedAt,
+            runId: descriptor.runId,
+            workflowId: descriptor.workflowId,
+            workflowType: descriptor.workflowType
+          });
+
+          const workflowSuspend = runtimeContext.workflow?.suspend;
+
+          if (workflowSuspend) {
+            return (await workflowSuspend(approvalPayload)) as TOutput | undefined;
           }
+
+          await waitForApprovalInline(
+            dependencies.client,
+            descriptor,
+            caughtError.message
+          );
         }
 
         error = serializeError(caughtError);
@@ -246,7 +257,12 @@ export async function executeGovernedActivity<TInput, TOutput>({
             error
           );
 
-          if (!wasAborted) {
+          const alreadyApproved = isActivityApproved(
+            descriptor.runId,
+            descriptor.activityId
+          );
+
+          if (!wasAborted && !alreadyApproved) {
             const completedVerdict = await evaluateActivityEvent(dependencies, {
               activity_id: descriptor.activityId,
               activity_input: serializeActivityInputForEvent(inputForExecution),
@@ -285,18 +301,9 @@ export async function executeGovernedActivity<TInput, TOutput>({
 
             if (
               dependencies.config.hitlEnabled &&
-              Verdict.requiresApproval(completedVerdict?.verdict ?? Verdict.ALLOW)
+              Verdict.requiresApproval(completedVerdict?.verdict ?? Verdict.ALLOW) &&
+              !isActivityApproved(descriptor.runId, descriptor.activityId)
             ) {
-              const suspend =
-                runtimeContext.workflow?.suspend ?? runtimeContext.agent?.suspend;
-
-              if (!suspend) {
-                throw new ApprovalPendingError(
-                  completedVerdict?.reason ??
-                    "Activity output requires human approval"
-                );
-              }
-
               const approvalPayload = {
                 openbox: {
                   activityId: descriptor.activityId,
@@ -320,7 +327,20 @@ export async function executeGovernedActivity<TInput, TOutput>({
                 workflowType: descriptor.workflowType
               });
 
-              output = (await suspend(approvalPayload)) as TOutput | undefined;
+              const workflowSuspend = runtimeContext.workflow?.suspend;
+
+              if (workflowSuspend) {
+                output = (await workflowSuspend(approvalPayload)) as
+                  | TOutput
+                  | undefined;
+              } else {
+                await waitForApprovalInline(
+                  dependencies.client,
+                  descriptor,
+                  completedVerdict?.reason ??
+                    "Activity output requires human approval"
+                );
+              }
             }
           }
 
@@ -341,6 +361,7 @@ export async function executeGovernedActivity<TInput, TOutput>({
             descriptor.workflowId,
             descriptor.activityId
           );
+          clearActivityApproval(descriptor.runId, descriptor.activityId);
         }
       }
 
@@ -351,6 +372,71 @@ export async function executeGovernedActivity<TInput, TOutput>({
       return output;
     }
   );
+}
+
+const INLINE_APPROVAL_TIMEOUT_MS = 300_000;
+const INLINE_APPROVAL_POLL_INTERVAL_MS = 1_500;
+
+async function waitForApprovalInline(
+  client: OpenBoxClient,
+  descriptor: ReturnType<typeof resolveActivityDescriptor>,
+  reason: string | undefined
+): Promise<void> {
+  const timeoutAt = Date.now() + INLINE_APPROVAL_TIMEOUT_MS;
+
+  while (Date.now() < timeoutAt) {
+    const approval = await client.pollApproval({
+      activityId: descriptor.activityId,
+      runId: descriptor.runId,
+      workflowId: descriptor.workflowId
+    });
+
+    if (!approval) {
+      await delay(INLINE_APPROVAL_POLL_INTERVAL_MS);
+      continue;
+    }
+
+    if (approval.expired) {
+      clearPendingApproval(descriptor.runId);
+      throw new ApprovalExpiredError(
+        `Approval expired for activity ${descriptor.activityType}`
+      );
+    }
+
+    const verdict = Verdict.fromString(
+      (approval.verdict as string | undefined) ??
+        (approval.action as string | undefined)
+    );
+
+    if (verdict === Verdict.ALLOW) {
+      markActivityApproved(descriptor.runId, descriptor.activityId);
+      clearPendingApproval(descriptor.runId);
+      return;
+    }
+
+    if (Verdict.shouldStop(verdict)) {
+      clearPendingApproval(descriptor.runId);
+      throw new ApprovalRejectedError(
+        `Activity rejected: ${String(approval.reason ?? "Activity rejected")}`
+      );
+    }
+
+    await delay(INLINE_APPROVAL_POLL_INTERVAL_MS);
+  }
+
+  throw new ApprovalPendingError(
+    reason ?? `Awaiting approval for activity ${descriptor.activityType}`
+  );
+}
+
+async function delay(ms: number): Promise<void> {
+  if (ms <= 0) {
+    return;
+  }
+
+  await new Promise<void>(resolve => {
+    setTimeout(resolve, ms);
+  });
 }
 
 export function serializeValue(value: unknown): unknown {

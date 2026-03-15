@@ -267,14 +267,16 @@ describe("OpenBoxClient.evaluate", () => {
 });
 
 describe("OpenBoxClient.pollApproval", () => {
-  it("posts workflow, run, and activity identifiers", async () => {
+  it("posts workflow, run, and activity identifiers with JSON content type", async () => {
     let observedBody: unknown;
+    let observedContentType: string | null = null;
 
     server.use(
       http.post(
         "https://api.openbox.ai/api/v1/governance/approval",
         async ({ request }) => {
           observedBody = await request.json();
+          observedContentType = request.headers.get("content-type");
 
           return HttpResponse.json({
             reason: "Approved by admin",
@@ -300,6 +302,7 @@ describe("OpenBoxClient.pollApproval", () => {
       run_id: "run-456",
       workflow_id: "wf-123"
     });
+    expect(observedContentType).toContain("application/json");
     expect(response).toEqual({ reason: "Approved by admin", verdict: "allow" });
   });
 

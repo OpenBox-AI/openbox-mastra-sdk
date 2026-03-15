@@ -4,7 +4,8 @@ import { trace } from "@opentelemetry/api";
 
 import {
   clearPendingApproval,
-  getPendingApproval
+  getPendingApproval,
+  markActivityApproved
 } from "../governance/approval-registry.js";
 import {
   normalizeSpansForGovernance,
@@ -450,6 +451,7 @@ async function handleAgentResume(
   );
 
   if (verdict === Verdict.ALLOW) {
+    markActivityApproved(pending.runId, pending.activityId);
     clearPendingApproval(runId);
     return;
   }

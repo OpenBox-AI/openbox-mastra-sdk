@@ -10,6 +10,10 @@ import {
   setupOpenBoxOpenTelemetry,
   traced
 } from "../../src/index.js";
+import {
+  clearActivityApproval,
+  markActivityApproved
+} from "../../src/governance/approval-registry.js";
 import { runWithOpenBoxExecutionContext } from "../../src/governance/context.js";
 import { startOpenBoxServer } from "../helpers/openbox-server.js";
 
@@ -361,7 +365,8 @@ describe("setupOpenBoxOpenTelemetry", () => {
     );
 
     expect(started).toMatchObject({
-      activity_id: "wf-agent-1::agent-llm::hook:http_request:started",
+      activity_id:
+        "wf-agent-1::agent-llm::run-agent-1::hook:http_request:started",
       activity_type: "agentLlmCompletion",
       model: "gpt-4-1",
       model_id: "gpt-4.1",
@@ -372,7 +377,8 @@ describe("setupOpenBoxOpenTelemetry", () => {
       workflow_type: "coding-agent"
     });
     expect(completed).toMatchObject({
-      activity_id: "wf-agent-1::agent-llm::hook:http_request:completed",
+      activity_id:
+        "wf-agent-1::agent-llm::run-agent-1::hook:http_request:completed",
       activity_type: "agentLlmCompletion",
       input_tokens: 42,
       model: "gpt-4-1",
@@ -384,6 +390,27 @@ describe("setupOpenBoxOpenTelemetry", () => {
       total_tokens: 49,
       workflow_id: "wf-agent-1",
       workflow_type: "coding-agent"
+    });
+    expect((started as Record<string, unknown>)?.activity_input).toMatchObject([
+      {
+        model: "gpt-4-1",
+        model_id: "gpt-4.1"
+      }
+    ]);
+    expect((completed as Record<string, unknown>)?.activity_input).toMatchObject([
+      {
+        model: "gpt-4-1",
+        model_id: "gpt-4.1"
+      }
+    ]);
+    expect((completed as Record<string, unknown>)?.activity_output).toMatchObject({
+      model: "gpt-4-1",
+      model_id: "gpt-4.1",
+      usage: {
+        input_tokens: 42,
+        output_tokens: 7,
+        total_tokens: 49
+      }
     });
     const startedSpan = (
       started as { spans?: Array<Record<string, unknown>> } | undefined
@@ -514,6 +541,112 @@ describe("setupOpenBoxOpenTelemetry", () => {
       )
     ).rejects.toBeInstanceOf(ApprovalPendingError);
 
+    rootSpan.end();
+    await controller.shutdown();
+    await openBoxServer.close();
+    downstream.close();
+  });
+
+  it("allows approved activities to continue when nested hook requests approval", async () => {
+    const openBoxServer = await startOpenBoxServer({
+      evaluate(body) {
+        if (
+          body.hook_trigger &&
+          (body.hook_trigger as Record<string, unknown>).stage === "started"
+        ) {
+          return {
+            reason: "Hook-level approval required",
+            verdict: "require_approval"
+          };
+        }
+
+        return { verdict: "allow" };
+      }
+    });
+    const downstream = createServer((request, response) => {
+      request.resume();
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ ok: true }));
+    });
+
+    await new Promise<void>(resolve => {
+      downstream.listen(0, "127.0.0.1", () => resolve());
+    });
+
+    const address = downstream.address();
+
+    if (!address || typeof address === "string") {
+      throw new Error("Expected downstream server address");
+    }
+
+    const downstreamUrl = `http://127.0.0.1:${address.port}/echo`;
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_hook_approval_already_granted",
+      apiUrl: openBoxServer.url,
+      validate: false
+    });
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+    const spanProcessor = new OpenBoxSpanProcessor();
+    const controller = setupOpenBoxOpenTelemetry({
+      captureHttpBodies: true,
+      governanceClient: client,
+      instrumentDatabases: false,
+      instrumentFileIo: false,
+      spanProcessor
+    });
+    const tracer = trace.getTracer("openbox-test");
+    const rootSpan = tracer.startSpan("activity.createSandbox", {
+      attributes: {
+        "openbox.activity_id": "act-approved-123",
+        "openbox.run_id": "run-approved-123",
+        "openbox.workflow_id": "wf-approved-123"
+      }
+    });
+
+    spanProcessor.registerTrace(
+      rootSpan.spanContext().traceId,
+      "wf-approved-123",
+      "act-approved-123",
+      "run-approved-123"
+    );
+    markActivityApproved("run-approved-123", "act-approved-123");
+
+    await expect(
+      runWithOpenBoxExecutionContext(
+        {
+          activityId: "act-approved-123",
+          activityType: "createSandbox",
+          attempt: 1,
+          runId: "run-approved-123",
+          source: "tool",
+          taskQueue: "mastra",
+          workflowId: "wf-approved-123",
+          workflowType: "coding-agent"
+        },
+        async () => {
+          return context.with(trace.setSpan(context.active(), rootSpan), async () => {
+            const response = await fetch(downstreamUrl, {
+              body: JSON.stringify({
+                action: "create-sandbox"
+              }),
+              headers: {
+                "content-type": "application/json"
+              },
+              method: "POST"
+            });
+
+            await response.text();
+          });
+        }
+      )
+    ).resolves.toBeUndefined();
+
+    clearActivityApproval("run-approved-123", "act-approved-123");
     rootSpan.end();
     await controller.shutdown();
     await openBoxServer.close();

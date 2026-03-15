@@ -131,6 +131,7 @@ export class OpenBoxClient {
           }),
           headers: {
             Authorization: `Bearer ${this.apiKey}`,
+            "Content-Type": "application/json",
             "User-Agent": USER_AGENT
           },
           method: "POST",
@@ -139,8 +140,10 @@ export class OpenBoxClient {
       );
 
       if (response.status !== 200) {
+        const body = await response.text().catch(() => "");
         if (this.#debugEnabled) {
           console.error("[openbox-sdk] approval.response", {
+            reason: body,
             status: response.status
           });
         }

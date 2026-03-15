@@ -235,6 +235,69 @@ describe("wrapTool", () => {
     });
   });
 
+  it("requests approval only once when both activity start and completion require approval", async () => {
+    let approvalCalls = 0;
+
+    const server = await startOpenBoxServer({
+      approval() {
+        approvalCalls += 1;
+        return { action: "allow" };
+      },
+      evaluate(body) {
+        if (
+          body.event_type === "ActivityStarted" ||
+          body.event_type === "ActivityCompleted"
+        ) {
+          return {
+            reason: "Needs approval",
+            verdict: "require_approval"
+          };
+        }
+
+        return { verdict: "allow" };
+      }
+    });
+
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_contract",
+      apiUrl: server.url,
+      validate: false
+    });
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+
+    const tool = createTool({
+      description: "Create sandbox metadata",
+      id: "create-sandbox-metadata",
+      inputSchema: z.object({
+        name: z.string()
+      }),
+      outputSchema: z.object({
+        ok: z.boolean()
+      }),
+      async execute() {
+        return { ok: true };
+      }
+    });
+
+    const wrapped = wrapTool(tool, {
+      client,
+      config,
+      spanProcessor: new OpenBoxSpanProcessor()
+    });
+
+    const result = await wrapped.execute?.({ name: "demo" }, {});
+
+    await server.close();
+
+    expect(result).toEqual({ ok: true });
+    expect(approvalCalls).toBe(1);
+  });
+
   it("fails closed when guardrails validation rejects tool input", async () => {
     const server = await startOpenBoxServer({
       evaluate(body) {

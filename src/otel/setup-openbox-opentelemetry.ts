@@ -9,6 +9,7 @@ import type {
 import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
 
 import type { OpenBoxApiErrorPolicy, OpenBoxClient } from "../client/index.js";
+import { isActivityApproved } from "../governance/approval-registry.js";
 import { getOpenBoxExecutionContext } from "../governance/context.js";
 import { OpenBoxSpanProcessor } from "../span/index.js";
 import {
@@ -1242,6 +1243,12 @@ async function evaluateHookGovernance(
     throw new GovernanceHaltError(`Governance blocked: ${priorAbortReason}`);
   }
 
+  // If the parent activity is already approved, do not create additional
+  // hook-level governance approval requests for the same activity.
+  if (isActivityApproved(activityContext.runId, activityContext.activityId)) {
+    return;
+  }
+
   hookGovernance.spanProcessor.markGoverned(
     input.activeSpan.spanContext().spanId
   );
@@ -1289,6 +1296,24 @@ async function evaluateHookGovernance(
 
   if (activityContext.activityInput !== undefined) {
     payload.activity_input = activityContext.activityInput;
+  }
+
+  if (activityContext.activityType === "agentLlmCompletion") {
+    const derivedActivityPayload = deriveAgentHookActivityPayload(
+      input.hookTrigger,
+      input.stage
+    );
+
+    if (
+      payload.activity_input === undefined &&
+      derivedActivityPayload.activityInput !== undefined
+    ) {
+      payload.activity_input = derivedActivityPayload.activityInput;
+    }
+
+    if (derivedActivityPayload.activityOutput !== undefined) {
+      payload.activity_output = derivedActivityPayload.activityOutput;
+    }
   }
 
   let verdict;
@@ -1391,22 +1416,514 @@ function parseHookBodyRecords(body: string | undefined): Array<Record<string, un
     return [];
   }
 
+  const serializedRecords = new Set<string>();
   const records: Array<Record<string, unknown>> = [];
+  const pushRecord = (record: Record<string, unknown> | undefined) => {
+    if (!record) {
+      return;
+    }
+
+    const serialized = JSON.stringify(record);
+
+    if (serializedRecords.has(serialized)) {
+      return;
+    }
+
+    serializedRecords.add(serialized);
+    records.push(record);
+  };
   const direct = parseJsonRecord(body);
 
-  if (direct) {
-    records.push(direct);
-  }
+  pushRecord(direct);
 
   for (const eventBody of parseSseDataBodies(body)) {
-    const parsed = parseJsonRecord(eventBody);
+    pushRecord(parseJsonRecord(eventBody));
+  }
 
-    if (parsed) {
-      records.push(parsed);
-    }
+  for (const eventBody of parseInlineSseDataBodies(body)) {
+    pushRecord(parseJsonRecord(eventBody));
   }
 
   return records;
+}
+
+function deriveAgentHookActivityPayload(
+  hookTrigger: Record<string, unknown>,
+  stage: "completed" | "started"
+): {
+  activityInput?: unknown;
+  activityOutput?: unknown;
+} {
+  const hookType = toStringValue(hookTrigger.type);
+
+  if (hookType === "http_request") {
+    const requestRecords = parseHookBodyRecords(
+      toStringValue(hookTrigger.request_body)
+    );
+    const responseRecords = parseHookBodyRecords(
+      toStringValue(hookTrigger.response_body)
+    );
+    const activityInput = normalizeActivityInputList(
+      compactHookPayloadValue(
+        deriveAgentRequestSummaryFromRecords(requestRecords) ??
+          parseHookPayloadBodyValue(hookTrigger.request_body)
+      )
+    );
+    const activityOutput =
+      stage === "completed"
+        ? compactHookPayloadValue(
+            deriveAgentResponseSummaryFromRecords(responseRecords) ??
+              parseHookPayloadBodyValue(hookTrigger.response_body)
+          )
+        : undefined;
+
+    return {
+      ...(activityInput !== undefined ? { activityInput } : {}),
+      ...(activityOutput !== undefined ? { activityOutput } : {})
+    };
+  }
+
+  if (hookType === "function_call") {
+    const activityInput = normalizeActivityInputList(
+      compactHookPayloadValue(sanitizeForGovernancePayload(hookTrigger.args))
+    );
+    const activityOutput =
+      stage === "completed"
+        ? compactHookPayloadValue(
+            sanitizeForGovernancePayload(hookTrigger.result)
+          )
+        : undefined;
+
+    return {
+      ...(activityInput !== undefined ? { activityInput } : {}),
+      ...(activityOutput !== undefined ? { activityOutput } : {})
+    };
+  }
+
+  return {};
+}
+
+function parseHookPayloadBodyValue(body: unknown): unknown | undefined {
+  if (body === undefined || body === null) {
+    return undefined;
+  }
+
+  if (typeof body !== "string") {
+    return sanitizeForGovernancePayload(body);
+  }
+
+  const trimmed = body.trim();
+
+  if (trimmed.length === 0) {
+    return undefined;
+  }
+
+  try {
+    return sanitizeForGovernancePayload(JSON.parse(trimmed));
+  } catch {
+    return trimmed;
+  }
+}
+
+function compactHookPayloadValue(
+  value: unknown,
+  maxBytes = 16_384
+): unknown | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed.length > 8_000
+      ? `${trimmed.slice(0, 7_984)}...[truncated]`
+      : trimmed;
+  }
+
+  const serialized = JSON.stringify(value);
+  const sizeBytes = Buffer.byteLength(serialized, "utf8");
+
+  if (sizeBytes <= maxBytes) {
+    return value;
+  }
+
+  return {
+    preview: `${serialized.slice(0, 3_984)}...[truncated]`,
+    truncated: true
+  };
+}
+
+function normalizeActivityInputList(value: unknown): unknown[] | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+
+  if (Array.isArray(value)) {
+    return value;
+  }
+
+  return [value];
+}
+
+function parseInlineSseDataBodies(body: string): string[] {
+  const payloads: string[] = [];
+  let searchIndex = 0;
+
+  while (searchIndex < body.length) {
+    const dataIndex = body.indexOf("data:", searchIndex);
+
+    if (dataIndex < 0) {
+      break;
+    }
+
+    const jsonStart = body.indexOf("{", dataIndex + 5);
+
+    if (jsonStart < 0) {
+      searchIndex = dataIndex + 5;
+      continue;
+    }
+
+    const jsonEnd = findJsonObjectEnd(body, jsonStart);
+
+    if (jsonEnd < 0) {
+      searchIndex = dataIndex + 5;
+      continue;
+    }
+
+    payloads.push(body.slice(jsonStart, jsonEnd + 1));
+    searchIndex = jsonEnd + 1;
+  }
+
+  return payloads;
+}
+
+function findJsonObjectEnd(source: string, startIndex: number): number {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = startIndex; index < source.length; index += 1) {
+    const char = source[index];
+
+    if (!char) {
+      continue;
+    }
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+
+    if (char === "\"") {
+      inString = !inString;
+      continue;
+    }
+
+    if (inString) {
+      continue;
+    }
+
+    if (char === "{") {
+      depth += 1;
+      continue;
+    }
+
+    if (char === "}") {
+      depth -= 1;
+
+      if (depth === 0) {
+        return index;
+      }
+    }
+  }
+
+  return -1;
+}
+
+function deriveAgentRequestSummaryFromRecords(
+  records: Array<Record<string, unknown>>
+): Record<string, unknown> | undefined {
+  const modelId = extractModelFromRecords(records);
+  const telemetryModelId = modelId ? toTelemetryModelId(modelId) : undefined;
+  const prompt = extractLatestUserPromptFromRecords(records);
+  const toolCount = extractToolCountFromRecords(records);
+  const summary: Record<string, unknown> = {
+    ...(telemetryModelId ? { model: telemetryModelId } : {}),
+    ...(modelId && modelId !== telemetryModelId ? { model_id: modelId } : {}),
+    ...(prompt ? { prompt } : {}),
+    ...(typeof toolCount === "number" ? { tools_count: toolCount } : {})
+  };
+
+  return Object.keys(summary).length > 0 ? summary : undefined;
+}
+
+function deriveAgentResponseSummaryFromRecords(
+  records: Array<Record<string, unknown>>
+): Record<string, unknown> | undefined {
+  const modelId = extractModelFromRecords(records);
+  const telemetryModelId = modelId ? toTelemetryModelId(modelId) : undefined;
+  const usage = extractUsageFromRecords(records);
+  const text = extractResponseTextFromRecords(records);
+  const toolNames = extractToolCallNamesFromRecords(records);
+  const summary: Record<string, unknown> = {
+    ...(telemetryModelId ? { model: telemetryModelId } : {}),
+    ...(modelId && modelId !== telemetryModelId ? { model_id: modelId } : {}),
+    ...(text ? { text } : {}),
+    ...(usage
+      ? {
+          usage: {
+            ...(typeof usage.inputTokens === "number"
+              ? { input_tokens: usage.inputTokens }
+              : {}),
+            ...(typeof usage.outputTokens === "number"
+              ? { output_tokens: usage.outputTokens }
+              : {}),
+            ...(typeof usage.totalTokens === "number"
+              ? { total_tokens: usage.totalTokens }
+              : {})
+          }
+        }
+      : {}),
+    ...(toolNames.length > 0
+      ? {
+          tool_calls: toolNames,
+          tool_call_count: toolNames.length
+        }
+      : {})
+  };
+
+  if (summary.usage && Object.keys(summary.usage as Record<string, unknown>).length === 0) {
+    delete summary.usage;
+  }
+
+  return Object.keys(summary).length > 0 ? summary : undefined;
+}
+
+function extractLatestUserPromptFromRecords(
+  records: Array<Record<string, unknown>>
+): string | undefined {
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const record = records[index];
+
+    if (!record) {
+      continue;
+    }
+
+    const prompt = extractLatestUserPromptFromInput(record.input);
+
+    if (prompt) {
+      return truncateText(prompt, 1_000);
+    }
+  }
+
+  return undefined;
+}
+
+function extractLatestUserPromptFromInput(value: unknown): string | undefined {
+  const inputs = Array.isArray(value) ? value : value !== undefined ? [value] : [];
+
+  for (let index = inputs.length - 1; index >= 0; index -= 1) {
+    const entry = inputs[index];
+
+    if (typeof entry === "string") {
+      const trimmed = entry.trim();
+
+      if (trimmed.length > 0) {
+        return trimmed;
+      }
+
+      continue;
+    }
+
+    if (!entry || typeof entry !== "object") {
+      continue;
+    }
+
+    const record = entry as Record<string, unknown>;
+    const role = toStringValue(record.role)?.toLowerCase();
+
+    if (role && role !== "user") {
+      continue;
+    }
+
+    const text =
+      extractTextFromStructuredValue(record.content) ??
+      extractTextFromStructuredValue(record.input_text) ??
+      extractTextFromStructuredValue(record.text);
+
+    if (text) {
+      return text;
+    }
+  }
+
+  return undefined;
+}
+
+function extractTextFromStructuredValue(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  }
+
+  if (Array.isArray(value)) {
+    const parts = value
+      .map(item => extractTextFromStructuredValue(item))
+      .filter((item): item is string => Boolean(item && item.trim().length > 0));
+
+    if (parts.length === 0) {
+      return undefined;
+    }
+
+    const combined = parts.join("\n").trim();
+    return combined.length > 0 ? combined : undefined;
+  }
+
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+
+  const record = value as Record<string, unknown>;
+  const type = toStringValue(record.type)?.toLowerCase();
+  const text =
+    extractTextFromStructuredValue(record.text) ??
+    extractTextFromStructuredValue(record.input_text) ??
+    extractTextFromStructuredValue(record.output_text) ??
+    extractTextFromStructuredValue(record.content);
+
+  if (!text) {
+    return undefined;
+  }
+
+  if (!type || type.includes("text") || type === "message") {
+    return text;
+  }
+
+  return text;
+}
+
+function extractToolCountFromRecords(
+  records: Array<Record<string, unknown>>
+): number | undefined {
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const tools = records[index]?.tools;
+
+    if (Array.isArray(tools)) {
+      return tools.length;
+    }
+  }
+
+  return undefined;
+}
+
+function extractResponseTextFromRecords(
+  records: Array<Record<string, unknown>>
+): string | undefined {
+  let deltaText = "";
+  let doneText: string | undefined;
+  let completedText: string | undefined;
+
+  for (const record of records) {
+    const type = toStringValue(record.type);
+
+    if (type === "response.output_text.delta") {
+      const delta = toStringValue(record.delta);
+
+      if (delta) {
+        deltaText += delta;
+      }
+
+      continue;
+    }
+
+    if (type === "response.output_text.done") {
+      const done = toStringValue(record.text);
+
+      if (done) {
+        doneText = done;
+      }
+
+      continue;
+    }
+
+    if (type === "response.completed") {
+      const response =
+        record.response && typeof record.response === "object"
+          ? (record.response as Record<string, unknown>)
+          : undefined;
+      const responseText =
+        extractTextFromStructuredValue(response?.output_text) ??
+        extractTextFromStructuredValue(response?.output) ??
+        extractTextFromStructuredValue(response?.text);
+
+      if (responseText) {
+        completedText = responseText;
+      }
+    }
+  }
+
+  const resolved = completedText ?? doneText ?? (deltaText.trim().length > 0 ? deltaText : undefined);
+
+  return resolved ? truncateText(resolved, 2_000) : undefined;
+}
+
+function extractToolCallNamesFromRecords(
+  records: Array<Record<string, unknown>>
+): string[] {
+  const names = new Set<string>();
+
+  for (const record of records) {
+    const type = toStringValue(record.type);
+
+    if (type === "response.output_item.added") {
+      const item =
+        record.item && typeof record.item === "object"
+          ? (record.item as Record<string, unknown>)
+          : undefined;
+      const itemType = toStringValue(item?.type);
+      const itemName = toStringValue(item?.name);
+
+      if (itemType === "function_call" && itemName) {
+        names.add(itemName);
+      }
+    }
+
+    if (type === "response.completed") {
+      const response =
+        record.response && typeof record.response === "object"
+          ? (record.response as Record<string, unknown>)
+          : undefined;
+      const output = Array.isArray(response?.output) ? response.output : [];
+
+      for (const outputItem of output) {
+        if (!outputItem || typeof outputItem !== "object") {
+          continue;
+        }
+
+        const outputRecord = outputItem as Record<string, unknown>;
+        const itemType = toStringValue(outputRecord.type);
+        const itemName = toStringValue(outputRecord.name);
+
+        if (itemType === "function_call" && itemName) {
+          names.add(itemName);
+        }
+      }
+    }
+  }
+
+  return [...names].slice(0, 8);
+}
+
+function truncateText(value: string, maxChars: number): string {
+  if (value.length <= maxChars) {
+    return value;
+  }
+
+  return `${value.slice(0, Math.max(0, maxChars - 16))}...[truncated]`;
 }
 
 function normalizeHookBodyForTelemetry(
@@ -1929,7 +2446,7 @@ function resolveActivityContext(
     executionContext.runId
   ) {
     return {
-      activityId: `${executionContext.workflowId}::agent-llm`,
+      activityId: `${executionContext.workflowId}::agent-llm::${executionContext.runId}`,
       activityType: "agentLlmCompletion",
       runId: executionContext.runId,
       taskQueue: executionContext.taskQueue ?? "mastra",
