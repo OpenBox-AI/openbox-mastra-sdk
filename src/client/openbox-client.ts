@@ -260,8 +260,24 @@ export class OpenBoxClient {
     >[0];
 
     if (this.#debugEnabled) {
+      const ageResult =
+        parsed && typeof parsed === "object" && "age_result" in parsed
+          ? (parsed as { age_result?: Record<string, unknown> }).age_result
+          : undefined;
       console.info("[openbox-sdk] evaluate.response", {
         action: parsed.action,
+        age_fallback_used:
+          ageResult && typeof ageResult === "object"
+            ? ageResult.fallback_used
+            : undefined,
+        age_goal_alignment_checked:
+          ageResult && typeof ageResult === "object"
+            ? ageResult.goal_alignment_checked
+            : undefined,
+        age_goal_drifted:
+          ageResult && typeof ageResult === "object"
+            ? ageResult.goal_drifted
+            : undefined,
         event_type: payload.event_type,
         status: response.status,
         verdict: parsed.verdict
@@ -313,6 +329,8 @@ function summarizeEvaluatePayload(
     has_activity_input: payload.activity_input !== undefined,
     has_activity_output: payload.activity_output !== undefined,
     has_error: payload.error !== undefined,
+    has_goal:
+      typeof payload.goal === "string" && payload.goal.trim().length > 0,
     has_signal_args: payload.signal_args !== undefined,
     has_spans: spanSummary.hasSpans,
     has_workflow_input: payload.workflow_input !== undefined,

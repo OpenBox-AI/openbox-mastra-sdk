@@ -140,6 +140,7 @@ describe("setupOpenBoxOpenTelemetry", () => {
         activityId: "act-123",
         activityType: "searchCryptoCoins",
         attempt: 1,
+        goal: "Search crypto prices and summarize findings",
         runId: "run-123",
         source: "tool",
         taskQueue: "mastra",
@@ -203,42 +204,50 @@ describe("setupOpenBoxOpenTelemetry", () => {
       url: downstreamUrl
     });
     expect(started).toMatchObject({
-      activity_id: "act-123::hook:http_request",
       activity_input: [
         {
           keyword: "bitcoin"
+        },
+        {
+          goal: "Search crypto prices and summarize findings"
         }
       ],
       activity_type: "searchCryptoCoins",
+      goal: "Search crypto prices and summarize findings",
       run_id: "run-123",
       workflow_id: "wf-123",
       workflow_type: "crypto-agent"
     });
     expect(completed).toMatchObject({
-      activity_id: "act-123::hook:http_request",
       activity_input: [
         {
           keyword: "bitcoin"
+        },
+        {
+          goal: "Search crypto prices and summarize findings"
         }
       ],
       activity_type: "searchCryptoCoins",
+      goal: "Search crypto prices and summarize findings",
       run_id: "run-123",
       workflow_id: "wf-123",
       workflow_type: "crypto-agent"
     });
+    expect((started as Record<string, unknown>)?.activity_id).toMatch(
+      /^act-123::hook:http_request:[a-z0-9]+$/
+    );
+    expect((completed as Record<string, unknown>)?.activity_id).toEqual(
+      (started as Record<string, unknown>)?.activity_id
+    );
     const startedSpan = (
       started as { spans?: Array<Record<string, unknown>> } | undefined
-    )?.spans?.[0];
-    const completedSpan = (
-      completed as { spans?: Array<Record<string, unknown>> } | undefined
     )?.spans?.[0];
 
     expect(startedSpan).toMatchObject({
       stage: "started"
     });
-    expect(completedSpan).toMatchObject({
-      stage: "completed"
-    });
+    expect((completed as Record<string, unknown>)?.span_count).toBe(0);
+    expect((completed as Record<string, unknown>)?.spans).toBeUndefined();
   });
 
   it("emits hook governance events for agent context without tool activity context", async () => {
@@ -326,6 +335,18 @@ describe("setupOpenBoxOpenTelemetry", () => {
         await context.with(trace.setSpan(context.active(), rootSpan), async () => {
           const response = await fetch(downstreamUrl, {
             body: JSON.stringify({
+              messages: [
+                {
+                  content: [
+                    {
+                      text:
+                        '[{"type":"text","text":"Create a sandbox and write hello world"}]',
+                      type: "text"
+                    }
+                  ],
+                  role: "user"
+                }
+              ],
               model: "gpt-4.1"
             }),
             headers: {
@@ -365,8 +386,6 @@ describe("setupOpenBoxOpenTelemetry", () => {
     );
 
     expect(started).toMatchObject({
-      activity_id:
-        "wf-agent-1::agent-llm::run-agent-1::hook:http_request",
       activity_type: "agentLlmCompletion",
       model: "gpt-4-1",
       model_id: "gpt-4.1",
@@ -377,8 +396,6 @@ describe("setupOpenBoxOpenTelemetry", () => {
       workflow_type: "coding-agent"
     });
     expect(completed).toMatchObject({
-      activity_id:
-        "wf-agent-1::agent-llm::run-agent-1::hook:http_request",
       activity_type: "agentLlmCompletion",
       input_tokens: 42,
       model: "gpt-4-1",
@@ -391,16 +408,24 @@ describe("setupOpenBoxOpenTelemetry", () => {
       workflow_id: "wf-agent-1",
       workflow_type: "coding-agent"
     });
+    expect((started as Record<string, unknown>)?.activity_id).toMatch(
+      /^wf-agent-1::agent-llm::run-agent-1::hook:http_request:[a-z0-9]+$/
+    );
+    expect((completed as Record<string, unknown>)?.activity_id).toEqual(
+      (started as Record<string, unknown>)?.activity_id
+    );
     expect((started as Record<string, unknown>)?.activity_input).toMatchObject([
       {
         model: "gpt-4-1",
-        model_id: "gpt-4.1"
+        model_id: "gpt-4.1",
+        prompt: "Create a sandbox and write hello world"
       }
     ]);
     expect((completed as Record<string, unknown>)?.activity_input).toMatchObject([
       {
         model: "gpt-4-1",
-        model_id: "gpt-4.1"
+        model_id: "gpt-4.1",
+        prompt: "Create a sandbox and write hello world"
       }
     ]);
     expect((completed as Record<string, unknown>)?.activity_output).toMatchObject({
@@ -415,18 +440,17 @@ describe("setupOpenBoxOpenTelemetry", () => {
     const startedSpan = (
       started as { spans?: Array<Record<string, unknown>> } | undefined
     )?.spans?.[0];
-    const completedSpan = (
-      completed as { spans?: Array<Record<string, unknown>> } | undefined
-    )?.spans?.[0];
     const startedRequestBody = (
       startedSpan as { request_body?: unknown } | undefined
     )?.request_body;
     const completedResponseBody = (
-      completedSpan as { response_body?: unknown } | undefined
-    )?.response_body;
+      completed as { hook_trigger?: Record<string, unknown> } | undefined
+    )?.hook_trigger?.response_body;
 
     expect(typeof startedRequestBody).toBe("string");
     expect(typeof completedResponseBody).toBe("string");
+    expect((completed as Record<string, unknown>)?.span_count).toBe(0);
+    expect((completed as Record<string, unknown>)?.spans).toBeUndefined();
 
     const parsedStartedRequest = JSON.parse(startedRequestBody as string) as {
       model?: string;

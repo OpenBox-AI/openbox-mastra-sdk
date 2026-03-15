@@ -176,6 +176,164 @@ describe("wrapAgent", () => {
     });
   });
 
+  it("extracts latest user prompt from JSON-encoded structured content in SignalReceived", async () => {
+    const server = await startOpenBoxServer({
+      evaluate() {
+        return { verdict: "allow" };
+      }
+    });
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_agent_signal_json_prompt",
+      apiUrl: server.url,
+      validate: false
+    });
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+    const agent = wrapAgent(
+      new Agent({
+        id: "assistant-agent-signal-json-prompt",
+        instructions: "Be concise.",
+        model: createMockModel({
+          mockText: "ready",
+          version: "v2"
+        }) as never,
+        name: "Assistant Agent Signal JSON Prompt"
+      }),
+      {
+        client,
+        config,
+        spanProcessor: new OpenBoxSpanProcessor()
+      }
+    );
+
+    await agent.generate(
+      [
+        {
+          content: [
+            {
+              text: '[{"type":"text","text":"Create hello world file"}]',
+              type: "text"
+            }
+          ],
+          role: "user"
+        }
+      ] as never,
+      {
+        runId: "agent-signal-json-prompt-run"
+      }
+    );
+
+    await server.close();
+
+    const signalEvent = server.requests
+      .filter(request => request.pathname === "/api/v1/governance/evaluate")
+      .map(request => request.body)
+      .find(body => body.event_type === "SignalReceived");
+
+    expect(signalEvent).toBeDefined();
+    expect(signalEvent).toMatchObject({
+      event_type: "SignalReceived",
+      run_id: "agent-signal-json-prompt-run",
+      signal_args: ["Create hello world file"],
+      signal_name: "user_input",
+      workflow_id: "agent:assistant-agent-signal-json-prompt",
+      workflow_type: "assistant-agent-signal-json-prompt"
+    });
+  });
+
+  it("derives governance goal from latest user prompt for agent lifecycle events", async () => {
+    const previousGoal = process.env.OPENBOX_AGENT_GOAL;
+    delete process.env.OPENBOX_AGENT_GOAL;
+
+    const server = await startOpenBoxServer({
+      evaluate() {
+        return { verdict: "allow" };
+      }
+    });
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_agent_goal_from_prompt",
+      apiUrl: server.url,
+      validate: false
+    });
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+    const agent = wrapAgent(
+      new Agent({
+        id: "assistant-agent-goal-from-prompt",
+        instructions: "You are a generic assistant.",
+        model: createMockModel({
+          mockText: "done",
+          version: "v2"
+        }) as never,
+        name: "Assistant Agent Goal From Prompt"
+      }),
+      {
+        client,
+        config,
+        spanProcessor: new OpenBoxSpanProcessor()
+      }
+    );
+
+    try {
+      await agent.generate(
+        [
+          { content: "Ignore this previous request", role: "user" },
+          { content: "ack", role: "assistant" },
+          { content: "Build a calculator app", role: "user" }
+        ] as never,
+        {
+          runId: "agent-goal-from-prompt-run"
+        }
+      );
+    } finally {
+      await server.close();
+      if (previousGoal === undefined) {
+        delete process.env.OPENBOX_AGENT_GOAL;
+      } else {
+        process.env.OPENBOX_AGENT_GOAL = previousGoal;
+      }
+    }
+
+    const lifecycleEvents = server.requests
+      .filter(request => request.pathname === "/api/v1/governance/evaluate")
+      .map(request => request.body)
+      .filter(
+        body =>
+          body.event_type === "WorkflowStarted" ||
+          body.event_type === "SignalReceived" ||
+          body.event_type === "WorkflowCompleted"
+      );
+
+    expect(lifecycleEvents).toHaveLength(3);
+    expect(lifecycleEvents[0]).toMatchObject({
+      event_type: "WorkflowStarted",
+      goal: "Build a calculator app",
+      run_id: "agent-goal-from-prompt-run",
+      workflow_id: "agent:assistant-agent-goal-from-prompt",
+      workflow_type: "assistant-agent-goal-from-prompt"
+    });
+    expect(lifecycleEvents[1]).toMatchObject({
+      event_type: "SignalReceived",
+      goal: "Build a calculator app",
+      run_id: "agent-goal-from-prompt-run",
+      signal_args: ["Build a calculator app"],
+      signal_name: "user_input"
+    });
+    expect(lifecycleEvents[2]).toMatchObject({
+      event_type: "WorkflowCompleted",
+      goal: "Build a calculator app",
+      run_id: "agent-goal-from-prompt-run"
+    });
+  });
+
   it("polls OpenBox approval before resuming agent execution", async () => {
     let startedCount = 0;
     const server = await startOpenBoxServer({
@@ -349,6 +507,7 @@ describe("wrapAgent", () => {
       "WorkflowStarted",
       "SignalReceived",
       "ActivityStarted",
+      "ActivityCompleted",
       "SignalReceived",
       "WorkflowCompleted"
     ]);

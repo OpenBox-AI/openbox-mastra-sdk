@@ -5,6 +5,7 @@ export interface OpenBoxExecutionContext {
   activityType?: string | undefined;
   agentId?: string | undefined;
   attempt?: number | undefined;
+  goal?: string | undefined;
   runId?: string | undefined;
   source?: "agent" | "tool" | "workflow" | undefined;
   taskQueue?: string | undefined;

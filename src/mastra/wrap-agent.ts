@@ -28,6 +28,7 @@ import type { WrapToolOptions } from "./wrap-tool.js";
 const OPENBOX_WRAPPED_AGENT = Symbol.for("openbox.mastra.wrapAgent");
 const OPENBOX_AGENT_STREAM_META = Symbol.for("openbox.mastra.wrapAgent.streamMeta");
 const AGENT_INPUT_SIGNAL_NAME = "user_input";
+const OPENBOX_AGENT_RUN_GOALS = new Map<string, string>();
 
 interface AgentStreamMeta {
   startTimeMs: number;
@@ -43,9 +44,98 @@ interface ParsedModelIdentifier {
   provider?: string;
 }
 
+async function resolveAgentGoal(
+  baseAgent: Record<PropertyKey, unknown> & {
+    getInstructions?: (options?: { requestContext?: unknown }) => unknown;
+  },
+  executionOptions: Record<string, unknown> = {},
+  interactionPayload?: unknown
+): Promise<string | undefined> {
+  const configuredGoal = normalizeGoalCandidate(process.env.OPENBOX_AGENT_GOAL);
+
+  if (configuredGoal) {
+    return configuredGoal;
+  }
+
+  const runIdCandidate =
+    executionOptions &&
+    typeof executionOptions === "object" &&
+    "runId" in executionOptions
+      ? (executionOptions as { runId?: unknown }).runId
+      : undefined;
+  const runId =
+    typeof runIdCandidate === "string" && runIdCandidate.trim().length > 0
+      ? runIdCandidate
+      : undefined;
+  const persistedGoal = runId ? OPENBOX_AGENT_RUN_GOALS.get(runId) : undefined;
+
+  if (persistedGoal) {
+    return persistedGoal;
+  }
+
+  const interactionGoal = normalizeGoalCandidate(
+    extractGoalCandidateFromInteraction(interactionPayload)
+  );
+
+  if (interactionGoal) {
+    return interactionGoal;
+  }
+
+  const getInstructions = baseAgent.getInstructions;
+
+  if (typeof getInstructions !== "function") {
+    return undefined;
+  }
+
+  try {
+    const requestContext =
+      executionOptions &&
+      typeof executionOptions === "object" &&
+      "requestContext" in executionOptions
+        ? (executionOptions as { requestContext?: unknown }).requestContext
+        : undefined;
+    const instructions = await Promise.resolve(
+      requestContext !== undefined
+        ? getInstructions.call(baseAgent, { requestContext })
+        : getInstructions.call(baseAgent)
+    );
+
+    return normalizeGoalCandidate(instructions);
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeGoalCandidate(value: unknown): string | undefined {
+  const text = extractTextFromStructuredValue(value);
+
+  if (!text) {
+    return undefined;
+  }
+
+  const normalized = text.trim();
+
+  if (normalized.length === 0) {
+    return undefined;
+  }
+
+  return truncateString(normalized, 1_000);
+}
+
+function extractGoalCandidateFromInteraction(value: unknown): string | undefined {
+  const latestUserPrompt = extractLatestUserPrompt(value);
+
+  if (latestUserPrompt) {
+    return latestUserPrompt;
+  }
+
+  return extractTextFromStructuredValue(value);
+}
+
 export function wrapAgent<TAgent>(agent: TAgent, options: WrapToolOptions): TAgent {
   const baseAgent = agent as Record<PropertyKey, unknown> & {
     generate?: (messages: unknown, options?: Record<string, unknown>) => Promise<any>;
+    getInstructions?: (options?: { requestContext?: unknown }) => unknown;
     id?: string;
     name?: string;
     resumeGenerate?: (
@@ -73,6 +163,11 @@ export function wrapAgent<TAgent>(agent: TAgent, options: WrapToolOptions): TAge
   if (originalGenerate) {
     baseAgent.generate = async (messages, executionOptions = {}) => {
       const runId = String(executionOptions.runId ?? randomUUID());
+      const agentGoal = await resolveAgentGoal(
+        baseAgent,
+        executionOptions,
+        messages
+      );
       const nextOptions = {
         ...executionOptions,
         runId
@@ -91,7 +186,8 @@ export function wrapAgent<TAgent>(agent: TAgent, options: WrapToolOptions): TAge
           runId,
           workflowId,
           workflowType,
-          defaultModelInfo: invocationModelInfo
+          defaultModelInfo: invocationModelInfo,
+          ...(agentGoal ? { agentGoal } : {})
         }
       );
     };
@@ -100,6 +196,11 @@ export function wrapAgent<TAgent>(agent: TAgent, options: WrapToolOptions): TAge
   if (originalStream) {
     baseAgent.stream = async (messages, executionOptions = {}) => {
       const runId = String(executionOptions.runId ?? randomUUID());
+      const agentGoal = await resolveAgentGoal(
+        baseAgent,
+        executionOptions,
+        messages
+      );
       const nextOptions = {
         ...executionOptions,
         runId
@@ -117,7 +218,8 @@ export function wrapAgent<TAgent>(agent: TAgent, options: WrapToolOptions): TAge
           runId,
           workflowId,
           workflowType,
-          defaultModelInfo: invocationModelInfo
+          defaultModelInfo: invocationModelInfo,
+          ...(agentGoal ? { agentGoal } : {})
         }
       );
 
@@ -131,7 +233,8 @@ export function wrapAgent<TAgent>(agent: TAgent, options: WrapToolOptions): TAge
               workflowId,
               workflowType,
               error,
-              streamMeta
+              streamMeta,
+              agentGoal
             );
           },
           onSuccess: async fullOutput => {
@@ -142,7 +245,8 @@ export function wrapAgent<TAgent>(agent: TAgent, options: WrapToolOptions): TAge
               workflowType,
               fullOutput,
               streamMeta,
-              invocationModelInfo
+              invocationModelInfo,
+              agentGoal
             );
           }
         });
@@ -155,13 +259,15 @@ export function wrapAgent<TAgent>(agent: TAgent, options: WrapToolOptions): TAge
   if (originalResumeGenerate) {
     baseAgent.resumeGenerate = async (resumeData, executionOptions = {}) => {
       const runId = executionOptions.runId ? String(executionOptions.runId) : undefined;
+      const agentGoal = await resolveAgentGoal(baseAgent, executionOptions);
 
       await handleAgentResume(
         options,
         runId,
         workflowId,
         workflowType,
-        resumeData
+        resumeData,
+        agentGoal
       );
       const invocationModelInfo = resolveInvocationModelInfo(
         baseAgent,
@@ -175,7 +281,8 @@ export function wrapAgent<TAgent>(agent: TAgent, options: WrapToolOptions): TAge
         runId: runId ?? randomUUID(),
         workflowId,
         workflowType,
-        defaultModelInfo: invocationModelInfo
+        defaultModelInfo: invocationModelInfo,
+        ...(agentGoal ? { agentGoal } : {})
       });
     };
   }
@@ -184,13 +291,15 @@ export function wrapAgent<TAgent>(agent: TAgent, options: WrapToolOptions): TAge
     baseAgent.resumeStream = async (resumeData, executionOptions = {}) => {
       const runId = executionOptions.runId ? String(executionOptions.runId) : undefined;
       const resolvedRunId = runId ?? randomUUID();
+      const agentGoal = await resolveAgentGoal(baseAgent, executionOptions);
 
       await handleAgentResume(
         options,
         runId,
         workflowId,
         workflowType,
-        resumeData
+        resumeData,
+        agentGoal
       );
       const invocationModelInfo = resolveInvocationModelInfo(
         baseAgent,
@@ -204,7 +313,8 @@ export function wrapAgent<TAgent>(agent: TAgent, options: WrapToolOptions): TAge
         runId: resolvedRunId,
         workflowId,
         workflowType,
-        defaultModelInfo: invocationModelInfo
+        defaultModelInfo: invocationModelInfo,
+        ...(agentGoal ? { agentGoal } : {})
       });
 
       if (output && typeof output === "object") {
@@ -217,7 +327,8 @@ export function wrapAgent<TAgent>(agent: TAgent, options: WrapToolOptions): TAge
               workflowId,
               workflowType,
               error,
-              streamMeta
+              streamMeta,
+              agentGoal
             );
           },
           onSuccess: async fullOutput => {
@@ -228,7 +339,8 @@ export function wrapAgent<TAgent>(agent: TAgent, options: WrapToolOptions): TAge
               workflowType,
               fullOutput,
               streamMeta,
-              invocationModelInfo
+              invocationModelInfo,
+              agentGoal
             );
           }
         });
@@ -254,7 +366,8 @@ async function executeAgentLifecycle<T>({
   runId,
   workflowId,
   workflowType,
-  defaultModelInfo
+  defaultModelInfo,
+  agentGoal
 }: {
   messages?: unknown;
   operation: () => Promise<T>;
@@ -264,7 +377,15 @@ async function executeAgentLifecycle<T>({
   workflowId: string;
   workflowType: string;
   defaultModelInfo: AgentModelInfo;
+  agentGoal?: string;
 }): Promise<T> {
+  const effectiveGoal =
+    agentGoal ?? normalizeGoalCandidate(extractGoalCandidateFromInteraction(messages));
+
+  if (effectiveGoal) {
+    OPENBOX_AGENT_RUN_GOALS.set(runId, effectiveGoal);
+  }
+
   if (
     phase === "start" &&
     !options.config.skipWorkflowTypes.has(workflowType) &&
@@ -272,10 +393,14 @@ async function executeAgentLifecycle<T>({
   ) {
     const verdict = await evaluateAgentEvent(options, {
       event_type: WorkflowEventType.WORKFLOW_STARTED,
+      ...(effectiveGoal ? { goal: effectiveGoal } : {}),
       run_id: runId,
       task_queue: "mastra",
       workflow_id: workflowId,
-      workflow_input: serializeValue(messages),
+      workflow_input: serializeWorkflowInputForGovernance(
+        messages,
+        effectiveGoal
+      ),
       workflow_type: workflowType
     });
 
@@ -294,6 +419,7 @@ async function executeAgentLifecycle<T>({
   ) {
     const verdict = await evaluateAgentEvent(options, {
       event_type: WorkflowEventType.SIGNAL_RECEIVED,
+      ...(effectiveGoal ? { goal: effectiveGoal } : {}),
       run_id: runId,
       signal_args: serializeAgentSignalArgs(messages),
       signal_name: AGENT_INPUT_SIGNAL_NAME,
@@ -315,6 +441,7 @@ async function executeAgentLifecycle<T>({
   return runWithOpenBoxExecutionContext(
     {
       agentId: workflowType,
+      ...(effectiveGoal ? { goal: effectiveGoal } : {}),
       runId,
       source: "agent",
       taskQueue: "mastra",
@@ -369,7 +496,8 @@ async function executeAgentLifecycle<T>({
             {
               startTimeMs
             },
-            defaultModelInfo
+            defaultModelInfo,
+            effectiveGoal
           );
         }
 
@@ -381,9 +509,17 @@ async function executeAgentLifecycle<T>({
 
         return result;
       } catch (error) {
-        await sendAgentFailure(options, runId, workflowId, workflowType, error, {
-          startTimeMs
-        });
+        await sendAgentFailure(
+          options,
+          runId,
+          workflowId,
+          workflowType,
+          error,
+          {
+            startTimeMs
+          },
+          effectiveGoal
+        );
         throw error;
       }
     }
@@ -395,10 +531,17 @@ async function handleAgentResume(
   runId: string | undefined,
   workflowId: string,
   workflowType: string,
-  resumeData: unknown
+  resumeData: unknown,
+  agentGoal?: string
 ): Promise<void> {
   if (!runId) {
     return;
+  }
+
+  const effectiveGoal = agentGoal ?? OPENBOX_AGENT_RUN_GOALS.get(runId);
+
+  if (effectiveGoal) {
+    OPENBOX_AGENT_RUN_GOALS.set(runId, effectiveGoal);
   }
 
   if (
@@ -407,6 +550,7 @@ async function handleAgentResume(
   ) {
     const verdict = await evaluateAgentEvent(options, {
       event_type: WorkflowEventType.SIGNAL_RECEIVED,
+      ...(effectiveGoal ? { goal: effectiveGoal } : {}),
       run_id: runId,
       signal_args: serializeValue(resumeData),
       signal_name: "resume",
@@ -475,62 +619,69 @@ async function finalizeAgentSuccess(
   workflowType: string,
   output: unknown,
   streamMeta?: AgentStreamMeta,
-  defaultModelInfo: AgentModelInfo = {}
+  defaultModelInfo: AgentModelInfo = {},
+  agentGoal?: string
 ): Promise<void> {
   if (options.config.skipWorkflowTypes.has(workflowType)) {
+    OPENBOX_AGENT_RUN_GOALS.delete(runId);
     return;
   }
-  const workflowSpans = normalizeSpansForGovernance(
-    options.spanProcessor.getBuffer(workflowId, runId)?.spans ?? []
-  );
-  const modelInfo = resolveWorkflowModelInfo(
-    output,
-    defaultModelInfo,
-    workflowSpans
-  );
-  const resolvedOutput = applyDefaultModelInfo(output, modelInfo);
-  const basePayload = {
-    event_type: WorkflowEventType.WORKFLOW_COMPLETED,
-    run_id: runId,
-    workflow_id: workflowId,
-    workflow_type: workflowType
-  } as const;
-  const workflowOutput = serializeWorkflowOutputForGovernance(resolvedOutput);
-  const telemetryPayload = buildWorkflowCompletedTelemetryPayload(
-    {
-      ...basePayload,
-      workflow_output: workflowOutput
-    },
-    resolvedOutput,
-    workflowSpans,
-    modelInfo,
-    streamMeta,
-  );
-  const compactPayload = buildWorkflowCompletedCompactPayload(
-    basePayload,
-    workflowOutput,
-    resolvedOutput,
-    modelInfo,
-    streamMeta,
-  );
-  const ultraMinimalPayload = buildWorkflowCompletedUltraMinimalPayload(
-    basePayload,
-    resolvedOutput,
-    modelInfo,
-    streamMeta,
-  );
-
-  const verdict = await evaluateAgentEvent(
-    options,
-    telemetryPayload,
-    compactPayload,
-    ultraMinimalPayload
-  );
-
-  if (verdict && Verdict.shouldStop(verdict.verdict)) {
-    throw new GovernanceHaltError(
-      verdict.reason ?? "Agent blocked by governance"
+  try {
+    const workflowSpans = normalizeSpansForGovernance(
+      options.spanProcessor.getBuffer(workflowId, runId)?.spans ?? []
     );
+    const modelInfo = resolveWorkflowModelInfo(
+      output,
+      defaultModelInfo,
+      workflowSpans
+    );
+    const resolvedOutput = applyDefaultModelInfo(output, modelInfo);
+    const basePayload = {
+      event_type: WorkflowEventType.WORKFLOW_COMPLETED,
+      ...(agentGoal ? { goal: agentGoal } : {}),
+      run_id: runId,
+      workflow_id: workflowId,
+      workflow_type: workflowType
+    } as const;
+    const workflowOutput = serializeWorkflowOutputForGovernance(resolvedOutput);
+    const telemetryPayload = buildWorkflowCompletedTelemetryPayload(
+      {
+        ...basePayload,
+        workflow_output: workflowOutput
+      },
+      resolvedOutput,
+      workflowSpans,
+      modelInfo,
+      streamMeta,
+    );
+    const compactPayload = buildWorkflowCompletedCompactPayload(
+      basePayload,
+      workflowOutput,
+      resolvedOutput,
+      modelInfo,
+      streamMeta,
+    );
+    const ultraMinimalPayload = buildWorkflowCompletedUltraMinimalPayload(
+      basePayload,
+      resolvedOutput,
+      modelInfo,
+      streamMeta,
+    );
+
+    const verdict = await evaluateAgentEvent(
+      options,
+      telemetryPayload,
+      compactPayload,
+      ultraMinimalPayload
+    );
+
+    if (verdict && Verdict.shouldStop(verdict.verdict)) {
+      throw new GovernanceHaltError(
+        verdict.reason ?? "Agent blocked by governance"
+      );
+    }
+  } finally {
+    OPENBOX_AGENT_RUN_GOALS.delete(runId);
   }
 }
 
@@ -758,6 +909,24 @@ function serializeWorkflowOutputForGovernance(output: unknown): unknown {
   };
 }
 
+function serializeWorkflowInputForGovernance(
+  input: unknown,
+  goal: string | undefined
+): unknown {
+  const serializedInput = serializeValue(input);
+  const prompt = extractLatestUserPrompt(input);
+
+  if (!goal && prompt === undefined) {
+    return serializedInput;
+  }
+
+  return {
+    ...(goal ? { goal } : {}),
+    ...(prompt ? { prompt } : {}),
+    input: serializedInput
+  };
+}
+
 function compactWorkflowOutput(output: unknown): unknown {
   if (output == null) {
     return output;
@@ -885,7 +1054,25 @@ function normalizeMessageCandidates(messages: unknown): unknown[] {
 function extractTextFromStructuredValue(value: unknown): string | undefined {
   if (typeof value === "string") {
     const trimmed = value.trim();
-    return trimmed.length > 0 ? trimmed : undefined;
+
+    if (trimmed.length === 0) {
+      return undefined;
+    }
+
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+      try {
+        const parsed = JSON.parse(trimmed) as unknown;
+        const extracted = extractTextFromStructuredValue(parsed);
+
+        if (extracted && extracted.trim().length > 0) {
+          return extracted.trim();
+        }
+      } catch {
+        // Preserve original string when JSON parsing fails.
+      }
+    }
+
+    return trimmed;
   }
 
   if (Array.isArray(value)) {
@@ -910,7 +1097,9 @@ function extractTextFromStructuredValue(value: unknown): string | undefined {
     extractTextFromStructuredValue(record.text) ??
     extractTextFromStructuredValue(record.content) ??
     extractTextFromStructuredValue(record.parts) ??
-    extractTextFromStructuredValue(record.prompt);
+    extractTextFromStructuredValue(record.prompt) ??
+    extractTextFromStructuredValue(record.input) ??
+    extractTextFromStructuredValue(record.messages);
 
   if (!text) {
     return undefined;
@@ -1717,20 +1906,27 @@ async function sendAgentFailure(
   workflowId: string,
   workflowType: string,
   error: unknown,
-  streamMeta?: AgentStreamMeta
+  streamMeta?: AgentStreamMeta,
+  agentGoal?: string
 ): Promise<void> {
   if (options.config.skipWorkflowTypes.has(workflowType)) {
+    OPENBOX_AGENT_RUN_GOALS.delete(runId);
     return;
   }
   void streamMeta;
 
-  await evaluateAgentEvent(options, {
-    error: serializeError(error),
-    event_type: WorkflowEventType.WORKFLOW_FAILED,
-    run_id: runId,
-    workflow_id: workflowId,
-    workflow_type: workflowType
-  });
+  try {
+    await evaluateAgentEvent(options, {
+      error: serializeError(error),
+      event_type: WorkflowEventType.WORKFLOW_FAILED,
+      ...(agentGoal ? { goal: agentGoal } : {}),
+      run_id: runId,
+      workflow_id: workflowId,
+      workflow_type: workflowType
+    });
+  } finally {
+    OPENBOX_AGENT_RUN_GOALS.delete(runId);
+  }
 }
 
 async function evaluateAgentEvent(

@@ -68,7 +68,10 @@ export async function executeGovernedActivity<TInput, TOutput>({
   type
 }: GovernedActivityOptions<TInput, TOutput>): Promise<TOutput | undefined> {
   const descriptor = resolveActivityDescriptor(type, runtimeContext);
-  const inputForEvent = serializeActivityInputForEvent(input);
+  const inputForEvent = appendGoalToActivityInput(
+    serializeActivityInputForEvent(input),
+    descriptor.goal
+  );
   let inputForExecution = cloneValue(input);
 
   ensureSpanBuffer(descriptor, dependencies.spanProcessor);
@@ -88,6 +91,7 @@ export async function executeGovernedActivity<TInput, TOutput>({
       activity_input: inputForEvent,
       activity_type: descriptor.activityType,
       attempt: descriptor.attempt,
+      ...(descriptor.goal ? { goal: descriptor.goal } : {}),
       run_id: descriptor.runId,
       task_queue: descriptor.taskQueue,
       workflow_id: descriptor.workflowId,
@@ -102,6 +106,7 @@ export async function executeGovernedActivity<TInput, TOutput>({
         activity_type: descriptor.activityType,
         attempt: descriptor.attempt,
         event_type: WorkflowEventType.ACTIVITY_STARTED,
+        ...(descriptor.goal ? { goal: descriptor.goal } : {}),
         run_id: descriptor.runId,
         task_queue: descriptor.taskQueue,
         workflow_id: descriptor.workflowId,
@@ -167,6 +172,7 @@ export async function executeGovernedActivity<TInput, TOutput>({
       activityId: descriptor.activityId,
       activityType: descriptor.activityType,
       attempt: descriptor.attempt,
+      goal: descriptor.goal,
       runId: descriptor.runId,
       source: "tool",
       taskQueue: descriptor.taskQueue,
@@ -250,12 +256,6 @@ export async function executeGovernedActivity<TInput, TOutput>({
           );
           const activityEndMs = Date.now();
           const durationMs = Math.max(0, activityEndMs - activityStartMs);
-          const timingSpan = createSyntheticActivityTimingSpan(
-            descriptor,
-            activityStartMs,
-            activityEndMs,
-            error
-          );
 
           const alreadyApproved = isActivityApproved(
             descriptor.runId,
@@ -263,9 +263,13 @@ export async function executeGovernedActivity<TInput, TOutput>({
           );
 
           if (!wasAborted) {
+            const completedInputForEvent = appendGoalToActivityInput(
+              serializeActivityInputForEvent(inputForExecution),
+              descriptor.goal
+            );
             const completedVerdict = await evaluateActivityEvent(dependencies, {
               activity_id: descriptor.activityId,
-              activity_input: serializeActivityInputForEvent(inputForExecution),
+              activity_input: completedInputForEvent,
               activity_output: serializeValue(output),
               activity_type: descriptor.activityType,
               attempt: descriptor.attempt,
@@ -273,9 +277,9 @@ export async function executeGovernedActivity<TInput, TOutput>({
               end_time: activityEndMs,
               error,
               event_type: WorkflowEventType.ACTIVITY_COMPLETED,
+              ...(descriptor.goal ? { goal: descriptor.goal } : {}),
               run_id: descriptor.runId,
-              span_count: 1,
-              spans: [timingSpan],
+              span_count: 0,
               start_time: activityStartMs,
               status: error ? "failed" : "completed",
               task_queue: descriptor.taskQueue,
@@ -493,6 +497,17 @@ function serializeActivityInputForEvent(value: unknown): unknown[] {
   return Array.isArray(serialized) ? serialized : [serialized];
 }
 
+export function appendGoalToActivityInput(
+  activityInput: unknown[],
+  goal: string | undefined
+): unknown[] {
+  if (!goal || goal.trim().length === 0) {
+    return activityInput;
+  }
+
+  return [...activityInput, { goal: goal.trim() }];
+}
+
 function normalizeRedactedActivityInput(
   originalInput: unknown,
   redactedInput: unknown
@@ -563,6 +578,7 @@ function resolveActivityDescriptor(
   activityId: string;
   activityType: string;
   attempt: number;
+  goal?: string;
   runId: string;
   taskQueue: string;
   workflowId: string;
@@ -589,6 +605,7 @@ function resolveActivityDescriptor(
     activityId,
     activityType: normalizedType,
     attempt: activeContext?.attempt ?? 1,
+    ...(activeContext?.goal ? { goal: activeContext.goal } : {}),
     runId,
     taskQueue: activeContext?.taskQueue ?? "mastra",
     workflowId,
@@ -620,58 +637,6 @@ function normalizeActivityType(value: string): string {
   return `${first}${rest
     .map(token => token.charAt(0).toUpperCase() + token.slice(1))
     .join("")}`;
-}
-
-function createSyntheticActivityTimingSpan(
-  descriptor: {
-    activityId: string;
-    activityType: string;
-    runId: string;
-    workflowId: string;
-    workflowType: string;
-  },
-  startTimeMs: number,
-  endTimeMs: number,
-  error: Record<string, unknown> | undefined
-): Record<string, unknown> {
-  const startTimeNs = Math.max(0, Math.floor(startTimeMs * 1_000_000));
-  const endTimeNs = Math.max(startTimeNs + 1, Math.floor(endTimeMs * 1_000_000));
-  const statusDescription =
-    typeof error?.message === "string" ? error.message : undefined;
-
-  return {
-    attributes: {
-      "openbox.activity_id": descriptor.activityId,
-      "openbox.activity_type": descriptor.activityType,
-      "openbox.run_id": descriptor.runId,
-      "openbox.synthetic": true,
-      "openbox.workflow_id": descriptor.workflowId,
-      "openbox.workflow_type": descriptor.workflowType
-    },
-    duration_ns: Math.max(1, endTimeNs - startTimeNs),
-    end_time: endTimeNs,
-    events: [],
-    kind: "INTERNAL",
-    name: `openbox.synthetic.activity.${descriptor.activityType}`,
-    semantic_type: "tool_execution",
-    span_id: randomHex(16),
-    start_time: startTimeNs,
-    status: {
-      code: error ? "ERROR" : "OK",
-      ...(statusDescription ? { description: statusDescription } : {})
-    },
-    trace_id: randomHex(32)
-  };
-}
-
-function randomHex(width: number): string {
-  const value = randomUUID().replaceAll("-", "").toLowerCase();
-
-  if (value.length >= width) {
-    return value.slice(0, width);
-  }
-
-  return value.padEnd(width, "0");
 }
 
 async function evaluateActivityEvent(

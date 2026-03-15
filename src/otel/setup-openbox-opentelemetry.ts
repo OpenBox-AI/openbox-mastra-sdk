@@ -1269,7 +1269,9 @@ async function evaluateHookGovernance(
   const payload: Record<string, unknown> = {
     activity_id: buildHookActivityId(
       activityContext.activityId,
-      input.hookTrigger.type
+      input.hookTrigger.type,
+      input.hookTrigger,
+      input.span
     ),
     activity_type: activityContext.activityType,
     event_type:
@@ -1277,10 +1279,9 @@ async function evaluateHookGovernance(
         ? WorkflowEventType.ACTIVITY_STARTED
         : WorkflowEventType.ACTIVITY_COMPLETED,
     hook_trigger: input.hookTrigger,
+    ...(activityContext.goal ? { goal: activityContext.goal } : {}),
     run_id: activityContext.runId,
     source: "workflow-telemetry",
-    span_count: 1,
-    spans: [input.span],
     ...(modelUsage.modelId ? { model_id: modelUsage.modelId } : {}),
     ...(telemetryModelId ? { model: telemetryModelId } : {}),
     ...(modelUsage.provider ? { model_provider: modelUsage.provider } : {}),
@@ -1294,6 +1295,14 @@ async function evaluateHookGovernance(
     ...(typeof modelUsage.totalTokens === "number"
       ? { total_tokens: modelUsage.totalTokens }
       : {}),
+    ...(input.stage === "started"
+      ? {
+          span_count: 1,
+          spans: [input.span]
+        }
+      : {
+          span_count: 0
+        }),
     task_queue: activityContext.taskQueue,
     timestamp: new Date().toISOString(),
     workflow_id: activityContext.workflowId,
@@ -1324,6 +1333,13 @@ async function evaluateHookGovernance(
     if (derivedActivityPayload.activityOutput !== undefined) {
       payload.activity_output = derivedActivityPayload.activityOutput;
     }
+  }
+
+  if (activityContext.goal) {
+    payload.activity_input = appendGoalToHookActivityInput(
+      payload.activity_input,
+      activityContext.goal
+    );
   }
 
   let verdict;
@@ -1575,6 +1591,35 @@ function normalizeActivityInputList(value: unknown): unknown[] | undefined {
   return [value];
 }
 
+function appendGoalToHookActivityInput(
+  activityInput: unknown,
+  goal: string
+): unknown[] {
+  const trimmedGoal = goal.trim();
+
+  if (trimmedGoal.length === 0) {
+    if (Array.isArray(activityInput)) {
+      return activityInput;
+    }
+
+    if (activityInput === undefined || activityInput === null) {
+      return [];
+    }
+
+    return [activityInput];
+  }
+
+  if (Array.isArray(activityInput)) {
+    return [...activityInput, { goal: trimmedGoal }];
+  }
+
+  if (activityInput === undefined || activityInput === null) {
+    return [{ goal: trimmedGoal }];
+  }
+
+  return [activityInput, { goal: trimmedGoal }];
+}
+
 function parseInlineSseDataBodies(body: string): string[] {
   const payloads: string[] = [];
   let searchIndex = 0;
@@ -1724,7 +1769,10 @@ function extractLatestUserPromptFromRecords(
       continue;
     }
 
-    const prompt = extractLatestUserPromptFromInput(record.input);
+    const prompt =
+      extractLatestUserPromptFromInput(record.input) ??
+      extractLatestUserPromptFromInput(record.messages) ??
+      extractLatestUserPromptFromInput(record.prompt);
 
     if (prompt) {
       return truncateText(prompt, 1_000);
@@ -1777,7 +1825,25 @@ function extractLatestUserPromptFromInput(value: unknown): string | undefined {
 function extractTextFromStructuredValue(value: unknown): string | undefined {
   if (typeof value === "string") {
     const trimmed = value.trim();
-    return trimmed.length > 0 ? trimmed : undefined;
+
+    if (trimmed.length === 0) {
+      return undefined;
+    }
+
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+      try {
+        const parsed = JSON.parse(trimmed) as unknown;
+        const extracted = extractTextFromStructuredValue(parsed);
+
+        if (extracted && extracted.trim().length > 0) {
+          return extracted.trim();
+        }
+      } catch {
+        // Preserve original string when JSON parsing fails.
+      }
+    }
+
+    return trimmed;
   }
 
   if (Array.isArray(value)) {
@@ -2391,15 +2457,77 @@ function inferProviderFromModelId(
 
 function buildHookActivityId(
   baseActivityId: string,
-  hookType: unknown
+  hookType: unknown,
+  hookTrigger: Record<string, unknown>,
+  span: Record<string, unknown>
 ): string {
   const normalizedHookType =
     typeof hookType === "string"
       ? hookType.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_")
       : "";
   const safeHookType = normalizedHookType.length > 0 ? normalizedHookType : "hook";
+  const executionKey = buildHookExecutionKey(hookTrigger, span);
 
-  return `${baseActivityId}::hook:${safeHookType}`;
+  return executionKey
+    ? `${baseActivityId}::hook:${safeHookType}:${executionKey}`
+    : `${baseActivityId}::hook:${safeHookType}`;
+}
+
+function buildHookExecutionKey(
+  hookTrigger: Record<string, unknown>,
+  span: Record<string, unknown>
+): string | undefined {
+  const parts: string[] = [];
+  const startTime = toNumberValue(span.start_time);
+  const traceId = toStringValue(span.trace_id);
+
+  if (typeof startTime === "number" && Number.isFinite(startTime)) {
+    parts.push(`start=${Math.trunc(startTime)}`);
+  }
+
+  if (traceId) {
+    parts.push(`trace=${traceId}`);
+  }
+
+  for (const key of [
+    "type",
+    "method",
+    "url",
+    "db_operation",
+    "db_statement",
+    "db_system",
+    "file_operation",
+    "file_path",
+    "command"
+  ]) {
+    const value = toStringValue(hookTrigger[key]);
+
+    if (value) {
+      parts.push(`${key}=${value}`);
+    }
+  }
+
+  const requestBody = toStringValue(hookTrigger.request_body);
+
+  if (requestBody) {
+    parts.push(`body=${requestBody.slice(0, 256)}`);
+  }
+
+  if (parts.length === 0) {
+    return undefined;
+  }
+
+  return hashHookExecutionKey(parts.join("|"));
+}
+
+function hashHookExecutionKey(value: string): string {
+  let hash = 0;
+
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash * 31 + value.charCodeAt(index)) >>> 0;
+  }
+
+  return hash.toString(36);
 }
 
 function resolveActivityContext(
@@ -2410,6 +2538,7 @@ function resolveActivityContext(
   activityInput?: unknown;
   activityType: string;
   attempt?: number;
+  goal?: string;
   runId: string;
   taskQueue: string;
   workflowId: string;
@@ -2428,6 +2557,8 @@ function resolveActivityContext(
       executionContext.workflowId,
       executionContext.activityId
     );
+    const spanGoal = toStringValue(spanActivityContext?.goal);
+    const resolvedGoal = spanGoal ?? executionContext.goal;
 
     return {
       activityId: executionContext.activityId,
@@ -2438,6 +2569,11 @@ function resolveActivityContext(
           }
         : {}),
       activityType: executionContext.activityType,
+      ...(typeof resolvedGoal === "string" && resolvedGoal.length > 0
+        ? {
+            goal: resolvedGoal
+          }
+        : {}),
       runId: executionContext.runId,
       taskQueue: executionContext.taskQueue ?? "mastra",
       workflowId: executionContext.workflowId,
@@ -2457,6 +2593,7 @@ function resolveActivityContext(
     return {
       activityId: `${executionContext.workflowId}::agent-llm::${executionContext.runId}`,
       activityType: "agentLlmCompletion",
+      ...(executionContext.goal ? { goal: executionContext.goal } : {}),
       runId: executionContext.runId,
       taskQueue: executionContext.taskQueue ?? "mastra",
       workflowId: executionContext.workflowId,
@@ -2482,11 +2619,13 @@ function resolveActivityContext(
   if (!activityId || !activityType || !workflowId || !workflowType || !runId) {
     return undefined;
   }
+  const spanGoal = toStringValue(spanContext.goal);
 
   return {
     activityId,
     activityInput: spanContext.activity_input,
     activityType,
+    ...(spanGoal ? { goal: spanGoal } : {}),
     runId,
     taskQueue: toStringValue(spanContext.task_queue) ?? "mastra",
     workflowId,

@@ -140,16 +140,9 @@ describe("wrapTool", () => {
       workflow_id: "wf-123"
     });
     expect(completedEvent).toMatchObject({
-      span_count: 1
+      span_count: 0
     });
-    expect(completedEvent).toBeDefined();
-    const completedSpans = (completedEvent?.spans as Array<Record<string, unknown>>) ?? [];
-    expect(Array.isArray(completedSpans)).toBe(true);
-    expect(completedSpans).toHaveLength(1);
-    expect(completedSpans[0]).toMatchObject({
-      kind: "INTERNAL",
-      semantic_type: "tool_execution"
-    });
+    expect((completedEvent as Record<string, unknown>)?.spans).toBeUndefined();
   });
 
   it("suspends execution when governance requires approval", async () => {
@@ -685,8 +678,8 @@ describe("wrapTool", () => {
 
     expect(hookCompleted).toBeDefined();
     expect(finalCompleted).toBeDefined();
-    expect(hookCompleted?.activity_id).toBe(
-      "wf-hook-ids:fetch-remote-data::hook:http_request"
+    expect(hookCompleted?.activity_id).toMatch(
+      /^wf-hook-ids:fetch-remote-data::hook:http_request:[a-z0-9]+$/
     );
     expect(finalCompleted?.activity_id).toBe("wf-hook-ids:fetch-remote-data");
     expect(finalCompleted?.activity_id).not.toBe(hookCompleted?.activity_id);
