@@ -1269,9 +1269,7 @@ async function evaluateHookGovernance(
   const payload: Record<string, unknown> = {
     activity_id: buildHookActivityId(
       activityContext.activityId,
-      input.hookTrigger.type,
-      input.hookTrigger,
-      input.span
+      input.hookTrigger.type
     ),
     activity_type: activityContext.activityType,
     event_type:
@@ -2457,77 +2455,15 @@ function inferProviderFromModelId(
 
 function buildHookActivityId(
   baseActivityId: string,
-  hookType: unknown,
-  hookTrigger: Record<string, unknown>,
-  span: Record<string, unknown>
+  hookType: unknown
 ): string {
   const normalizedHookType =
     typeof hookType === "string"
       ? hookType.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_")
       : "";
   const safeHookType = normalizedHookType.length > 0 ? normalizedHookType : "hook";
-  const executionKey = buildHookExecutionKey(hookTrigger, span);
 
-  return executionKey
-    ? `${baseActivityId}::hook:${safeHookType}:${executionKey}`
-    : `${baseActivityId}::hook:${safeHookType}`;
-}
-
-function buildHookExecutionKey(
-  hookTrigger: Record<string, unknown>,
-  span: Record<string, unknown>
-): string | undefined {
-  const parts: string[] = [];
-  const startTime = toNumberValue(span.start_time);
-  const traceId = toStringValue(span.trace_id);
-
-  if (typeof startTime === "number" && Number.isFinite(startTime)) {
-    parts.push(`start=${Math.trunc(startTime)}`);
-  }
-
-  if (traceId) {
-    parts.push(`trace=${traceId}`);
-  }
-
-  for (const key of [
-    "type",
-    "method",
-    "url",
-    "db_operation",
-    "db_statement",
-    "db_system",
-    "file_operation",
-    "file_path",
-    "command"
-  ]) {
-    const value = toStringValue(hookTrigger[key]);
-
-    if (value) {
-      parts.push(`${key}=${value}`);
-    }
-  }
-
-  const requestBody = toStringValue(hookTrigger.request_body);
-
-  if (requestBody) {
-    parts.push(`body=${requestBody.slice(0, 256)}`);
-  }
-
-  if (parts.length === 0) {
-    return undefined;
-  }
-
-  return hashHookExecutionKey(parts.join("|"));
-}
-
-function hashHookExecutionKey(value: string): string {
-  let hash = 0;
-
-  for (let index = 0; index < value.length; index += 1) {
-    hash = (hash * 31 + value.charCodeAt(index)) >>> 0;
-  }
-
-  return hash.toString(36);
+  return `${baseActivityId}::hook:${safeHookType}`;
 }
 
 function resolveActivityContext(

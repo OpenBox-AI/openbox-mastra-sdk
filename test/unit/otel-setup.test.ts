@@ -233,8 +233,8 @@ describe("setupOpenBoxOpenTelemetry", () => {
       workflow_id: "wf-123",
       workflow_type: "crypto-agent"
     });
-    expect((started as Record<string, unknown>)?.activity_id).toMatch(
-      /^act-123::hook:http_request:[a-z0-9]+$/
+    expect((started as Record<string, unknown>)?.activity_id).toBe(
+      "act-123::hook:http_request"
     );
     expect((completed as Record<string, unknown>)?.activity_id).toEqual(
       (started as Record<string, unknown>)?.activity_id
@@ -408,8 +408,8 @@ describe("setupOpenBoxOpenTelemetry", () => {
       workflow_id: "wf-agent-1",
       workflow_type: "coding-agent"
     });
-    expect((started as Record<string, unknown>)?.activity_id).toMatch(
-      /^wf-agent-1::agent-llm::run-agent-1::hook:http_request:[a-z0-9]+$/
+    expect((started as Record<string, unknown>)?.activity_id).toBe(
+      "wf-agent-1::agent-llm::run-agent-1::hook:http_request"
     );
     expect((completed as Record<string, unknown>)?.activity_id).toEqual(
       (started as Record<string, unknown>)?.activity_id

@@ -678,8 +678,8 @@ describe("wrapTool", () => {
 
     expect(hookCompleted).toBeDefined();
     expect(finalCompleted).toBeDefined();
-    expect(hookCompleted?.activity_id).toMatch(
-      /^wf-hook-ids:fetch-remote-data::hook:http_request:[a-z0-9]+$/
+    expect(hookCompleted?.activity_id).toBe(
+      "wf-hook-ids:fetch-remote-data::hook:http_request"
     );
     expect(finalCompleted?.activity_id).toBe("wf-hook-ids:fetch-remote-data");
     expect(finalCompleted?.activity_id).not.toBe(hookCompleted?.activity_id);
