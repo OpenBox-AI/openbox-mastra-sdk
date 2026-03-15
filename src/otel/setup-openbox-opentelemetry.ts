@@ -9,7 +9,10 @@ import type {
 import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
 
 import type { OpenBoxApiErrorPolicy, OpenBoxClient } from "../client/index.js";
-import { isActivityApproved } from "../governance/approval-registry.js";
+import {
+  getPendingApproval,
+  isActivityApproved
+} from "../governance/approval-registry.js";
 import { getOpenBoxExecutionContext } from "../governance/context.js";
 import { OpenBoxSpanProcessor } from "../span/index.js";
 import {
@@ -1249,6 +1252,14 @@ async function evaluateHookGovernance(
     return;
   }
 
+  const pendingApproval = getPendingApproval(activityContext.runId);
+
+  // While a parent activity approval is pending, suppress nested hook-level
+  // governance checks for that same activity to avoid duplicate approval loops.
+  if (pendingApproval?.activityId === activityContext.activityId) {
+    return;
+  }
+
   hookGovernance.spanProcessor.markGoverned(
     input.activeSpan.spanContext().spanId
   );
@@ -1258,8 +1269,7 @@ async function evaluateHookGovernance(
   const payload: Record<string, unknown> = {
     activity_id: buildHookActivityId(
       activityContext.activityId,
-      input.hookTrigger.type,
-      input.stage
+      input.hookTrigger.type
     ),
     activity_type: activityContext.activityType,
     event_type:
@@ -2381,8 +2391,7 @@ function inferProviderFromModelId(
 
 function buildHookActivityId(
   baseActivityId: string,
-  hookType: unknown,
-  stage: "completed" | "started"
+  hookType: unknown
 ): string {
   const normalizedHookType =
     typeof hookType === "string"
@@ -2390,7 +2399,7 @@ function buildHookActivityId(
       : "";
   const safeHookType = normalizedHookType.length > 0 ? normalizedHookType : "hook";
 
-  return `${baseActivityId}::hook:${safeHookType}:${stage}`;
+  return `${baseActivityId}::hook:${safeHookType}`;
 }
 
 function resolveActivityContext(

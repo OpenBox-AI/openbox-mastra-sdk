@@ -292,10 +292,20 @@ describe("wrapTool", () => {
 
     const result = await wrapped.execute?.({ name: "demo" }, {});
 
+    const lifecycleEventTypes = server.requests
+      .filter(request => request.pathname === "/api/v1/governance/evaluate")
+      .map(request => request.body.event_type)
+      .filter(
+        (eventType): eventType is string =>
+          eventType === "ActivityStarted" || eventType === "ActivityCompleted"
+      );
+
     await server.close();
 
     expect(result).toEqual({ ok: true });
     expect(approvalCalls).toBe(1);
+    expect(lifecycleEventTypes).toContain("ActivityStarted");
+    expect(lifecycleEventTypes).toContain("ActivityCompleted");
   });
 
   it("fails closed when guardrails validation rejects tool input", async () => {
@@ -676,7 +686,7 @@ describe("wrapTool", () => {
     expect(hookCompleted).toBeDefined();
     expect(finalCompleted).toBeDefined();
     expect(hookCompleted?.activity_id).toBe(
-      "wf-hook-ids:fetch-remote-data::hook:http_request:completed"
+      "wf-hook-ids:fetch-remote-data::hook:http_request"
     );
     expect(finalCompleted?.activity_id).toBe("wf-hook-ids:fetch-remote-data");
     expect(finalCompleted?.activity_id).not.toBe(hookCompleted?.activity_id);

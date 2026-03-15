@@ -262,7 +262,7 @@ export async function executeGovernedActivity<TInput, TOutput>({
             descriptor.activityId
           );
 
-          if (!wasAborted && !alreadyApproved) {
+          if (!wasAborted) {
             const completedVerdict = await evaluateActivityEvent(dependencies, {
               activity_id: descriptor.activityId,
               activity_input: serializeActivityInputForEvent(inputForExecution),
@@ -302,6 +302,7 @@ export async function executeGovernedActivity<TInput, TOutput>({
             if (
               dependencies.config.hitlEnabled &&
               Verdict.requiresApproval(completedVerdict?.verdict ?? Verdict.ALLOW) &&
+              !alreadyApproved &&
               !isActivityApproved(descriptor.runId, descriptor.activityId)
             ) {
               const approvalPayload = {

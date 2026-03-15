@@ -203,7 +203,7 @@ describe("setupOpenBoxOpenTelemetry", () => {
       url: downstreamUrl
     });
     expect(started).toMatchObject({
-      activity_id: "act-123::hook:http_request:started",
+      activity_id: "act-123::hook:http_request",
       activity_input: [
         {
           keyword: "bitcoin"
@@ -215,7 +215,7 @@ describe("setupOpenBoxOpenTelemetry", () => {
       workflow_type: "crypto-agent"
     });
     expect(completed).toMatchObject({
-      activity_id: "act-123::hook:http_request:completed",
+      activity_id: "act-123::hook:http_request",
       activity_input: [
         {
           keyword: "bitcoin"
@@ -366,7 +366,7 @@ describe("setupOpenBoxOpenTelemetry", () => {
 
     expect(started).toMatchObject({
       activity_id:
-        "wf-agent-1::agent-llm::run-agent-1::hook:http_request:started",
+        "wf-agent-1::agent-llm::run-agent-1::hook:http_request",
       activity_type: "agentLlmCompletion",
       model: "gpt-4-1",
       model_id: "gpt-4.1",
@@ -378,7 +378,7 @@ describe("setupOpenBoxOpenTelemetry", () => {
     });
     expect(completed).toMatchObject({
       activity_id:
-        "wf-agent-1::agent-llm::run-agent-1::hook:http_request:completed",
+        "wf-agent-1::agent-llm::run-agent-1::hook:http_request",
       activity_type: "agentLlmCompletion",
       input_tokens: 42,
       model: "gpt-4-1",
