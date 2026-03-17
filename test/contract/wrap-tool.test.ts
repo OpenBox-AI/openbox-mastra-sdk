@@ -14,6 +14,43 @@ import {
 } from "../../src/index.js";
 import { startOpenBoxServer } from "../helpers/openbox-server.js";
 
+function getHookSpan(
+  payload: Record<string, unknown>
+): Record<string, unknown> | undefined {
+  if (payload.hook_trigger !== true) {
+    return undefined;
+  }
+
+  const spans = payload.spans;
+
+  if (!Array.isArray(spans) || spans.length === 0) {
+    return undefined;
+  }
+
+  const first = spans[0];
+  return first && typeof first === "object"
+    ? (first as Record<string, unknown>)
+    : undefined;
+}
+
+function getHookSpans(
+  payload: Record<string, unknown>
+): Array<Record<string, unknown>> {
+  if (payload.hook_trigger !== true) {
+    return [];
+  }
+
+  const spans = payload.spans;
+
+  if (!Array.isArray(spans)) {
+    return [];
+  }
+
+  return spans.filter(
+    span => span && typeof span === "object"
+  ) as Array<Record<string, unknown>>;
+}
+
 describe("wrapTool", () => {
   it("sends activity events and applies guardrail redaction before and after execution", async () => {
     const server = await startOpenBoxServer({
@@ -133,12 +170,12 @@ describe("wrapTool", () => {
       activity_output: {
         result: "processed:[redacted]"
       },
-      activity_type: "processPrompt",
       event_type: "ActivityCompleted",
       run_id: "run-123",
       status: "completed",
       workflow_id: "wf-123"
     });
+    expect((completedEvent as Record<string, unknown>).activity_type).toBeUndefined();
     expect(completedEvent).toMatchObject({
       span_count: 0
     });
@@ -375,10 +412,11 @@ describe("wrapTool", () => {
   it("suspends when hook-level HTTP governance requires approval during execution", async () => {
     const server = await startOpenBoxServer({
       evaluate(body) {
+        const span = getHookSpan(body);
+
         if (
-          body.hook_trigger &&
-          (body.hook_trigger as Record<string, unknown>).type === "http_request" &&
-          (body.hook_trigger as Record<string, unknown>).stage === "started"
+          span?.hook_type === "http_request" &&
+          span?.stage === "started"
         ) {
           return {
             reason: "External request needs approval",
@@ -486,10 +524,11 @@ describe("wrapTool", () => {
   it("fails with GovernanceHaltError when hook-level HTTP governance returns HALT", async () => {
     const server = await startOpenBoxServer({
       evaluate(body) {
+        const span = getHookSpan(body);
+
         if (
-          body.hook_trigger &&
-          (body.hook_trigger as Record<string, unknown>).type === "http_request" &&
-          (body.hook_trigger as Record<string, unknown>).stage === "started"
+          span?.hook_type === "http_request" &&
+          span?.stage === "started"
         ) {
           return {
             reason: "Emergency stop",
@@ -664,25 +703,45 @@ describe("wrapTool", () => {
     const payloads = server.requests
       .filter(request => request.pathname === "/api/v1/governance/evaluate")
       .map(request => request.body);
-    const hookCompleted = payloads.find(
+    const hookLifecycleEventTypes = payloads
+      .filter(payload => payload.hook_trigger === true)
+      .map(payload => payload.event_type);
+    const hookStartedEvent = payloads.find(
       payload =>
-        payload.event_type === "ActivityCompleted" &&
-        payload.hook_trigger &&
-        (payload.hook_trigger as Record<string, unknown>).stage === "completed"
+        payload.event_type === "ActivityStarted" &&
+        getHookSpans(payload).some(
+          span =>
+            span.hook_type === "http_request" &&
+            span.stage === "started"
+        )
+    );
+    const hookCompletedEvent = payloads.find(
+      payload =>
+        payload.event_type === "ActivityStarted" &&
+        getHookSpans(payload).some(
+          span =>
+            span.hook_type === "http_request" &&
+            span.stage === "completed"
+        )
     );
     const finalCompleted = payloads.find(
       payload =>
         payload.event_type === "ActivityCompleted" &&
+        payload.hook_trigger !== true &&
         Object.prototype.hasOwnProperty.call(payload, "activity_output")
     );
 
-    expect(hookCompleted).toBeDefined();
+    expect(hookLifecycleEventTypes).toEqual([
+      "ActivityStarted",
+      "ActivityStarted"
+    ]);
+    expect(hookStartedEvent).toBeDefined();
+    expect(hookCompletedEvent).toBeDefined();
     expect(finalCompleted).toBeDefined();
-    expect(hookCompleted?.activity_id).toBe(
-      "wf-hook-ids:fetch-remote-data::hook:http_request"
-    );
+    expect(hookStartedEvent?.activity_id).toBe("wf-hook-ids:fetch-remote-data");
+    expect(hookCompletedEvent?.activity_id).toBe("wf-hook-ids:fetch-remote-data");
     expect(finalCompleted?.activity_id).toBe("wf-hook-ids:fetch-remote-data");
-    expect(finalCompleted?.activity_id).not.toBe(hookCompleted?.activity_id);
+    expect(finalCompleted?.activity_id).toBe(hookStartedEvent?.activity_id);
     expect(finalCompleted?.activity_output).toEqual({ ok: true });
   });
 

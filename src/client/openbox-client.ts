@@ -106,7 +106,11 @@ export class OpenBoxClient {
   public async evaluate(
     payload: Record<string, unknown>
   ): Promise<GovernanceVerdictResponse | null> {
-    return this.#withApiPolicy(async () => this.#evaluateWithRetry(payload));
+    const normalizedPayload = normalizeEvaluatePayload(payload);
+
+    return this.#withApiPolicy(async () =>
+      this.#evaluateWithRetry(normalizedPayload)
+    );
   }
 
   public async pollApproval(
@@ -336,11 +340,7 @@ function summarizeEvaluatePayload(
     has_workflow_input: payload.workflow_input !== undefined,
     has_workflow_output: payload.workflow_output !== undefined,
     hook_stage:
-      payload.hook_trigger &&
-      typeof payload.hook_trigger === "object" &&
-      "stage" in payload.hook_trigger
-        ? (payload.hook_trigger as Record<string, unknown>).stage
-        : undefined,
+      payload.hook_trigger === true ? spanSummary.latestSpanStage : undefined,
     run_id: payload.run_id,
     span_count:
       typeof payload.span_count === "number"
@@ -360,25 +360,196 @@ function summarizeEvaluatePayload(
   };
 }
 
+function normalizeEvaluatePayload(
+  payload: Record<string, unknown>
+): Record<string, unknown> {
+  const normalized: Record<string, unknown> = { ...payload };
+  const eventType =
+    typeof normalized.event_type === "string" ? normalized.event_type : undefined;
+  const legacyHookSpan = extractLegacyHookSpanFromTrigger(normalized.hook_trigger);
+  const normalizedHookTrigger = normalizeHookTrigger(normalized.hook_trigger);
+
+  if (normalizedHookTrigger !== undefined) {
+    normalized.hook_trigger = normalizedHookTrigger;
+  }
+
+  if (eventType === "ActivityCompleted") {
+    const normalizedSpans =
+      normalizeSpansField(normalized.spans) ??
+      (legacyHookSpan ? [legacyHookSpan] : undefined);
+
+    if (normalizedHookTrigger === true || legacyHookSpan !== undefined) {
+      normalized.hook_trigger = true;
+      normalized.spans = normalizedSpans ?? [];
+      normalized.span_count = (normalized.spans as unknown[]).length;
+      return normalized;
+    }
+
+    delete normalized.spans;
+    delete normalized.hook_trigger;
+    normalized.span_count = 0;
+
+    return normalized;
+  }
+
+  if (eventType === "ActivityStarted") {
+    const normalizedSpans =
+      normalizeSpansField(normalized.spans) ??
+      (legacyHookSpan ? [legacyHookSpan] : undefined);
+
+    if (normalizedSpans !== undefined) {
+      normalized.spans = normalizedSpans;
+      normalized.span_count = normalizedSpans.length;
+      return normalized;
+    }
+
+    if (normalized.hook_trigger === true) {
+      normalized.spans = [];
+      normalized.span_count = 0;
+    }
+  }
+
+  return normalized;
+}
+
+function normalizeHookTrigger(value: unknown): boolean | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (typeof value === "number") {
+    return value !== 0;
+  }
+
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+
+    if (
+      normalized === "true" ||
+      normalized === "1" ||
+      normalized === "yes" ||
+      normalized === "on"
+    ) {
+      return true;
+    }
+
+    if (
+      normalized === "false" ||
+      normalized === "0" ||
+      normalized === "no" ||
+      normalized === "off" ||
+      normalized.length === 0
+    ) {
+      return false;
+    }
+  }
+
+  if (typeof value === "object") {
+    return value !== null;
+  }
+
+  return Boolean(value);
+}
+
+function extractLegacyHookSpanFromTrigger(
+  value: unknown
+): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const record = value as Record<string, unknown>;
+  const hasHookShape =
+    typeof record.type === "string" ||
+    typeof record.hook_type === "string" ||
+    typeof record.stage === "string" ||
+    typeof record.method === "string" ||
+    typeof record.url === "string" ||
+    typeof record.http_method === "string" ||
+    typeof record.http_url === "string" ||
+    typeof record.db_operation === "string" ||
+    typeof record.db_statement === "string" ||
+    typeof record.file_operation === "string" ||
+    typeof record.file_path === "string" ||
+    typeof record.function === "string";
+
+  if (!hasHookShape) {
+    return undefined;
+  }
+
+  const normalized: Record<string, unknown> = {
+    ...record
+  };
+
+  if (
+    typeof normalized.type === "string" &&
+    typeof normalized.hook_type !== "string"
+  ) {
+    normalized.hook_type = normalized.type;
+  }
+
+  delete normalized.type;
+  return normalized;
+}
+
+function normalizeSpansField(
+  value: unknown
+): Record<string, unknown>[] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (Array.isArray(value)) {
+    return value.filter(
+      span => span !== null && typeof span === "object"
+    ) as Record<string, unknown>[];
+  }
+
+  if (value !== null && typeof value === "object") {
+    return [value as Record<string, unknown>];
+  }
+
+  return [];
+}
+
 function summarizeSpans(
   spans: unknown
 ): {
   detectedSpanCount: number;
   hasSpans: boolean;
+  latestSpanStage: string | undefined;
   syntheticModelUsageSpan: boolean;
 } {
   if (!Array.isArray(spans)) {
     return {
       detectedSpanCount: 0,
       hasSpans: false,
+      latestSpanStage: undefined,
       syntheticModelUsageSpan: false
     };
   }
 
+  const spanList = spans as unknown[];
+  const latestSpan =
+    spanList.length > 0 ? spanList[spanList.length - 1] : undefined;
+  const latestSpanStage =
+    latestSpan && typeof latestSpan === "object"
+      ? (() => {
+          const stage = (latestSpan as Record<string, unknown>).stage;
+
+          return typeof stage === "string" ? stage : undefined;
+        })()
+      : undefined;
+
   return {
-    detectedSpanCount: spans.length,
-    hasSpans: spans.length > 0,
-    syntheticModelUsageSpan: spans.some(span => {
+    detectedSpanCount: spanList.length,
+    hasSpans: spanList.length > 0,
+    latestSpanStage,
+    syntheticModelUsageSpan: spanList.some(span => {
       if (!span || typeof span !== "object") {
         return false;
       }

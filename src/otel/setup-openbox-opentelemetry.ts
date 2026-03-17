@@ -291,6 +291,7 @@ export function traced<TArgs extends unknown[], TResult>(
     return tracer.startActiveSpan(`function.${functionName}`, async span => {
       const spanContext = span.spanContext();
       const startTimeNs = Date.now() * 1_000_000;
+      const hookSpanId = normalizeHexId(undefined, 16);
       span.setAttribute("code.function", functionName);
       span.setAttribute("code.namespace", moduleName);
       let fnStarted = false;
@@ -314,9 +315,15 @@ export function traced<TArgs extends unknown[], TResult>(
               "code.namespace": moduleName
             },
             endTimeNs: startTimeNs,
+            functionArgs: options.captureArgs ? args : undefined,
+            functionModule: moduleName,
+            functionName,
+            hookType: "function_call",
             kind: "INTERNAL",
             name: `function.${functionName}`,
+            parentSpanId: spanContext.spanId,
             semanticType: "function_call",
+            spanId: hookSpanId,
             stage: "started",
             startTimeNs,
             traceId: spanContext.traceId
@@ -347,9 +354,15 @@ export function traced<TArgs extends unknown[], TResult>(
               "code.namespace": moduleName
             },
             endTimeNs,
+            functionModule: moduleName,
+            functionName,
+            functionResult: options.captureResult ? result : undefined,
+            hookType: "function_call",
             kind: "INTERNAL",
             name: `function.${functionName}`,
+            parentSpanId: spanContext.spanId,
             semanticType: "function_call",
+            spanId: hookSpanId,
             stage: "completed",
             startTimeNs,
             traceId: spanContext.traceId
@@ -380,9 +393,16 @@ export function traced<TArgs extends unknown[], TResult>(
                 "code.namespace": moduleName
               },
               endTimeNs,
+              error:
+                error instanceof Error ? error.message : String(error),
+              functionModule: moduleName,
+              functionName,
+              hookType: "function_call",
               kind: "INTERNAL",
               name: `function.${functionName}`,
+              parentSpanId: spanContext.spanId,
               semanticType: "function_call",
+              spanId: hookSpanId,
               stage: "completed",
               startTimeNs,
               traceId: spanContext.traceId
@@ -520,7 +540,10 @@ function createDatabaseInstrumentationConfig(
     return undefined;
   }
 
-  const queryStartTimes = new Map<string, number>();
+  const queryStartTimes = new Map<
+    string,
+    { hookSpanId: string; startTimeNs: number }
+  >();
   const emitStarted = (
     span: HookSpan,
     details: {
@@ -534,9 +557,15 @@ function createDatabaseInstrumentationConfig(
   ) => {
     const spanId = span.spanContext().spanId;
     const startTimeNs = Date.now() * 1_000_000;
-    queryStartTimes.set(spanId, startTimeNs);
+    const hookSpanId = normalizeHexId(undefined, 16);
+
+    queryStartTimes.set(spanId, {
+      hookSpanId,
+      startTimeNs
+    });
     void emitDatabaseHookGovernance({
       details,
+      hookSpanId,
       hookGovernance,
       span,
       stage: "started",
@@ -556,13 +585,15 @@ function createDatabaseInstrumentationConfig(
     }
   ) => {
     const spanId = span.spanContext().spanId;
-    const startTimeNs =
-      queryStartTimes.get(spanId) ?? Date.now() * 1_000_000;
+    const trackedSpan = queryStartTimes.get(spanId);
+    const startTimeNs = trackedSpan?.startTimeNs ?? Date.now() * 1_000_000;
+    const hookSpanId = trackedSpan?.hookSpanId ?? normalizeHexId(undefined, 16);
 
     queryStartTimes.delete(spanId);
 
     void emitDatabaseHookGovernance({
       details,
+      hookSpanId,
       hookGovernance,
       span,
       stage: "completed",
@@ -711,6 +742,7 @@ async function emitDatabaseHookGovernance(input: {
     serverAddress?: string | undefined;
     serverPort?: number | undefined;
   };
+  hookSpanId: string;
   hookGovernance: HookGovernanceRuntime;
   span: HookSpan;
   stage: "completed" | "started";
@@ -756,10 +788,20 @@ async function emitDatabaseHookGovernance(input: {
           ? { "server.port": input.details.serverPort }
           : {})
       },
+      dbName: input.details.dbName,
+      dbOperation,
+      dbStatement: input.details.dbStatement,
+      dbSystem: input.details.dbSystem ?? "unknown",
       endTimeNs: nowNs,
+      error: input.details.error,
+      hookType: "db_query",
       kind: "CLIENT",
       name: input.span.name ?? `DB ${dbOperation}`,
-      semanticType: `db_${dbOperation.toLowerCase()}`,
+      parentSpanId: spanContext.spanId,
+      semanticType: resolveDatabaseSemanticType(dbOperation),
+      serverAddress: input.details.serverAddress,
+      serverPort: input.details.serverPort,
+      spanId: input.hookSpanId,
       stage: input.stage,
       startTimeNs: input.startTimeNs,
       traceId: spanContext.traceId
@@ -803,11 +845,16 @@ function patchFetch(
     const requestHeaders = headersToRecord(request.headers);
     const spanContext = activeSpan.spanContext();
     const startTimeNs = Date.now() * 1_000_000;
+    const hookSpanId = normalizeHexId(undefined, 16);
+    const startedSemanticType = resolveHttpSemanticType({
+      method: request.method,
+      requestBody,
+      url
+    });
 
     await evaluateHookGovernance(hookGovernance, {
       activeSpan,
       hookTrigger: {
-        attribute_key_identifiers: ["http.method", "http.url"],
         method: request.method,
         request_body: requestBody,
         request_headers: requestHeaders,
@@ -821,11 +868,16 @@ function patchFetch(
           "http.url": url
         },
         endTimeNs: startTimeNs,
+        hookType: "http_request",
+        httpMethod: request.method,
+        httpUrl: url,
         kind: "CLIENT",
         name: `HTTP ${request.method}`,
+        parentSpanId: spanContext.spanId,
         requestBody,
         requestHeaders,
-        semanticType: `http_${request.method.toLowerCase()}`,
+        semanticType: startedSemanticType,
+        spanId: hookSpanId,
         stage: "started",
         startTimeNs: startTimeNs,
         traceId: spanContext.traceId
@@ -849,38 +901,55 @@ function patchFetch(
       url
     });
     const endTimeNs = Date.now() * 1_000_000;
+    const completedHookTrigger = {
+      method: request.method,
+      request_body: requestBody,
+      request_headers: requestHeaders,
+      response_body: responseBody,
+      response_headers: responseHeaders,
+      status_code: response.status,
+      type: "http_request",
+      url
+    } as const;
+    const completedSemanticType = resolveHttpSemanticType({
+      method: request.method,
+      requestBody,
+      responseBody,
+      url
+    });
+    const completedHookSpanBase = {
+      attributes: {
+        "http.method": request.method,
+        "http.status_code": response.status,
+        "http.url": url
+      },
+      endTimeNs,
+      hookType: "http_request" as const,
+      httpMethod: request.method,
+      httpStatusCode: response.status,
+      httpUrl: url,
+      kind: "CLIENT" as const,
+      name: `HTTP ${request.method}`,
+      parentSpanId: spanContext.spanId,
+      requestBody,
+      requestHeaders,
+      responseBody,
+      responseHeaders,
+      semanticType: completedSemanticType,
+      spanId: hookSpanId,
+      startTimeNs,
+      traceId: spanContext.traceId
+    };
 
     await evaluateHookGovernance(hookGovernance, {
       activeSpan,
       hookTrigger: {
-        attribute_key_identifiers: ["http.method", "http.url"],
-        method: request.method,
-        request_body: requestBody,
-        request_headers: requestHeaders,
-        response_body: responseBody,
-        response_headers: responseHeaders,
+        ...completedHookTrigger,
         stage: "completed",
-        status_code: response.status,
-        type: "http_request",
-        url
       },
       span: createHookSpan({
-        attributes: {
-          "http.method": request.method,
-          "http.status_code": response.status,
-          "http.url": url
-        },
-        endTimeNs,
-        kind: "CLIENT",
-        name: `HTTP ${request.method}`,
-        requestBody,
-        requestHeaders,
-        responseBody,
-        responseHeaders,
-        semanticType: `http_${request.method.toLowerCase()}`,
+        ...completedHookSpanBase,
         stage: "completed",
-        startTimeNs,
-        traceId: spanContext.traceId
       }),
       stage: "completed",
       traceId: spanContext.traceId
@@ -938,6 +1007,75 @@ function shouldIgnoreUrl(url: string | undefined, ignoredUrls: string[]): boolea
   }
 
   return ignoredUrls.some(prefix => url.startsWith(prefix));
+}
+
+function resolveHttpSemanticType(input: {
+  method: string;
+  requestBody?: string | undefined;
+  responseBody?: string | undefined;
+  url: string;
+}): string {
+  const normalizedMethod = input.method.trim().toUpperCase();
+  const requestRecords = parseHookBodyRecords(input.requestBody);
+  const responseRecords = parseHookBodyRecords(input.responseBody);
+  const modelId =
+    extractModelFromRecords(responseRecords) ??
+    extractModelFromRecords(requestRecords);
+  const provider =
+    inferProviderFromUrl(input.url) ?? inferProviderFromModelId(modelId);
+
+  if (normalizedMethod === "POST" && provider) {
+    return isLikelyLlmEmbedding(input.url, requestRecords, responseRecords)
+      ? "llm_embedding"
+      : "llm_completion";
+  }
+
+  switch (normalizedMethod) {
+    case "GET":
+      return "http_get";
+    case "POST":
+      return "http_post";
+    case "PUT":
+      return "http_put";
+    case "PATCH":
+      return "http_patch";
+    case "DELETE":
+      return "http_delete";
+    default:
+      return "http";
+  }
+}
+
+function resolveDatabaseSemanticType(operation: string): string {
+  const normalized = operation.trim().toUpperCase();
+
+  switch (normalized) {
+    case "SELECT":
+      return "database_select";
+    case "INSERT":
+      return "database_insert";
+    case "UPDATE":
+      return "database_update";
+    case "DELETE":
+      return "database_delete";
+    default:
+      return "database_query";
+  }
+}
+
+function isLikelyLlmEmbedding(
+  url: string,
+  requestRecords: Array<Record<string, unknown>>,
+  responseRecords: Array<Record<string, unknown>>
+): boolean {
+  const normalizedUrl = url.toLowerCase();
+
+  if (normalizedUrl.includes("embedding")) {
+    return true;
+  }
+
+  const combined = JSON.stringify([...requestRecords, ...responseRecords]).toLowerCase();
+  return combined.includes("embedding");
 }
 
 function isTextContentType(contentType: string | null): boolean {
@@ -1021,6 +1159,7 @@ function patchFileIo(
         span.setAttribute("file.operation", "read");
         const spanContext = span.spanContext();
         const startTimeNs = Date.now() * 1_000_000;
+        const hookSpanId = normalizeHexId(undefined, 16);
 
         await evaluateHookGovernance(hookGovernance, {
           activeSpan: span,
@@ -1037,9 +1176,15 @@ function patchFileIo(
               "file.path": filePath
             },
             endTimeNs: startTimeNs,
+            fileMode: "r",
+            fileOperation: "read",
+            filePath,
+            hookType: "file_operation",
             kind: "INTERNAL",
             name: "file.read",
+            parentSpanId: spanContext.spanId,
             semanticType: "file_read",
+            spanId: hookSpanId,
             stage: "started",
             startTimeNs,
             traceId: spanContext.traceId
@@ -1070,10 +1215,17 @@ function patchFileIo(
                 "file.operation": "read",
                 "file.path": filePath
               },
+              bytesRead: bytes,
               endTimeNs,
+              fileMode: "r",
+              fileOperation: "read",
+              filePath,
+              hookType: "file_operation",
               kind: "INTERNAL",
               name: "file.read",
+              parentSpanId: spanContext.spanId,
               semanticType: "file_read",
+              spanId: hookSpanId,
               stage: "completed",
               startTimeNs,
               traceId: spanContext.traceId
@@ -1107,6 +1259,7 @@ function patchFileIo(
         const bytes = getByteLength(data);
         const spanContext = span.spanContext();
         const startTimeNs = Date.now() * 1_000_000;
+        const hookSpanId = normalizeHexId(undefined, 16);
         span.setAttribute("file.bytes", bytes);
 
         await evaluateHookGovernance(hookGovernance, {
@@ -1125,10 +1278,17 @@ function patchFileIo(
               "file.operation": "write",
               "file.path": filePath
             },
+            bytesWritten: bytes,
             endTimeNs: startTimeNs,
+            fileMode: "w",
+            fileOperation: "write",
+            filePath,
+            hookType: "file_operation",
             kind: "INTERNAL",
             name: "file.write",
+            parentSpanId: spanContext.spanId,
             semanticType: "file_write",
+            spanId: hookSpanId,
             stage: "started",
             startTimeNs,
             traceId: spanContext.traceId
@@ -1157,10 +1317,17 @@ function patchFileIo(
                 "file.operation": "write",
                 "file.path": filePath
               },
+              bytesWritten: bytes,
               endTimeNs,
+              fileMode: "w",
+              fileOperation: "write",
+              filePath,
+              hookType: "file_operation",
               kind: "INTERNAL",
               name: "file.write",
+              parentSpanId: spanContext.spanId,
               semanticType: "file_write",
+              spanId: hookSpanId,
               stage: "completed",
               startTimeNs,
               traceId: spanContext.traceId
@@ -1246,11 +1413,10 @@ async function evaluateHookGovernance(
     throw new GovernanceHaltError(`Governance blocked: ${priorAbortReason}`);
   }
 
-  // If the parent activity is already approved, do not create additional
-  // hook-level governance approval requests for the same activity.
-  if (isActivityApproved(activityContext.runId, activityContext.activityId)) {
-    return;
-  }
+  const parentActivityApproved = isActivityApproved(
+    activityContext.runId,
+    activityContext.activityId
+  );
 
   const pendingApproval = getPendingApproval(activityContext.runId);
 
@@ -1263,20 +1429,38 @@ async function evaluateHookGovernance(
   hookGovernance.spanProcessor.markGoverned(
     input.activeSpan.spanContext().spanId
   );
-  const modelUsage = extractModelUsageFromHookSpan(input.span);
+  const hookSpan = enrichHookSpanForData(
+    cloneHookSpanPayload(input.span)
+  );
+  const modelUsage = extractModelUsageFromHookSpan(hookSpan);
   const telemetryModelId = toTelemetryModelId(modelUsage.modelId);
+  const hookType =
+    toStringValue(hookSpan.hook_type) ??
+    toStringValue(input.hookTrigger.type) ??
+    "hook";
+  const hookActivityType = resolveHookActivityType(
+    activityContext.activityType,
+    hookType
+  );
+  const hookSpanForPayload =
+    input.stage === "started"
+      ? ensureStartedHookSpan(hookSpan)
+      : ensureCompletedHookSpan(hookSpan);
+  // OpenBox core stores hook spans as updates on an existing parent
+  // ActivityStarted governance event. Emitting a separate hook activity id or
+  // a hook ActivityCompleted event causes OpenBox to create extra activity rows
+  // instead of attaching the span to the parent activity.
+  const eventType = WorkflowEventType.ACTIVITY_STARTED;
 
   const payload: Record<string, unknown> = {
-    activity_id: buildHookActivityId(
-      activityContext.activityId,
-      input.hookTrigger.type
-    ),
-    activity_type: activityContext.activityType,
-    event_type:
-      input.stage === "started"
-        ? WorkflowEventType.ACTIVITY_STARTED
-        : WorkflowEventType.ACTIVITY_COMPLETED,
-    hook_trigger: input.hookTrigger,
+    activity_id: activityContext.activityId,
+    attempt:
+      typeof activityContext.attempt === "number"
+        ? activityContext.attempt
+        : 1,
+    activity_type: hookActivityType,
+    event_type: eventType,
+    hook_trigger: true,
     ...(activityContext.goal ? { goal: activityContext.goal } : {}),
     run_id: activityContext.runId,
     source: "workflow-telemetry",
@@ -1293,23 +1477,13 @@ async function evaluateHookGovernance(
     ...(typeof modelUsage.totalTokens === "number"
       ? { total_tokens: modelUsage.totalTokens }
       : {}),
-    ...(input.stage === "started"
-      ? {
-          span_count: 1,
-          spans: [input.span]
-        }
-      : {
-          span_count: 0
-        }),
+    span_count: 1,
+    spans: [hookSpanForPayload],
     task_queue: activityContext.taskQueue,
     timestamp: new Date().toISOString(),
     workflow_id: activityContext.workflowId,
     workflow_type: activityContext.workflowType
   };
-
-  if (typeof activityContext.attempt === "number") {
-    payload.attempt = activityContext.attempt;
-  }
 
   if (activityContext.activityInput !== undefined) {
     payload.activity_input = activityContext.activityInput;
@@ -1364,6 +1538,12 @@ async function evaluateHookGovernance(
     return;
   }
 
+  // Activity already approved by a human should still emit telemetry,
+  // but nested hook verdicts must not trigger another approval/halt path.
+  if (parentActivityApproved) {
+    return;
+  }
+
   const reason = verdict.reason ?? "Hook blocked by governance";
 
   const abortReason = Verdict.requiresApproval(verdict.verdict)
@@ -1389,6 +1569,204 @@ async function evaluateHookGovernance(
   }
 
   throw new GovernanceHaltError(`Governance blocked: ${reason}`);
+}
+
+function resolveHookActivityType(
+  parentActivityType: string | undefined,
+  hookType: string
+): string {
+  if (
+    typeof parentActivityType === "string" &&
+    parentActivityType.toLowerCase() === "agentllmcompletion"
+  ) {
+    return parentActivityType;
+  }
+
+  return hookType;
+}
+
+function cloneHookSpanPayload(
+  span: Record<string, unknown>
+): Record<string, unknown> {
+  try {
+    return structuredClone(span);
+  } catch {
+    return { ...span };
+  }
+}
+
+function ensureStartedHookSpan(
+  span: Record<string, unknown>
+): Record<string, unknown> {
+  const startedSpan = cloneHookSpanPayload(span);
+  startedSpan.stage = "started";
+  delete startedSpan.end_time;
+  delete startedSpan.duration_ns;
+  delete startedSpan.response_body;
+  delete startedSpan.response_headers;
+  delete startedSpan.http_status_code;
+  delete startedSpan.rowcount;
+  delete startedSpan.data;
+  delete startedSpan.bytes_read;
+  delete startedSpan.bytes_written;
+  delete startedSpan.lines_count;
+  delete startedSpan.result;
+  delete startedSpan.error;
+
+  return enrichHookSpanForData(startedSpan);
+}
+
+function ensureCompletedHookSpan(
+  span: Record<string, unknown>
+): Record<string, unknown> {
+  const completedSpan = cloneHookSpanPayload(span);
+  completedSpan.stage = "completed";
+
+  return enrichHookSpanForData(completedSpan);
+}
+
+function enrichHookSpanForData(
+  span: Record<string, unknown>
+): Record<string, unknown> {
+  if (span.data !== undefined) {
+    return span;
+  }
+
+  const hookType = toStringValue(span.hook_type);
+
+  if (!hookType) {
+    return span;
+  }
+
+  if (hookType === "http_request") {
+    const data: Record<string, unknown> = {};
+    const method = toStringValue(span.http_method);
+    const url = toStringValue(span.http_url);
+    const requestBody = toStringValue(span.request_body);
+    const responseBody = toStringValue(span.response_body);
+    const statusCode = toNumberValue(span.http_status_code);
+
+    if (method) {
+      data.method = method;
+    }
+    if (url) {
+      data.url = url;
+    }
+    if (requestBody !== undefined) {
+      data.request_body = requestBody;
+    }
+    if (responseBody !== undefined) {
+      data.response_body = responseBody;
+    }
+    if (statusCode !== undefined) {
+      data.status_code = statusCode;
+    }
+
+    if (Object.keys(data).length > 0) {
+      span.data = data;
+    }
+
+    return span;
+  }
+
+  if (hookType === "db_query") {
+    const data: Record<string, unknown> = {};
+    const dbSystem = toStringValue(span.db_system);
+    const dbName = toStringValue(span.db_name);
+    const dbOperation = toStringValue(span.db_operation);
+    const dbStatement = toStringValue(span.db_statement);
+    const rowcount = toNumberValue(span.rowcount);
+    const serverAddress = toStringValue(span.server_address);
+    const serverPort = toNumberValue(span.server_port);
+
+    if (dbSystem) {
+      data.db_system = dbSystem;
+    }
+    if (dbName) {
+      data.db_name = dbName;
+    }
+    if (dbOperation) {
+      data.db_operation = dbOperation;
+    }
+    if (dbStatement) {
+      data.db_statement = dbStatement;
+    }
+    if (rowcount !== undefined) {
+      data.rowcount = rowcount;
+    }
+    if (serverAddress) {
+      data.server_address = serverAddress;
+    }
+    if (serverPort !== undefined) {
+      data.server_port = serverPort;
+    }
+
+    if (Object.keys(data).length > 0) {
+      span.data = data;
+    }
+
+    return span;
+  }
+
+  if (hookType === "function_call") {
+    const data: Record<string, unknown> = {};
+    const functionName = toStringValue(span.function);
+    const module = toStringValue(span.module);
+
+    if (functionName) {
+      data.function = functionName;
+    }
+    if (module) {
+      data.module = module;
+    }
+    if (span.args !== undefined) {
+      data.args = span.args;
+    }
+    if (span.result !== undefined) {
+      data.result = span.result;
+    }
+
+    if (Object.keys(data).length > 0) {
+      span.data = data;
+    }
+
+    return span;
+  }
+
+  if (hookType === "file_operation") {
+    const data: Record<string, unknown> = {};
+    const filePath = toStringValue(span.file_path);
+    const fileMode = toStringValue(span.file_mode);
+    const fileOperation = toStringValue(span.file_operation);
+    const bytesRead = toNumberValue(span.bytes_read);
+    const bytesWritten = toNumberValue(span.bytes_written);
+    const linesCount = toNumberValue(span.lines_count);
+
+    if (filePath) {
+      data.file_path = filePath;
+    }
+    if (fileMode) {
+      data.file_mode = fileMode;
+    }
+    if (fileOperation) {
+      data.file_operation = fileOperation;
+    }
+    if (bytesRead !== undefined) {
+      data.bytes_read = bytesRead;
+    }
+    if (bytesWritten !== undefined) {
+      data.bytes_written = bytesWritten;
+    }
+    if (linesCount !== undefined) {
+      data.lines_count = linesCount;
+    }
+
+    if (Object.keys(data).length > 0) {
+      span.data = data;
+    }
+  }
+
+  return span;
 }
 
 function extractModelUsageFromHookSpan(span: Record<string, unknown>): {
@@ -1527,7 +1905,7 @@ function deriveAgentHookActivityPayload(
   return {};
 }
 
-function parseHookPayloadBodyValue(body: unknown): unknown | undefined {
+function parseHookPayloadBodyValue(body: unknown): unknown {
   if (body === undefined || body === null) {
     return undefined;
   }
@@ -1552,7 +1930,7 @@ function parseHookPayloadBodyValue(body: unknown): unknown | undefined {
 function compactHookPayloadValue(
   value: unknown,
   maxBytes = 16_384
-): unknown | undefined {
+): unknown {
   if (value === undefined || value === null) {
     return undefined;
   }
@@ -1583,7 +1961,7 @@ function normalizeActivityInputList(value: unknown): unknown[] | undefined {
   }
 
   if (Array.isArray(value)) {
-    return value;
+    return value as unknown[];
   }
 
   return [value];
@@ -1608,11 +1986,41 @@ function appendGoalToHookActivityInput(
   }
 
   if (Array.isArray(activityInput)) {
-    return [...activityInput, { goal: trimmedGoal }];
+    const inputItems = activityInput as unknown[];
+
+    if (inputItems.length === 0) {
+      return [{ goal: trimmedGoal }];
+    }
+
+    const [first, ...rest] = inputItems;
+
+    if (first && typeof first === "object" && !Array.isArray(first)) {
+      const firstRecord = first as Record<string, unknown>;
+      const existingGoal = firstRecord.goal;
+
+      if (typeof existingGoal === "string" && existingGoal.trim().length > 0) {
+        return inputItems;
+      }
+
+      return [{ ...firstRecord, goal: trimmedGoal }, ...rest];
+    }
+
+    return [...inputItems, { goal: trimmedGoal }];
   }
 
   if (activityInput === undefined || activityInput === null) {
     return [{ goal: trimmedGoal }];
+  }
+
+  if (activityInput && typeof activityInput === "object" && !Array.isArray(activityInput)) {
+    const activityRecord = activityInput as Record<string, unknown>;
+    const existingGoal = activityRecord.goal;
+
+    if (typeof existingGoal === "string" && existingGoal.trim().length > 0) {
+      return [activityRecord];
+    }
+
+    return [{ ...activityRecord, goal: trimmedGoal }];
   }
 
   return [activityInput, { goal: trimmedGoal }];
@@ -1781,7 +2189,11 @@ function extractLatestUserPromptFromRecords(
 }
 
 function extractLatestUserPromptFromInput(value: unknown): string | undefined {
-  const inputs = Array.isArray(value) ? value : value !== undefined ? [value] : [];
+  const inputs = Array.isArray(value)
+    ? (value as unknown[])
+    : value !== undefined
+      ? [value]
+      : [];
 
   for (let index = inputs.length - 1; index >= 0; index -= 1) {
     const entry = inputs[index];
@@ -2453,19 +2865,6 @@ function inferProviderFromModelId(
   return undefined;
 }
 
-function buildHookActivityId(
-  baseActivityId: string,
-  hookType: unknown
-): string {
-  const normalizedHookType =
-    typeof hookType === "string"
-      ? hookType.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_")
-      : "";
-  const safeHookType = normalizedHookType.length > 0 ? normalizedHookType : "hook";
-
-  return `${baseActivityId}::hook:${safeHookType}`;
-}
-
 function resolveActivityContext(
   spanProcessor: OpenBoxSpanProcessor,
   traceId: string
@@ -2575,39 +2974,77 @@ function resolveActivityContext(
 function createHookSpan(input: {
   attributes: Record<string, unknown>;
   endTimeNs: number;
+  error?: string | undefined;
+  fileMode?: string | undefined;
+  fileOperation?: string | undefined;
+  filePath?: string | undefined;
+  functionArgs?: unknown;
+  functionModule?: string | undefined;
+  functionName?: string | undefined;
+  functionResult?: unknown;
+  hookType: string;
+  httpMethod?: string | undefined;
+  httpStatusCode?: number | undefined;
+  httpUrl?: string | undefined;
   kind: string;
   name: string;
+  parentSpanId?: string | undefined;
   requestBody?: string | undefined;
   requestHeaders?: Record<string, string> | undefined;
   responseBody?: string | undefined;
   responseHeaders?: Record<string, string> | undefined;
+  rowcount?: number | undefined;
   semanticType: string;
+  serverAddress?: string | undefined;
+  serverPort?: number | undefined;
+  spanId?: string | undefined;
   stage: "completed" | "started";
   startTimeNs: number;
+  bytesRead?: number | undefined;
+  bytesWritten?: number | undefined;
+  data?: string | undefined;
+  dbName?: string | undefined;
+  dbOperation?: string | undefined;
+  dbStatement?: string | undefined;
+  dbSystem?: string | undefined;
+  linesCount?: number | undefined;
   traceId: string;
 }): Record<string, unknown> {
   const span: Record<string, unknown> = {
     attributes: input.attributes,
-    duration_ns: Math.max(0, input.endTimeNs - input.startTimeNs),
-    end_time: input.endTimeNs,
     events: [],
+    hook_type: input.hookType,
     kind: input.kind,
     name: input.name,
     semantic_type: input.semanticType,
-    span_id: normalizeHexId(undefined, 16),
+    span_id: normalizeHexId(input.spanId, 16),
     stage: input.stage,
     start_time: input.startTimeNs,
     status: {
-      code: "OK"
+      code: input.error ? "ERROR" : "OK",
+      ...(input.error ? { description: input.error } : {})
     },
     trace_id: normalizeHexId(input.traceId, 32)
   };
+
+  if (input.stage === "completed") {
+    span.end_time = input.endTimeNs;
+    span.duration_ns = Math.max(0, input.endTimeNs - input.startTimeNs);
+  }
+
+  if (input.parentSpanId !== undefined) {
+    span.parent_span_id = normalizeHexId(input.parentSpanId, 16);
+  }
+
+  if (input.error !== undefined) {
+    span.error = input.error;
+  }
 
   if (input.requestBody !== undefined) {
     span.request_body = input.requestBody;
   }
 
-  if (input.responseBody !== undefined) {
+  if (input.stage === "completed" && input.responseBody !== undefined) {
     span.response_body = input.responseBody;
   }
 
@@ -2615,8 +3052,94 @@ function createHookSpan(input: {
     span.request_headers = input.requestHeaders;
   }
 
-  if (input.responseHeaders !== undefined) {
+  if (input.stage === "completed" && input.responseHeaders !== undefined) {
     span.response_headers = input.responseHeaders;
+  }
+
+  if (input.hookType === "http_request") {
+    if (input.httpMethod !== undefined) {
+      span.http_method = input.httpMethod;
+    }
+
+    if (input.httpUrl !== undefined) {
+      span.http_url = input.httpUrl;
+    }
+
+    if (input.stage === "completed" && input.httpStatusCode !== undefined) {
+      span.http_status_code = input.httpStatusCode;
+    }
+  } else if (input.hookType === "db_query") {
+    if (input.dbSystem !== undefined) {
+      span.db_system = input.dbSystem;
+    }
+
+    if (input.dbName !== undefined) {
+      span.db_name = input.dbName;
+    }
+
+    if (input.dbOperation !== undefined) {
+      span.db_operation = input.dbOperation;
+    }
+
+    if (input.dbStatement !== undefined) {
+      span.db_statement = input.dbStatement;
+    }
+
+    if (input.serverAddress !== undefined) {
+      span.server_address = input.serverAddress;
+    }
+
+    if (input.serverPort !== undefined) {
+      span.server_port = input.serverPort;
+    }
+
+    if (input.stage === "completed" && input.rowcount !== undefined) {
+      span.rowcount = input.rowcount;
+    }
+  } else if (input.hookType === "file_operation") {
+    if (input.filePath !== undefined) {
+      span.file_path = input.filePath;
+    }
+
+    if (input.fileMode !== undefined) {
+      span.file_mode = input.fileMode;
+    }
+
+    if (input.fileOperation !== undefined) {
+      span.file_operation = input.fileOperation;
+    }
+
+    if (input.stage === "completed" && input.data !== undefined) {
+      span.data = input.data;
+    }
+
+    if (input.stage === "completed" && input.bytesRead !== undefined) {
+      span.bytes_read = input.bytesRead;
+    }
+
+    if (input.stage === "completed" && input.bytesWritten !== undefined) {
+      span.bytes_written = input.bytesWritten;
+    }
+
+    if (input.stage === "completed" && input.linesCount !== undefined) {
+      span.lines_count = input.linesCount;
+    }
+  } else if (input.hookType === "function_call") {
+    if (input.functionName !== undefined) {
+      span.function = input.functionName;
+    }
+
+    if (input.functionModule !== undefined) {
+      span.module = input.functionModule;
+    }
+
+    if (input.functionArgs !== undefined) {
+      span.args = sanitizeForGovernancePayload(input.functionArgs);
+    }
+
+    if (input.stage === "completed" && input.functionResult !== undefined) {
+      span.result = sanitizeForGovernancePayload(input.functionResult);
+    }
   }
 
   return span;

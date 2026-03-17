@@ -132,6 +132,328 @@ describe("OpenBoxClient.evaluate", () => {
     });
   });
 
+  it("normalizes ActivityStarted hook payloads with variable span counts", async () => {
+    let observedBody: unknown;
+
+    server.use(
+      http.post(
+        "https://api.openbox.ai/api/v1/governance/evaluate",
+        async ({ request }) => {
+          observedBody = await request.json();
+          return HttpResponse.json({ verdict: "allow" });
+        }
+      )
+    );
+
+    const client = new OpenBoxClient({
+      apiKey: "obx_test_eval_key",
+      apiUrl: "https://api.openbox.ai/"
+    });
+
+    await client.evaluate({
+      activity_id: "act-1",
+      event_type: "ActivityStarted",
+      hook_trigger: {
+        stage: "completed",
+        type: "http_request"
+      },
+      run_id: "run-1",
+      span_count: 99,
+      spans: [
+        { hook_type: "http_request", stage: "started" },
+        "invalid-span",
+        { hook_type: "http_request", stage: "completed" }
+      ],
+      workflow_id: "wf-1"
+    });
+
+    expect(observedBody).toMatchObject({
+      activity_id: "act-1",
+      event_type: "ActivityStarted",
+      hook_trigger: true,
+      run_id: "run-1",
+      span_count: 2,
+      workflow_id: "wf-1"
+    });
+    expect(
+      Array.isArray((observedBody as Record<string, unknown>).spans)
+    ).toBe(true);
+    expect(
+      ((observedBody as Record<string, unknown>).spans as unknown[]).length
+    ).toBe(2);
+  });
+
+  it("drops spans from non-hook ActivityCompleted payloads", async () => {
+    let observedBody: unknown;
+
+    server.use(
+      http.post(
+        "https://api.openbox.ai/api/v1/governance/evaluate",
+        async ({ request }) => {
+          observedBody = await request.json();
+          return HttpResponse.json({ verdict: "allow" });
+        }
+      )
+    );
+
+    const client = new OpenBoxClient({
+      apiKey: "obx_test_eval_key",
+      apiUrl: "https://api.openbox.ai/"
+    });
+
+    await client.evaluate({
+      activity_id: "act-2",
+      event_type: "ActivityCompleted",
+      run_id: "run-2",
+      span_count: 7,
+      spans: [{ hook_type: "http_request", stage: "completed" }],
+      workflow_id: "wf-2"
+    });
+
+    expect(observedBody).toMatchObject({
+      activity_id: "act-2",
+      event_type: "ActivityCompleted",
+      run_id: "run-2",
+      span_count: 0,
+      workflow_id: "wf-2"
+    });
+    expect(
+      Object.prototype.hasOwnProperty.call(
+        observedBody as Record<string, unknown>,
+        "spans"
+      )
+    ).toBe(false);
+    expect(
+      Object.prototype.hasOwnProperty.call(
+        observedBody as Record<string, unknown>,
+        "hook_trigger"
+      )
+    ).toBe(false);
+  });
+
+  it("keeps spans for hook-style ActivityCompleted payloads", async () => {
+    let observedBody: unknown;
+
+    server.use(
+      http.post(
+        "https://api.openbox.ai/api/v1/governance/evaluate",
+        async ({ request }) => {
+          observedBody = await request.json();
+          return HttpResponse.json({ verdict: "allow" });
+        }
+      )
+    );
+
+    const client = new OpenBoxClient({
+      apiKey: "obx_test_eval_key",
+      apiUrl: "https://api.openbox.ai/"
+    });
+
+    await client.evaluate({
+      activity_id: "act-2-hook",
+      event_type: "ActivityCompleted",
+      hook_trigger: true,
+      run_id: "run-2-hook",
+      spans: [
+        {
+          hook_type: "http_request",
+          stage: "completed"
+        }
+      ],
+      workflow_id: "wf-2-hook"
+    });
+
+    expect(observedBody).toMatchObject({
+      activity_id: "act-2-hook",
+      event_type: "ActivityCompleted",
+      hook_trigger: true,
+      run_id: "run-2-hook",
+      span_count: 1,
+      workflow_id: "wf-2-hook"
+    });
+    expect(
+      Array.isArray((observedBody as Record<string, unknown>).spans)
+    ).toBe(true);
+    expect(
+      ((observedBody as Record<string, unknown>).spans as unknown[]).length
+    ).toBe(1);
+  });
+
+  it("normalizes single span objects into one-item ActivityStarted span arrays", async () => {
+    let observedBody: unknown;
+
+    server.use(
+      http.post(
+        "https://api.openbox.ai/api/v1/governance/evaluate",
+        async ({ request }) => {
+          observedBody = await request.json();
+          return HttpResponse.json({ verdict: "allow" });
+        }
+      )
+    );
+
+    const client = new OpenBoxClient({
+      apiKey: "obx_test_eval_key",
+      apiUrl: "https://api.openbox.ai/"
+    });
+
+    await client.evaluate({
+      activity_id: "act-3",
+      event_type: "ActivityStarted",
+      hook_trigger: true,
+      run_id: "run-3",
+      spans: { hook_type: "http_request", stage: "completed" },
+      workflow_id: "wf-3"
+    });
+
+    expect(observedBody).toMatchObject({
+      activity_id: "act-3",
+      event_type: "ActivityStarted",
+      hook_trigger: true,
+      run_id: "run-3",
+      span_count: 1,
+      workflow_id: "wf-3"
+    });
+    expect(
+      Array.isArray((observedBody as Record<string, unknown>).spans)
+    ).toBe(true);
+    expect(
+      ((observedBody as Record<string, unknown>).spans as unknown[]).length
+    ).toBe(1);
+  });
+
+  it("supports backward-compatible hook_trigger values and keeps payload immutable", async () => {
+    let observedBody: unknown;
+
+    server.use(
+      http.post(
+        "https://api.openbox.ai/api/v1/governance/evaluate",
+        async ({ request }) => {
+          observedBody = await request.json();
+          return HttpResponse.json({ verdict: "allow" });
+        }
+      )
+    );
+
+    const client = new OpenBoxClient({
+      apiKey: "obx_test_eval_key",
+      apiUrl: "https://api.openbox.ai/"
+    });
+
+    const originalPayload: Record<string, unknown> = {
+      activity_id: "act-4",
+      event_type: "ActivityStarted",
+      hook_trigger: "yes",
+      run_id: "run-4",
+      spans: [{ hook_type: "db_query", stage: "started" }],
+      workflow_id: "wf-4"
+    };
+
+    await client.evaluate(originalPayload);
+
+    expect(observedBody).toMatchObject({
+      activity_id: "act-4",
+      event_type: "ActivityStarted",
+      hook_trigger: true,
+      run_id: "run-4",
+      span_count: 1,
+      workflow_id: "wf-4"
+    });
+    expect(originalPayload.hook_trigger).toBe("yes");
+    expect(originalPayload.span_count).toBeUndefined();
+  });
+
+  it("extracts legacy hook span objects from hook_trigger when spans are omitted", async () => {
+    let observedBody: unknown;
+
+    server.use(
+      http.post(
+        "https://api.openbox.ai/api/v1/governance/evaluate",
+        async ({ request }) => {
+          observedBody = await request.json();
+          return HttpResponse.json({ verdict: "allow" });
+        }
+      )
+    );
+
+    const client = new OpenBoxClient({
+      apiKey: "obx_test_eval_key",
+      apiUrl: "https://api.openbox.ai/"
+    });
+
+    await client.evaluate({
+      activity_id: "act-legacy-hook",
+      event_type: "ActivityStarted",
+      hook_trigger: {
+        method: "POST",
+        stage: "completed",
+        type: "http_request",
+        url: "https://api.openai.com/v1/responses"
+      },
+      run_id: "run-legacy-hook",
+      workflow_id: "wf-legacy-hook"
+    });
+
+    expect(observedBody).toMatchObject({
+      activity_id: "act-legacy-hook",
+      event_type: "ActivityStarted",
+      hook_trigger: true,
+      run_id: "run-legacy-hook",
+      span_count: 1,
+      workflow_id: "wf-legacy-hook"
+    });
+
+    const spans = (observedBody as Record<string, unknown>).spans as Array<
+      Record<string, unknown>
+    >;
+    expect(spans).toHaveLength(1);
+    expect(spans[0]).toMatchObject({
+      hook_type: "http_request",
+      method: "POST",
+      stage: "completed",
+      url: "https://api.openai.com/v1/responses"
+    });
+    expect(spans[0]).not.toHaveProperty("type");
+  });
+
+  it("drops non-object spans while preserving ActivityStarted governance event", async () => {
+    let observedBody: unknown;
+
+    server.use(
+      http.post(
+        "https://api.openbox.ai/api/v1/governance/evaluate",
+        async ({ request }) => {
+          observedBody = await request.json();
+          return HttpResponse.json({ verdict: "allow" });
+        }
+      )
+    );
+
+    const client = new OpenBoxClient({
+      apiKey: "obx_test_eval_key",
+      apiUrl: "https://api.openbox.ai/"
+    });
+
+    await client.evaluate({
+      activity_id: "act-5",
+      event_type: "ActivityStarted",
+      hook_trigger: true,
+      run_id: "run-5",
+      spans: [null, 1, "bad", undefined],
+      workflow_id: "wf-5"
+    });
+
+    expect(observedBody).toMatchObject({
+      activity_id: "act-5",
+      event_type: "ActivityStarted",
+      hook_trigger: true,
+      run_id: "run-5",
+      span_count: 0,
+      workflow_id: "wf-5"
+    });
+    expect((observedBody as Record<string, unknown>).spans).toEqual([]);
+  });
+
   it("parses legacy action responses", async () => {
     server.use(
       http.post("https://api.openbox.ai/api/v1/governance/evaluate", () =>

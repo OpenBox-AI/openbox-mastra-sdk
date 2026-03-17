@@ -28,7 +28,11 @@ import type { WrapToolOptions } from "./wrap-tool.js";
 const OPENBOX_WRAPPED_AGENT = Symbol.for("openbox.mastra.wrapAgent");
 const OPENBOX_AGENT_STREAM_META = Symbol.for("openbox.mastra.wrapAgent.streamMeta");
 const AGENT_INPUT_SIGNAL_NAME = "user_input";
+const AGENT_OUTPUT_SIGNAL_NAME = "agent_output";
 const OPENBOX_AGENT_RUN_GOALS = new Map<string, string>();
+const OPENBOX_AGENT_SIGNAL_SPAN_CURSOR = new Map<string, number>();
+const MAX_AGENT_OUTPUT_SIGNAL_SPANS = 8;
+const MAX_AGENT_SIGNAL_SPAN_BODY_CHARS = 12_000;
 
 interface AgentStreamMeta {
   startTimeMs: number;
@@ -421,7 +425,7 @@ async function executeAgentLifecycle<T>({
       event_type: WorkflowEventType.SIGNAL_RECEIVED,
       ...(effectiveGoal ? { goal: effectiveGoal } : {}),
       run_id: runId,
-      signal_args: serializeAgentSignalArgs(messages),
+      signal_args: serializeAgentSignalArgs(messages, effectiveGoal),
       signal_name: AGENT_INPUT_SIGNAL_NAME,
       task_queue: "mastra",
       workflow_id: workflowId,
@@ -552,7 +556,10 @@ async function handleAgentResume(
       event_type: WorkflowEventType.SIGNAL_RECEIVED,
       ...(effectiveGoal ? { goal: effectiveGoal } : {}),
       run_id: runId,
-      signal_args: serializeValue(resumeData),
+      signal_args: appendGoalToSignalArgs(
+        serializeValue(resumeData),
+        effectiveGoal
+      ),
       signal_name: "resume",
       task_queue: "mastra",
       workflow_id: workflowId,
@@ -623,10 +630,19 @@ async function finalizeAgentSuccess(
   agentGoal?: string
 ): Promise<void> {
   if (options.config.skipWorkflowTypes.has(workflowType)) {
-    OPENBOX_AGENT_RUN_GOALS.delete(runId);
+    clearAgentRunState(runId);
     return;
   }
   try {
+    await emitAgentOutputSignal(
+      options,
+      runId,
+      workflowId,
+      workflowType,
+      output,
+      agentGoal
+    );
+
     const workflowSpans = normalizeSpansForGovernance(
       options.spanProcessor.getBuffer(workflowId, runId)?.spans ?? []
     );
@@ -681,7 +697,7 @@ async function finalizeAgentSuccess(
       );
     }
   } finally {
-    OPENBOX_AGENT_RUN_GOALS.delete(runId);
+    clearAgentRunState(runId);
   }
 }
 
@@ -991,20 +1007,91 @@ function truncateString(value: string, maxChars: number): string {
   return `${value.slice(0, Math.max(0, maxChars - 16))}...[truncated]`;
 }
 
-function serializeAgentSignalArgs(messages: unknown): unknown {
+function serializeAgentSignalArgs(
+  messages: unknown,
+  goal?: string
+): unknown {
   const latestUserPrompt = extractLatestUserPrompt(messages);
 
   if (latestUserPrompt) {
-    return [latestUserPrompt];
+    return appendGoalToSignalArgs([latestUserPrompt], goal);
   }
 
   const serialized = serializeValue(messages);
 
   if (serialized == null) {
-    return [];
+    return appendGoalToSignalArgs([], goal);
   }
 
-  return Array.isArray(serialized) ? serialized : [serialized];
+  return appendGoalToSignalArgs(
+    Array.isArray(serialized) ? serialized : [serialized],
+    goal
+  );
+}
+
+function serializeAgentOutputSignalArgs(
+  output: unknown,
+  goal?: string
+): unknown[] {
+  const serialized = compactWorkflowOutput(serializeValue(output));
+
+  if (serialized === undefined || serialized === null) {
+    return appendGoalToSignalArgs([], goal);
+  }
+
+  return appendGoalToSignalArgs(
+    Array.isArray(serialized) ? serialized : [serialized],
+    goal
+  );
+}
+
+function appendGoalToSignalArgs(
+  signalArgs: unknown,
+  goal: string | undefined
+): unknown[] {
+  const normalizedArgs = Array.isArray(signalArgs)
+    ? [...signalArgs]
+    : signalArgs === undefined || signalArgs === null
+      ? []
+      : [signalArgs];
+
+  if (!goal || goal.trim().length === 0) {
+    return normalizedArgs;
+  }
+
+  const trimmedGoal = goal.trim();
+
+  if (trimmedGoal.length === 0) {
+    return normalizedArgs;
+  }
+
+  if (normalizedArgs.length === 0) {
+    return [{ goal: trimmedGoal }];
+  }
+
+  const hasGoalObject = normalizedArgs.some(item => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      return false;
+    }
+
+    const existingGoal = (item as Record<string, unknown>).goal;
+    return typeof existingGoal === "string" && existingGoal.trim().length > 0;
+  });
+
+  if (hasGoalObject) {
+    return normalizedArgs;
+  }
+
+  const firstPrompt =
+    typeof normalizedArgs[0] === "string"
+      ? (normalizedArgs[0] as string).trim()
+      : "";
+
+  if (firstPrompt.length > 0) {
+    return [...normalizedArgs, { goal: trimmedGoal, prompt: firstPrompt }];
+  }
+
+  return [...normalizedArgs, { goal: trimmedGoal }];
 }
 
 function extractLatestUserPrompt(messages: unknown): string | undefined {
@@ -1910,12 +1997,24 @@ async function sendAgentFailure(
   agentGoal?: string
 ): Promise<void> {
   if (options.config.skipWorkflowTypes.has(workflowType)) {
-    OPENBOX_AGENT_RUN_GOALS.delete(runId);
+    clearAgentRunState(runId);
     return;
   }
   void streamMeta;
 
   try {
+    await emitAgentOutputSignal(
+      options,
+      runId,
+      workflowId,
+      workflowType,
+      {
+        error: serializeError(error),
+        status: "failed"
+      },
+      agentGoal
+    );
+
     await evaluateAgentEvent(options, {
       error: serializeError(error),
       event_type: WorkflowEventType.WORKFLOW_FAILED,
@@ -1925,8 +2024,51 @@ async function sendAgentFailure(
       workflow_type: workflowType
     });
   } finally {
-    OPENBOX_AGENT_RUN_GOALS.delete(runId);
+    clearAgentRunState(runId);
   }
+}
+
+async function emitAgentOutputSignal(
+  options: WrapToolOptions,
+  runId: string,
+  workflowId: string,
+  workflowType: string,
+  output: unknown,
+  goal: string | undefined
+): Promise<void> {
+  if (options.config.skipSignals.has(AGENT_OUTPUT_SIGNAL_NAME)) {
+    return;
+  }
+
+  const signalArgs = serializeAgentOutputSignalArgs(output, goal);
+  const outputSignalBasePayload = {
+    event_type: WorkflowEventType.SIGNAL_RECEIVED,
+    ...(goal ? { goal } : {}),
+    run_id: runId,
+    signal_args: signalArgs,
+    signal_name: AGENT_OUTPUT_SIGNAL_NAME,
+    task_queue: "mastra",
+    workflow_id: workflowId,
+    workflow_type: workflowType
+  } as const;
+  const outputSignalSpans = buildAgentOutputSignalSpans(
+    options,
+    workflowId,
+    runId
+  );
+  const outputSignalPayload = outputSignalSpans.length > 0
+    ? {
+        ...outputSignalBasePayload,
+        span_count: outputSignalSpans.length,
+        spans: outputSignalSpans
+      }
+    : outputSignalBasePayload;
+
+  await evaluateAgentEvent(
+    options,
+    outputSignalPayload,
+    outputSignalBasePayload
+  );
 }
 
 async function evaluateAgentEvent(
@@ -2113,6 +2255,104 @@ function serializeError(error: unknown): Record<string, unknown> {
     message: String(error),
     type: typeof error
   };
+}
+
+function clearAgentRunState(runId: string): void {
+  OPENBOX_AGENT_RUN_GOALS.delete(runId);
+  OPENBOX_AGENT_SIGNAL_SPAN_CURSOR.delete(runId);
+}
+
+function buildAgentOutputSignalSpans(
+  options: WrapToolOptions,
+  workflowId: string,
+  runId: string
+): Array<Record<string, unknown>> {
+  const workflowSpans = normalizeSpansForGovernance(
+    options.spanProcessor.getBuffer(workflowId, runId)?.spans ?? []
+  );
+  const llmSpans = workflowSpans.filter(span => isCompletedLlmAlignmentSpan(span));
+
+  if (llmSpans.length === 0) {
+    return [];
+  }
+
+  const cursor = OPENBOX_AGENT_SIGNAL_SPAN_CURSOR.get(runId) ?? 0;
+  const normalizedCursor =
+    cursor >= 0 && cursor <= llmSpans.length ? cursor : 0;
+  const unsentSpans = llmSpans.slice(normalizedCursor);
+
+  OPENBOX_AGENT_SIGNAL_SPAN_CURSOR.set(runId, llmSpans.length);
+
+  if (unsentSpans.length === 0) {
+    return [];
+  }
+
+  return unsentSpans
+    .slice(-MAX_AGENT_OUTPUT_SIGNAL_SPANS)
+    .map(span => compactAgentSignalSpan(span));
+}
+
+function isCompletedLlmAlignmentSpan(span: Record<string, unknown>): boolean {
+  const stage = getStringField(span, "stage", "stage");
+
+  if (stage && stage !== "completed") {
+    return false;
+  }
+
+  const hasCompletedTiming =
+    typeof span.end_time === "number" ||
+    typeof span.duration_ns === "number";
+
+  if (!stage && !hasCompletedTiming) {
+    return false;
+  }
+
+  const semanticType = getStringField(span, "semantic_type", "semanticType");
+
+  if (semanticType && semanticType.startsWith("llm_")) {
+    return true;
+  }
+
+  const attributes =
+    span.attributes && typeof span.attributes === "object"
+      ? (span.attributes as Record<string, unknown>)
+      : {};
+  const httpMethod = typeof attributes["http.method"] === "string"
+    ? (attributes["http.method"] as string).trim().toUpperCase()
+    : undefined;
+  const rawUrl = attributes["http.url"] ?? attributes["url.full"];
+  const httpUrl = typeof rawUrl === "string" ? rawUrl.toLowerCase() : "";
+
+  return (
+    httpMethod === "POST" &&
+    (httpUrl.includes("api.openai.com") ||
+      httpUrl.includes("api.anthropic.com") ||
+      httpUrl.includes("generativelanguage.googleapis.com"))
+  );
+}
+
+function compactAgentSignalSpan(
+  span: Record<string, unknown>
+): Record<string, unknown> {
+  const compacted = {
+    ...span
+  };
+
+  if (typeof compacted.request_body === "string") {
+    compacted.request_body = truncateString(
+      compacted.request_body,
+      MAX_AGENT_SIGNAL_SPAN_BODY_CHARS
+    );
+  }
+
+  if (typeof compacted.response_body === "string") {
+    compacted.response_body = truncateString(
+      compacted.response_body,
+      MAX_AGENT_SIGNAL_SPAN_BODY_CHARS
+    );
+  }
+
+  return compacted;
 }
 
 function ensureAgentSpanBuffer(

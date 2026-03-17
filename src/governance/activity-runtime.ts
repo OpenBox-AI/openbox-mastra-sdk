@@ -267,11 +267,13 @@ export async function executeGovernedActivity<TInput, TOutput>({
               serializeActivityInputForEvent(inputForExecution),
               descriptor.goal
             );
+            const completedActivityTypePayload =
+              dependencies.config.hitlEnabled ? {} : { activity_type: descriptor.activityType };
             const completedVerdict = await evaluateActivityEvent(dependencies, {
               activity_id: descriptor.activityId,
               activity_input: completedInputForEvent,
               activity_output: serializeValue(output),
-              activity_type: descriptor.activityType,
+              ...completedActivityTypePayload,
               attempt: descriptor.attempt,
               duration_ms: durationMs,
               end_time: activityEndMs,
@@ -380,58 +382,92 @@ export async function executeGovernedActivity<TInput, TOutput>({
 }
 
 const INLINE_APPROVAL_TIMEOUT_MS = 300_000;
-const INLINE_APPROVAL_POLL_INTERVAL_MS = 1_500;
+const INLINE_APPROVAL_INITIAL_POLL_INTERVAL_MS = 2_500;
+const INLINE_APPROVAL_MAX_POLL_INTERVAL_MS = 15_000;
+const INLINE_APPROVAL_BACKOFF_MULTIPLIER = 2;
+const inflightInlineApprovalWaits = new Map<string, Promise<void>>();
 
 async function waitForApprovalInline(
   client: OpenBoxClient,
   descriptor: ReturnType<typeof resolveActivityDescriptor>,
   reason: string | undefined
 ): Promise<void> {
-  const timeoutAt = Date.now() + INLINE_APPROVAL_TIMEOUT_MS;
+  const inflightKey = `${descriptor.runId}::${descriptor.activityId}`;
+  const existingWait = inflightInlineApprovalWaits.get(inflightKey);
 
-  while (Date.now() < timeoutAt) {
-    const approval = await client.pollApproval({
-      activityId: descriptor.activityId,
-      runId: descriptor.runId,
-      workflowId: descriptor.workflowId
-    });
-
-    if (!approval) {
-      await delay(INLINE_APPROVAL_POLL_INTERVAL_MS);
-      continue;
-    }
-
-    if (approval.expired) {
-      clearPendingApproval(descriptor.runId);
-      throw new ApprovalExpiredError(
-        `Approval expired for activity ${descriptor.activityType}`
-      );
-    }
-
-    const verdict = Verdict.fromString(
-      (approval.verdict as string | undefined) ??
-        (approval.action as string | undefined)
-    );
-
-    if (verdict === Verdict.ALLOW) {
-      markActivityApproved(descriptor.runId, descriptor.activityId);
-      clearPendingApproval(descriptor.runId);
-      return;
-    }
-
-    if (Verdict.shouldStop(verdict)) {
-      clearPendingApproval(descriptor.runId);
-      throw new ApprovalRejectedError(
-        `Activity rejected: ${String(approval.reason ?? "Activity rejected")}`
-      );
-    }
-
-    await delay(INLINE_APPROVAL_POLL_INTERVAL_MS);
+  if (existingWait) {
+    await existingWait;
+    return;
   }
 
-  throw new ApprovalPendingError(
-    reason ?? `Awaiting approval for activity ${descriptor.activityType}`
-  );
+  const waitPromise = (async () => {
+    const timeoutAt = Date.now() + INLINE_APPROVAL_TIMEOUT_MS;
+    let pollIntervalMs = INLINE_APPROVAL_INITIAL_POLL_INTERVAL_MS;
+
+    while (Date.now() < timeoutAt) {
+      await delay(pollIntervalMs);
+
+      if (Date.now() >= timeoutAt) {
+        break;
+      }
+
+      const approval = await client.pollApproval({
+        activityId: descriptor.activityId,
+        runId: descriptor.runId,
+        workflowId: descriptor.workflowId
+      });
+
+      if (!approval) {
+        pollIntervalMs = Math.min(
+          INLINE_APPROVAL_MAX_POLL_INTERVAL_MS,
+          Math.ceil(pollIntervalMs * INLINE_APPROVAL_BACKOFF_MULTIPLIER)
+        );
+        continue;
+      }
+
+      if (approval.expired) {
+        clearPendingApproval(descriptor.runId);
+        throw new ApprovalExpiredError(
+          `Approval expired for activity ${descriptor.activityType}`
+        );
+      }
+
+      const verdict = Verdict.fromString(
+        (approval.verdict) ??
+          (approval.action)
+      );
+
+      if (verdict === Verdict.ALLOW) {
+        markActivityApproved(descriptor.runId, descriptor.activityId);
+        clearPendingApproval(descriptor.runId);
+        return;
+      }
+
+      if (Verdict.shouldStop(verdict)) {
+        clearPendingApproval(descriptor.runId);
+        throw new ApprovalRejectedError(
+          `Activity rejected: ${String(approval.reason ?? "Activity rejected")}`
+        );
+      }
+
+      pollIntervalMs = Math.min(
+        INLINE_APPROVAL_MAX_POLL_INTERVAL_MS,
+        Math.ceil(pollIntervalMs * INLINE_APPROVAL_BACKOFF_MULTIPLIER)
+      );
+    }
+
+    throw new ApprovalPendingError(
+      reason ?? `Awaiting approval for activity ${descriptor.activityType}`
+    );
+  })();
+
+  inflightInlineApprovalWaits.set(inflightKey, waitPromise);
+
+  try {
+    await waitPromise;
+  } finally {
+    inflightInlineApprovalWaits.delete(inflightKey);
+  }
 }
 
 async function delay(ms: number): Promise<void> {
@@ -505,7 +541,30 @@ export function appendGoalToActivityInput(
     return activityInput;
   }
 
-  return [...activityInput, { goal: goal.trim() }];
+  const trimmedGoal = goal.trim();
+
+  if (trimmedGoal.length === 0) {
+    return activityInput;
+  }
+
+  if (activityInput.length === 0) {
+    return [{ goal: trimmedGoal }];
+  }
+
+  const [first, ...rest] = activityInput;
+
+  if (first && typeof first === "object" && !Array.isArray(first)) {
+    const firstRecord = first as Record<string, unknown>;
+    const existingGoal = firstRecord.goal;
+
+    if (typeof existingGoal === "string" && existingGoal.trim().length > 0) {
+      return activityInput;
+    }
+
+    return [{ ...firstRecord, goal: trimmedGoal }, ...rest];
+  }
+
+  return [...activityInput, { goal: trimmedGoal }];
 }
 
 function normalizeRedactedActivityInput(

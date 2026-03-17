@@ -69,22 +69,30 @@ describe("wrapAgent", () => {
     ).toEqual([
       "WorkflowStarted",
       "SignalReceived",
+      "SignalReceived",
       "WorkflowCompleted",
       "WorkflowStarted",
+      "SignalReceived",
       "SignalReceived",
       "WorkflowCompleted"
     ]);
 
-    const inputSignals = server.requests
+    const signalEvents = server.requests
       .filter(request => request.pathname === "/api/v1/governance/evaluate")
       .map(request => request.body)
       .filter(body => body.event_type === "SignalReceived");
+    const inputSignals = signalEvents.filter(
+      body => body.signal_name === "user_input"
+    );
+    const outputSignals = signalEvents.filter(
+      body => body.signal_name === "agent_output"
+    );
 
     expect(inputSignals).toHaveLength(2);
     expect(inputSignals[0]).toMatchObject({
       event_type: "SignalReceived",
       run_id: "agent-generate-run",
-      signal_args: ["hello"],
+      signal_args: ["hello", { goal: "hello", prompt: "hello" }],
       signal_name: "user_input",
       workflow_id: "agent:assistant-agent",
       workflow_type: "assistant-agent"
@@ -92,8 +100,23 @@ describe("wrapAgent", () => {
     expect(inputSignals[1]).toMatchObject({
       event_type: "SignalReceived",
       run_id: "agent-stream-run",
-      signal_args: ["hello"],
+      signal_args: ["hello", { goal: "hello", prompt: "hello" }],
       signal_name: "user_input",
+      workflow_id: "agent:assistant-agent",
+      workflow_type: "assistant-agent"
+    });
+    expect(outputSignals).toHaveLength(2);
+    expect(outputSignals[0]).toMatchObject({
+      event_type: "SignalReceived",
+      run_id: "agent-generate-run",
+      signal_name: "agent_output",
+      workflow_id: "agent:assistant-agent",
+      workflow_type: "assistant-agent"
+    });
+    expect(outputSignals[1]).toMatchObject({
+      event_type: "SignalReceived",
+      run_id: "agent-stream-run",
+      signal_name: "agent_output",
       workflow_id: "agent:assistant-agent",
       workflow_type: "assistant-agent"
     });
@@ -163,13 +186,20 @@ describe("wrapAgent", () => {
     const signalEvent = server.requests
       .filter(request => request.pathname === "/api/v1/governance/evaluate")
       .map(request => request.body)
-      .find(body => body.event_type === "SignalReceived");
+      .find(
+        body =>
+          body.event_type === "SignalReceived" &&
+          body.signal_name === "user_input"
+      );
 
     expect(signalEvent).toBeDefined();
     expect(signalEvent).toMatchObject({
       event_type: "SignalReceived",
       run_id: "agent-signal-prompt-run",
-      signal_args: ["latest question"],
+      signal_args: [
+        "latest question",
+        { goal: "latest question", prompt: "latest question" }
+      ],
       signal_name: "user_input",
       workflow_id: "agent:assistant-agent-signal-prompt",
       workflow_type: "assistant-agent-signal-prompt"
@@ -232,16 +262,144 @@ describe("wrapAgent", () => {
     const signalEvent = server.requests
       .filter(request => request.pathname === "/api/v1/governance/evaluate")
       .map(request => request.body)
-      .find(body => body.event_type === "SignalReceived");
+      .find(
+        body =>
+          body.event_type === "SignalReceived" &&
+          body.signal_name === "user_input"
+      );
 
     expect(signalEvent).toBeDefined();
     expect(signalEvent).toMatchObject({
       event_type: "SignalReceived",
       run_id: "agent-signal-json-prompt-run",
-      signal_args: ["Create hello world file"],
+      signal_args: [
+        "Create hello world file",
+        { goal: "Create hello world file", prompt: "Create hello world file" }
+      ],
       signal_name: "user_input",
       workflow_id: "agent:assistant-agent-signal-json-prompt",
       workflow_type: "assistant-agent-signal-json-prompt"
+    });
+  });
+
+  it("attaches completed LLM spans to agent_output SignalReceived events", async () => {
+    const server = await startOpenBoxServer({
+      evaluate() {
+        return { verdict: "allow" };
+      }
+    });
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_agent_output_signal_spans",
+      apiUrl: server.url,
+      validate: false
+    });
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+    const spanProcessor = new OpenBoxSpanProcessor();
+    const runId = "agent-output-signal-spans-run";
+    const workflowType = "assistant-agent-output-signal-spans";
+    const workflowId = `agent:${workflowType}`;
+
+    spanProcessor.registerWorkflow(
+      workflowId,
+      new WorkflowSpanBuffer({
+        runId,
+        taskQueue: "mastra",
+        workflowId,
+        workflowType
+      })
+    );
+
+    spanProcessor.getBuffer(workflowId, runId)?.spans.push({
+      attributes: {
+        "http.method": "POST",
+        "http.url": "https://api.openai.com/v1/responses"
+      },
+      durationNs: 100_000,
+      endTime: 2_000_000,
+      events: [],
+      kind: "CLIENT",
+      name: "agent.openai.call",
+      requestBody: JSON.stringify({
+        input: "hello",
+        model: "gpt-4.1"
+      }),
+      responseBody: JSON.stringify({
+        model: "gpt-4.1",
+        usage: {
+          input_tokens: 10,
+          output_tokens: 5
+        }
+      }),
+      semanticType: "llm_completion",
+      spanId: "1111111111111111",
+      startTime: 1_900_000,
+      status: {
+        code: "OK"
+      },
+      traceId: "22222222222222222222222222222222"
+    } as Record<string, unknown>);
+
+    const agent = wrapAgent(
+      new Agent({
+        id: workflowType,
+        instructions: "Be concise.",
+        model: createMockModel({
+          mockText: "done",
+          version: "v2"
+        }) as never,
+        name: "Assistant Agent Output Signal Spans"
+      }),
+      {
+        client,
+        config,
+        spanProcessor
+      }
+    );
+
+    await agent.generate("hello", { runId });
+    await server.close();
+
+    const outputSignal = server.requests
+      .filter(request => request.pathname === "/api/v1/governance/evaluate")
+      .map(request => request.body)
+      .find(
+        body =>
+          body.event_type === "SignalReceived" &&
+          body.signal_name === "agent_output" &&
+          body.run_id === runId
+      );
+
+    expect(outputSignal).toBeDefined();
+    expect(outputSignal).toMatchObject({
+      event_type: "SignalReceived",
+      run_id: runId,
+      signal_name: "agent_output",
+      span_count: 1,
+      workflow_id: workflowId,
+      workflow_type: workflowType
+    });
+
+    const spans = (outputSignal?.spans as Array<Record<string, unknown>> | undefined) ?? [];
+    expect(spans).toHaveLength(1);
+    expect(spans[0]).toMatchObject({
+      name: "agent.openai.call",
+      request_body: JSON.stringify({
+        input: "hello",
+        model: "gpt-4.1"
+      }),
+      response_body: JSON.stringify({
+        model: "gpt-4.1",
+        usage: {
+          input_tokens: 10,
+          output_tokens: 5
+        }
+      }),
+      semantic_type: "llm_completion"
     });
   });
 
@@ -312,7 +470,7 @@ describe("wrapAgent", () => {
           body.event_type === "WorkflowCompleted"
       );
 
-    expect(lifecycleEvents).toHaveLength(3);
+    expect(lifecycleEvents).toHaveLength(4);
     expect(lifecycleEvents[0]).toMatchObject({
       event_type: "WorkflowStarted",
       goal: "Build a calculator app",
@@ -324,10 +482,19 @@ describe("wrapAgent", () => {
       event_type: "SignalReceived",
       goal: "Build a calculator app",
       run_id: "agent-goal-from-prompt-run",
-      signal_args: ["Build a calculator app"],
+      signal_args: [
+        "Build a calculator app",
+        { goal: "Build a calculator app", prompt: "Build a calculator app" }
+      ],
       signal_name: "user_input"
     });
     expect(lifecycleEvents[2]).toMatchObject({
+      event_type: "SignalReceived",
+      goal: "Build a calculator app",
+      run_id: "agent-goal-from-prompt-run",
+      signal_name: "agent_output"
+    });
+    expect(lifecycleEvents[3]).toMatchObject({
       event_type: "WorkflowCompleted",
       goal: "Build a calculator app",
       run_id: "agent-goal-from-prompt-run"
@@ -508,6 +675,7 @@ describe("wrapAgent", () => {
       "SignalReceived",
       "ActivityStarted",
       "ActivityCompleted",
+      "SignalReceived",
       "SignalReceived",
       "WorkflowCompleted"
     ]);
@@ -1276,7 +1444,7 @@ describe("wrapAgent", () => {
         config,
         spanProcessor
       }
-    ) as typeof rawAgent;
+    );
 
     // Simulate runtime model update after wrapper construction.
     wrappedAgent.model = "openai/gpt-4o";

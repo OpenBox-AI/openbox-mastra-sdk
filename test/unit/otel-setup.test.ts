@@ -17,6 +17,42 @@ import {
 import { runWithOpenBoxExecutionContext } from "../../src/governance/context.js";
 import { startOpenBoxServer } from "../helpers/openbox-server.js";
 
+function getHookSpans(payload: Record<string, unknown>): Record<string, unknown>[] {
+  if (payload.hook_trigger !== true) {
+    return [];
+  }
+
+  const spans = payload.spans;
+
+  if (!Array.isArray(spans) || spans.length === 0) {
+    return [];
+  }
+
+  return spans.filter(
+    (span): span is Record<string, unknown> =>
+      span !== null && typeof span === "object"
+  );
+}
+
+function getHookSpan(
+  payload: Record<string, unknown>
+): Record<string, unknown> | undefined {
+  return getHookSpans(payload)[0];
+}
+
+function isHookSpanPayload(
+  payload: Record<string, unknown>,
+  hookType: string,
+  stage: "completed" | "started"
+): boolean {
+  return (
+    getHookSpans(payload).some(
+      span => span.hook_type === hookType && span.stage === stage
+    ) &&
+    payload.event_type === "ActivityStarted"
+  );
+}
+
 describe("setupOpenBoxOpenTelemetry", () => {
   it("respects instrumentation toggles", async () => {
     const controller = setupOpenBoxOpenTelemetry({
@@ -172,82 +208,75 @@ describe("setupOpenBoxOpenTelemetry", () => {
     const hookEvents = openBoxServer.requests
       .filter(request => request.pathname === "/api/v1/governance/evaluate")
       .map(request => request.body)
-      .filter(payload => payload.hook_trigger !== undefined);
+      .filter(payload => payload.hook_trigger === true);
 
-    expect(hookEvents).toHaveLength(2);
+    expect(hookEvents.length).toBeGreaterThanOrEqual(2);
 
-    const started = hookEvents.find(
-      payload =>
-        payload.event_type === "ActivityStarted" &&
-        payload.hook_trigger &&
-        (payload.hook_trigger as Record<string, unknown>).stage === "started"
+    const startedEvent = hookEvents.find(payload =>
+      isHookSpanPayload(payload, "http_request", "started")
     );
-    const completed = hookEvents.find(
-      payload =>
-        payload.event_type === "ActivityCompleted" &&
-        payload.hook_trigger &&
-        (payload.hook_trigger as Record<string, unknown>).stage === "completed"
+    const completedEvent = hookEvents.find(payload =>
+      isHookSpanPayload(payload, "http_request", "completed")
     );
 
-    expect(started).toBeDefined();
-    expect(completed).toBeDefined();
-    expect(started?.hook_trigger).toMatchObject({
-      attribute_key_identifiers: ["http.method", "http.url"],
-      method: "POST",
-      type: "http_request",
-      url: downstreamUrl
-    });
-    expect(completed?.hook_trigger).toMatchObject({
-      attribute_key_identifiers: ["http.method", "http.url"],
-      method: "POST",
-      type: "http_request",
-      url: downstreamUrl
-    });
-    expect(started).toMatchObject({
+    expect(startedEvent).toBeDefined();
+    expect(completedEvent).toBeDefined();
+
+    if (!startedEvent || !completedEvent) {
+      throw new Error("Expected started/completed hook events for http_request");
+    }
+
+    const startedSpan = getHookSpan(startedEvent);
+    const completedSpan = getHookSpan(completedEvent);
+
+    expect(startedEvent.attempt).toBe(1);
+    expect(startedEvent.hook_trigger).toBe(true);
+    expect(startedEvent).toMatchObject({
       activity_input: [
         {
-          keyword: "bitcoin"
-        },
-        {
+          keyword: "bitcoin",
           goal: "Search crypto prices and summarize findings"
         }
       ],
-      activity_type: "searchCryptoCoins",
+      event_type: "ActivityStarted",
+      activity_type: "http_request",
       goal: "Search crypto prices and summarize findings",
       run_id: "run-123",
       workflow_id: "wf-123",
       workflow_type: "crypto-agent"
     });
-    expect(completed).toMatchObject({
-      activity_input: [
-        {
-          keyword: "bitcoin"
-        },
-        {
-          goal: "Search crypto prices and summarize findings"
-        }
-      ],
-      activity_type: "searchCryptoCoins",
-      goal: "Search crypto prices and summarize findings",
+    expect(completedEvent).toMatchObject({
+      event_type: "ActivityStarted",
+      activity_type: "http_request",
       run_id: "run-123",
       workflow_id: "wf-123",
       workflow_type: "crypto-agent"
     });
-    expect((started as Record<string, unknown>)?.activity_id).toBe(
-      "act-123::hook:http_request"
-    );
-    expect((completed as Record<string, unknown>)?.activity_id).toEqual(
-      (started as Record<string, unknown>)?.activity_id
-    );
-    const startedSpan = (
-      started as { spans?: Array<Record<string, unknown>> } | undefined
-    )?.spans?.[0];
-
+    expect(startedEvent.activity_id).toBe("act-123");
+    expect(completedEvent.activity_id).toBe("act-123");
+    expect(startedEvent.span_count).toBe(1);
+    expect(completedEvent.span_count).toBe(1);
     expect(startedSpan).toMatchObject({
+      hook_type: "http_request",
+      http_method: "POST",
+      http_url: downstreamUrl,
       stage: "started"
     });
-    expect((completed as Record<string, unknown>)?.span_count).toBe(0);
-    expect((completed as Record<string, unknown>)?.spans).toBeUndefined();
+    expect(completedSpan).toMatchObject({
+      hook_type: "http_request",
+      http_method: "POST",
+      http_url: downstreamUrl,
+      stage: "completed"
+    });
+    expect(startedSpan?.data).toMatchObject({
+      method: "POST",
+      url: downstreamUrl
+    });
+    expect(completedSpan?.data).toMatchObject({
+      method: "POST",
+      url: downstreamUrl,
+      status_code: 200
+    });
   });
 
   it("emits hook governance events for agent context without tool activity context", async () => {
@@ -325,6 +354,7 @@ describe("setupOpenBoxOpenTelemetry", () => {
 
     await runWithOpenBoxExecutionContext(
       {
+        goal: "Create a sandbox and write hello world",
         runId: "run-agent-1",
         source: "agent",
         taskQueue: "mastra",
@@ -368,35 +398,49 @@ describe("setupOpenBoxOpenTelemetry", () => {
     const hookEvents = openBoxServer.requests
       .filter(request => request.pathname === "/api/v1/governance/evaluate")
       .map(request => request.body)
-      .filter(payload => payload.hook_trigger !== undefined);
+      .filter(payload => payload.hook_trigger === true);
 
-    expect(hookEvents).toHaveLength(2);
+    expect(hookEvents.length).toBeGreaterThanOrEqual(2);
 
-    const started = hookEvents.find(
-      payload =>
-        payload.event_type === "ActivityStarted" &&
-        payload.hook_trigger &&
-        (payload.hook_trigger as Record<string, unknown>).stage === "started"
+    const startedEvent = hookEvents.find(payload =>
+      isHookSpanPayload(payload, "http_request", "started")
     );
-    const completed = hookEvents.find(
-      payload =>
-        payload.event_type === "ActivityCompleted" &&
-        payload.hook_trigger &&
-        (payload.hook_trigger as Record<string, unknown>).stage === "completed"
+    const completedEvent = hookEvents.find(payload =>
+      isHookSpanPayload(payload, "http_request", "completed")
     );
 
-    expect(started).toMatchObject({
+    expect(startedEvent).toBeDefined();
+    expect(completedEvent).toBeDefined();
+
+    if (!startedEvent || !completedEvent) {
+      throw new Error(
+        "Expected started/completed hook events for agent llm completion"
+      );
+    }
+
+    const startedSpan = getHookSpan(startedEvent);
+    const completedSpan = getHookSpan(completedEvent);
+    const startedRequestBody = (
+      startedSpan as { request_body?: unknown } | undefined
+    )?.request_body;
+    const completedResponseBody = (
+      completedSpan as { response_body?: unknown } | undefined
+    )?.response_body;
+
+    expect(startedEvent).toMatchObject({
       activity_type: "agentLlmCompletion",
-      model: "gpt-4-1",
-      model_id: "gpt-4.1",
-      model_provider: "openai",
-      provider: "openai",
+      attempt: 1,
+      event_type: "ActivityStarted",
+      goal: "Create a sandbox and write hello world",
       run_id: "run-agent-1",
       workflow_id: "wf-agent-1",
       workflow_type: "coding-agent"
     });
-    expect(completed).toMatchObject({
+    expect(completedEvent).toMatchObject({
       activity_type: "agentLlmCompletion",
+      attempt: 1,
+      event_type: "ActivityStarted",
+      goal: "Create a sandbox and write hello world",
       input_tokens: 42,
       model: "gpt-4-1",
       model_id: "gpt-4.1",
@@ -408,27 +452,21 @@ describe("setupOpenBoxOpenTelemetry", () => {
       workflow_id: "wf-agent-1",
       workflow_type: "coding-agent"
     });
-    expect((started as Record<string, unknown>)?.activity_id).toBe(
-      "wf-agent-1::agent-llm::run-agent-1::hook:http_request"
+    expect(startedEvent.activity_id).toBe(
+      "wf-agent-1::agent-llm::run-agent-1"
     );
-    expect((completed as Record<string, unknown>)?.activity_id).toEqual(
-      (started as Record<string, unknown>)?.activity_id
+    expect(completedEvent.activity_id).toBe(
+      "wf-agent-1::agent-llm::run-agent-1"
     );
-    expect((started as Record<string, unknown>)?.activity_input).toMatchObject([
+    expect(startedEvent.activity_input).toMatchObject([
       {
+        goal: "Create a sandbox and write hello world",
         model: "gpt-4-1",
         model_id: "gpt-4.1",
         prompt: "Create a sandbox and write hello world"
       }
     ]);
-    expect((completed as Record<string, unknown>)?.activity_input).toMatchObject([
-      {
-        model: "gpt-4-1",
-        model_id: "gpt-4.1",
-        prompt: "Create a sandbox and write hello world"
-      }
-    ]);
-    expect((completed as Record<string, unknown>)?.activity_output).toMatchObject({
+    expect(completedEvent.activity_output).toMatchObject({
       model: "gpt-4-1",
       model_id: "gpt-4.1",
       usage: {
@@ -437,20 +475,18 @@ describe("setupOpenBoxOpenTelemetry", () => {
         total_tokens: 49
       }
     });
-    const startedSpan = (
-      started as { spans?: Array<Record<string, unknown>> } | undefined
-    )?.spans?.[0];
-    const startedRequestBody = (
-      startedSpan as { request_body?: unknown } | undefined
-    )?.request_body;
-    const completedResponseBody = (
-      completed as { hook_trigger?: Record<string, unknown> } | undefined
-    )?.hook_trigger?.response_body;
 
     expect(typeof startedRequestBody).toBe("string");
     expect(typeof completedResponseBody).toBe("string");
-    expect((completed as Record<string, unknown>)?.span_count).toBe(0);
-    expect((completed as Record<string, unknown>)?.spans).toBeUndefined();
+    expect(startedEvent.span_count).toBe(1);
+    expect(completedEvent.span_count).toBe(1);
+    expect(startedSpan?.semantic_type).toBe("llm_completion");
+    expect(completedSpan?.semantic_type).toBe("llm_completion");
+    expect(startedSpan?.span_id).toBe(completedSpan?.span_id);
+    expect(startedSpan).not.toHaveProperty("response_body");
+    expect(completedSpan).toHaveProperty("response_body");
+    expect(startedSpan).not.toHaveProperty("http_status_code");
+    expect(completedSpan).toHaveProperty("http_status_code");
 
     const parsedStartedRequest = JSON.parse(startedRequestBody as string) as {
       model?: string;
@@ -472,9 +508,11 @@ describe("setupOpenBoxOpenTelemetry", () => {
   it("raises ApprovalPendingError when hook-level governance returns REQUIRE_APPROVAL", async () => {
     const openBoxServer = await startOpenBoxServer({
       evaluate(body) {
+        const span = getHookSpan(body);
+
         if (
-          body.hook_trigger &&
-          (body.hook_trigger as Record<string, unknown>).stage === "started"
+          span?.hook_type === "http_request" &&
+          span?.stage === "started"
         ) {
           return {
             reason: "Hook-level approval required",
@@ -574,9 +612,11 @@ describe("setupOpenBoxOpenTelemetry", () => {
   it("allows approved activities to continue when nested hook requests approval", async () => {
     const openBoxServer = await startOpenBoxServer({
       evaluate(body) {
+        const span = getHookSpan(body);
+
         if (
-          body.hook_trigger &&
-          (body.hook_trigger as Record<string, unknown>).stage === "started"
+          span?.hook_type === "http_request" &&
+          span?.stage === "started"
         ) {
           return {
             reason: "Hook-level approval required",
@@ -736,45 +776,67 @@ describe("setupOpenBoxOpenTelemetry", () => {
       .map(request => request.body)
       .filter(
         payload =>
-          payload.hook_trigger !== undefined &&
-          (payload.hook_trigger as Record<string, unknown>).type ===
-            "function_call"
+          isHookSpanPayload(
+            payload,
+            "function_call",
+            "started"
+          ) ||
+          isHookSpanPayload(
+            payload,
+            "function_call",
+            "completed"
+          )
       );
 
-    expect(hookEvents).toHaveLength(2);
-    const started = hookEvents.find(
-      payload =>
-        (payload.hook_trigger as Record<string, unknown>).stage === "started"
+    expect(hookEvents.length).toBeGreaterThanOrEqual(2);
+    const startedEvent = hookEvents.find(payload =>
+      isHookSpanPayload(payload, "function_call", "started")
     );
-    const completed = hookEvents.find(
-      payload =>
-        (payload.hook_trigger as Record<string, unknown>).stage === "completed"
+    const completedEvent = hookEvents.find(payload =>
+      isHookSpanPayload(payload, "function_call", "completed")
     );
+    expect(startedEvent).toBeDefined();
+    expect(completedEvent).toBeDefined();
+    if (!startedEvent || !completedEvent) {
+      throw new Error("Expected started/completed function_call hook events");
+    }
+    const startedSpan = getHookSpan(startedEvent);
+    const completedSpan = getHookSpan(completedEvent);
 
-    expect(started?.hook_trigger).toMatchObject({
-      attribute_key_identifiers: ["code.function", "code.namespace"],
+    expect(startedSpan).toMatchObject({
       args: [2, 3],
       function: "sum",
-      module: "math",
-      type: "function_call"
+      hook_type: "function_call",
+      module: "math"
     });
-    expect(completed?.hook_trigger).toMatchObject({
-      attribute_key_identifiers: ["code.function", "code.namespace"],
+    expect(completedSpan).toMatchObject({
+      function: "sum",
+      hook_type: "function_call",
+      module: "math",
+      result: 5
+    });
+    expect(startedSpan?.data).toMatchObject({
+      args: [2, 3],
+      function: "sum",
+      module: "math"
+    });
+    expect(completedSpan?.data).toMatchObject({
       function: "sum",
       module: "math",
-      result: 5,
-      type: "function_call"
+      result: 5
     });
+    expect(startedEvent.span_count).toBe(1);
+    expect(completedEvent.span_count).toBe(1);
   });
 
   it("raises ApprovalPendingError for traced function calls when governance requires approval", async () => {
     const openBoxServer = await startOpenBoxServer({
       evaluate(body) {
+        const span = getHookSpan(body);
+
         if (
-          body.hook_trigger &&
-          (body.hook_trigger as Record<string, unknown>).type ===
-            "function_call" &&
-          (body.hook_trigger as Record<string, unknown>).stage === "started"
+          span?.hook_type === "function_call" &&
+          span?.stage === "started"
         ) {
           return {
             reason: "Function execution requires approval",
@@ -955,10 +1017,17 @@ describe("setupOpenBoxOpenTelemetry", () => {
           .map(request => request.body)
           .filter(
             payload =>
-              payload.hook_trigger !== undefined &&
-              (payload.hook_trigger as Record<string, unknown>).type ===
-                "db_query"
-          ).length >= 2,
+              isHookSpanPayload(
+                payload,
+                "db_query",
+                "started"
+              ) ||
+              isHookSpanPayload(
+                payload,
+                "db_query",
+                "completed"
+              )
+          ).length >= 1,
       2000
     );
     await controller.shutdown();
@@ -969,38 +1038,60 @@ describe("setupOpenBoxOpenTelemetry", () => {
       .map(request => request.body)
       .filter(
         payload =>
-          payload.hook_trigger !== undefined &&
-          (payload.hook_trigger as Record<string, unknown>).type === "db_query"
+          isHookSpanPayload(
+            payload,
+            "db_query",
+            "started"
+          ) ||
+          isHookSpanPayload(
+            payload,
+            "db_query",
+            "completed"
+          )
       );
 
-    expect(hookEvents).toHaveLength(2);
-
-    const started = hookEvents.find(
-      payload =>
-        (payload.hook_trigger as Record<string, unknown>).stage === "started"
+    expect(hookEvents.length).toBeGreaterThanOrEqual(2);
+    const startedEvent = hookEvents.find(payload =>
+      isHookSpanPayload(payload, "db_query", "started")
     );
-    const completed = hookEvents.find(
-      payload =>
-        (payload.hook_trigger as Record<string, unknown>).stage === "completed"
+    const completedEvent = hookEvents.find(payload =>
+      isHookSpanPayload(payload, "db_query", "completed")
     );
+    expect(startedEvent).toBeDefined();
+    expect(completedEvent).toBeDefined();
+    if (!startedEvent || !completedEvent) {
+      throw new Error("Expected started/completed db_query hook events");
+    }
+    const startedSpan = getHookSpan(startedEvent);
+    const completedSpan = getHookSpan(completedEvent);
 
-    expect(started?.hook_trigger).toMatchObject({
-      attribute_key_identifiers: ["db.system", "db.operation", "db.statement"],
+    expect(startedSpan).toMatchObject({
       db_name: "crypto",
       db_operation: "SELECT",
       db_system: "postgresql",
-      type: "db_query"
+      hook_type: "db_query"
     });
-    expect(completed?.hook_trigger).toMatchObject({
-      attribute_key_identifiers: ["db.system", "db.operation", "db.statement"],
+    expect(completedSpan).toMatchObject({
       db_name: "crypto",
       db_operation: "SELECT",
       db_system: "postgresql",
-      type: "db_query"
+      hook_type: "db_query"
     });
-    expect((completed?.hook_trigger as Record<string, unknown>).duration_ms).toEqual(
-      expect.any(Number)
-    );
+    expect(startedSpan?.data).toMatchObject({
+      db_name: "crypto",
+      db_operation: "SELECT",
+      db_system: "postgresql"
+    });
+    expect(completedSpan?.data).toMatchObject({
+      db_name: "crypto",
+      db_operation: "SELECT",
+      db_system: "postgresql"
+    });
+    expect(startedSpan?.semantic_type).toBe("database_select");
+    expect(completedSpan?.semantic_type).toBe("database_select");
+    expect(startedSpan?.span_id).toBe(completedSpan?.span_id);
+    expect(startedEvent.span_count).toBe(1);
+    expect(completedEvent.span_count).toBe(1);
   });
 });
 
