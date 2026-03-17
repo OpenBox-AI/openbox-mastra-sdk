@@ -90,6 +90,7 @@ type SpanLike = Pick<
 export class OpenBoxSpanProcessor implements SpanProcessor {
   readonly #abortedActivities = new Map<string, string>();
   readonly #activityContext = new Map<string, Record<string, unknown>>();
+  readonly #agentSignalHookSpans = new Map<string, Array<Record<string, unknown>>>();
   readonly #bodyData = new Map<string, StoredSpanBody>();
   readonly #buffers = new Map<string, WorkflowSpanBuffer>();
   readonly #governedSpanIds = new Set<string>();
@@ -255,6 +256,7 @@ export class OpenBoxSpanProcessor implements SpanProcessor {
 
     const buffer = this.#buffers.get(activeKey);
     this.#buffers.delete(activeKey);
+    this.#agentSignalHookSpans.delete(activeKey);
     this.#removeRunKey(workflowId, activeKey);
     this.#updateActiveRunKey(workflowId);
 
@@ -274,6 +276,7 @@ export class OpenBoxSpanProcessor implements SpanProcessor {
     if (runKeys) {
       for (const runKey of runKeys) {
         this.#buffers.delete(runKey);
+        this.#agentSignalHookSpans.delete(runKey);
         this.#verdicts.delete(runKey);
       }
     }
@@ -336,6 +339,30 @@ export class OpenBoxSpanProcessor implements SpanProcessor {
     }
 
     this.#verdicts.delete(workflowId);
+  }
+
+  public appendAgentSignalHookSpan(
+    workflowId: string,
+    runId: string,
+    span: Record<string, unknown>
+  ): void {
+    const runKey = toWorkflowRunKey(workflowId, runId);
+    const existing = this.#agentSignalHookSpans.get(runKey) ?? [];
+
+    existing.push(cloneRecord(span));
+    this.#agentSignalHookSpans.set(runKey, existing);
+  }
+
+  public consumeAgentSignalHookSpans(
+    workflowId: string,
+    runId: string
+  ): Array<Record<string, unknown>> {
+    const runKey = toWorkflowRunKey(workflowId, runId);
+    const spans = this.#agentSignalHookSpans.get(runKey) ?? [];
+
+    this.#agentSignalHookSpans.delete(runKey);
+
+    return spans.map(span => cloneRecord(span));
   }
 
   public storeBody(spanId: number | string, body: StoredSpanBody): void {
@@ -649,6 +676,7 @@ export class OpenBoxSpanProcessor implements SpanProcessor {
     const runKey = toWorkflowRunKey(workflowId, runId);
     const buffer = this.#buffers.get(runKey);
     this.#buffers.delete(runKey);
+    this.#agentSignalHookSpans.delete(runKey);
     this.#removeRunKey(workflowId, runKey);
     this.#updateActiveRunKey(workflowId);
 
@@ -717,6 +745,14 @@ function toWorkflowRunKey(workflowId: string, runId: string): string {
 
 function toActivityKey(workflowId: string, activityId: string): string {
   return `${workflowId}::${activityId}`;
+}
+
+function cloneRecord(value: Record<string, unknown>): Record<string, unknown> {
+  try {
+    return structuredClone(value);
+  } catch {
+    return { ...value };
+  }
 }
 
 function formatHex(value: number, width: number): string {

@@ -2267,6 +2267,17 @@ function buildAgentOutputSignalSpans(
   workflowId: string,
   runId: string
 ): Array<Record<string, unknown>> {
+  const queuedHookSpans = options.spanProcessor.consumeAgentSignalHookSpans(
+    workflowId,
+    runId
+  );
+
+  if (queuedHookSpans.length > 0) {
+    return queuedHookSpans
+      .slice(-MAX_AGENT_OUTPUT_SIGNAL_SPANS)
+      .map(span => compactAgentSignalSpan(span));
+  }
+
   const workflowSpans = normalizeSpansForGovernance(
     options.spanProcessor.getBuffer(workflowId, runId)?.spans ?? []
   );
@@ -2287,8 +2298,14 @@ function buildAgentOutputSignalSpans(
     return [];
   }
 
+  const maxSourceSpanCount = Math.max(
+    1,
+    Math.floor(MAX_AGENT_OUTPUT_SIGNAL_SPANS / 2)
+  );
+
   return unsentSpans
-    .slice(-MAX_AGENT_OUTPUT_SIGNAL_SPANS)
+    .slice(-maxSourceSpanCount)
+    .flatMap(span => buildAgentOutputSignalSpanPhases(span))
     .map(span => compactAgentSignalSpan(span));
 }
 
@@ -2323,11 +2340,34 @@ function isCompletedLlmAlignmentSpan(span: Record<string, unknown>): boolean {
   const rawUrl = attributes["http.url"] ?? attributes["url.full"];
   const httpUrl = typeof rawUrl === "string" ? rawUrl.toLowerCase() : "";
 
-  return (
+  if (
     httpMethod === "POST" &&
     (httpUrl.includes("api.openai.com") ||
       httpUrl.includes("api.anthropic.com") ||
       httpUrl.includes("generativelanguage.googleapis.com"))
+  ) {
+    return true;
+  }
+
+  const requestBody = getStringField(span, "request_body", "requestBody");
+  const responseBody = getStringField(span, "response_body", "responseBody");
+
+  return (
+    httpMethod === "POST" &&
+    looksLikeLlmPayload(requestBody, responseBody)
+  );
+}
+
+function looksLikeLlmPayload(
+  requestBody: string | undefined,
+  responseBody: string | undefined
+): boolean {
+  return (
+    (typeof requestBody === "string" &&
+      extractModelIdFromBody(requestBody) !== undefined) ||
+    (typeof responseBody === "string" &&
+      (extractModelIdFromBody(responseBody) !== undefined ||
+        hasUsageInBody(responseBody)))
   );
 }
 
@@ -2353,6 +2393,43 @@ function compactAgentSignalSpan(
   }
 
   return compacted;
+}
+
+function buildAgentOutputSignalSpanPhases(
+  span: Record<string, unknown>
+): Array<Record<string, unknown>> {
+  const completedSpan = normalizeAgentOutputSignalSpan(span, "completed");
+  const startedSpan = normalizeAgentOutputSignalSpan(span, "started");
+
+  return [startedSpan, completedSpan];
+}
+
+function normalizeAgentOutputSignalSpan(
+  span: Record<string, unknown>,
+  stage: "completed" | "started"
+): Record<string, unknown> {
+  const normalized: Record<string, unknown> = {
+    ...span,
+    stage,
+    ...(typeof span.semantic_type !== "string" &&
+    typeof span.semanticType !== "string"
+      ? { semantic_type: "llm_completion" }
+      : {})
+  };
+
+  if (stage === "started") {
+    delete normalized.duration_ns;
+    delete normalized.durationNs;
+    delete normalized.end_time;
+    delete normalized.endTime;
+    delete normalized.response_body;
+    delete normalized.responseBody;
+    delete normalized.response_headers;
+    delete normalized.responseHeaders;
+    delete normalized.status;
+  }
+
+  return normalized;
 }
 
 function ensureAgentSpanBuffer(

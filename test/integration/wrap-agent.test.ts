@@ -1,3 +1,5 @@
+import { createServer } from "node:http";
+
 import { Agent } from "@mastra/core/agent";
 import { createTool } from "@mastra/core/tools";
 import { createMockModel } from "@mastra/core/test-utils/llm-mock";
@@ -282,7 +284,7 @@ describe("wrapAgent", () => {
     });
   });
 
-  it("attaches completed LLM spans to agent_output SignalReceived events", async () => {
+  it("attaches started and completed LLM spans to agent_output SignalReceived events", async () => {
     const server = await startOpenBoxServer({
       evaluate() {
         return { verdict: "allow" };
@@ -379,14 +381,23 @@ describe("wrapAgent", () => {
       event_type: "SignalReceived",
       run_id: runId,
       signal_name: "agent_output",
-      span_count: 1,
+      span_count: 2,
       workflow_id: workflowId,
       workflow_type: workflowType
     });
 
     const spans = (outputSignal?.spans as Array<Record<string, unknown>> | undefined) ?? [];
-    expect(spans).toHaveLength(1);
+    expect(spans).toHaveLength(2);
     expect(spans[0]).toMatchObject({
+      name: "agent.openai.call",
+      request_body: JSON.stringify({
+        input: "hello",
+        model: "gpt-4.1"
+      }),
+      semantic_type: "llm_completion",
+      stage: "started"
+    });
+    expect(spans[1]).toMatchObject({
       name: "agent.openai.call",
       request_body: JSON.stringify({
         input: "hello",
@@ -399,8 +410,188 @@ describe("wrapAgent", () => {
           output_tokens: 5
         }
       }),
-      semantic_type: "llm_completion"
+      semantic_type: "llm_completion",
+      stage: "completed"
     });
+    expect(spans[0]?.span_id).toBe(spans[1]?.span_id);
+    expect(spans[0]).not.toHaveProperty("response_body");
+  });
+
+  it("does not emit synthetic agentLlmCompletion activity events for agent-only HTTP model calls", async () => {
+    const server = await startOpenBoxServer({
+      evaluate() {
+        return { verdict: "allow" };
+      }
+    });
+    const downstream = createServer((request, response) => {
+      let body = "";
+
+      request.setEncoding("utf8");
+      request.on("data", chunk => {
+        body += chunk;
+      });
+      request.on("end", () => {
+        let model = "gpt-4.1";
+
+        try {
+          const parsed = JSON.parse(body) as { model?: unknown };
+
+          if (typeof parsed.model === "string" && parsed.model.trim().length > 0) {
+            model = parsed.model;
+          }
+        } catch {
+          // Ignore malformed request body in fixture.
+        }
+
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(
+          JSON.stringify({
+            model,
+            usage: {
+              input_tokens: 42,
+              output_tokens: 7,
+              total_tokens: 49
+            }
+          })
+        );
+      });
+    });
+
+    await new Promise<void>(resolve => {
+      downstream.listen(0, "127.0.0.1", () => resolve());
+    });
+
+    const address = downstream.address();
+
+    if (!address || typeof address === "string") {
+      throw new Error("Expected downstream server address");
+    }
+
+    const downstreamUrl = `http://127.0.0.1:${address.port}/responses`;
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_agent_http_hook_signal_only",
+      apiUrl: server.url,
+      validate: false
+    });
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+    const spanProcessor = new OpenBoxSpanProcessor();
+    const telemetry = setupOpenBoxOpenTelemetry({
+      captureHttpBodies: true,
+      governanceClient: client,
+      instrumentDatabases: false,
+      instrumentFileIo: false,
+      spanProcessor
+    });
+    const agent = wrapAgent(
+      {
+        id: "agent-http-hook-signal-only",
+        name: "Agent HTTP Hook Signal Only",
+        async generate(
+          _messages?: unknown,
+          _executionOptions?: Record<string, unknown>
+        ) {
+          const response = await fetch(downstreamUrl, {
+            body: JSON.stringify({
+              messages: [
+                {
+                  content: [
+                    {
+                      text: "Create hello world file",
+                      type: "text"
+                    }
+                  ],
+                  role: "user"
+                }
+              ],
+              model: "gpt-4.1"
+            }),
+            headers: {
+              "content-type": "application/json"
+            },
+            method: "POST"
+          });
+
+          await response.text();
+
+          return {
+            finishReason: "stop",
+            text: "ok"
+          };
+        }
+      },
+      {
+        client,
+        config,
+        spanProcessor
+      }
+    );
+
+    await agent.generate("Create hello world file", {
+      runId: "agent-http-hook-signal-only-run"
+    });
+
+    await telemetry.shutdown();
+    await server.close();
+    downstream.close();
+
+    const payloads = server.requests
+      .filter(request => request.pathname === "/api/v1/governance/evaluate")
+      .map(request => request.body);
+    const syntheticAgentActivities = payloads.filter(
+      body => body.event_type === "ActivityStarted" && body.activity_type === "agentLlmCompletion"
+    );
+    const outputSignal = payloads.find(
+      body =>
+        body.event_type === "SignalReceived" &&
+        body.signal_name === "agent_output" &&
+        body.run_id === "agent-http-hook-signal-only-run"
+    );
+
+    expect(syntheticAgentActivities).toHaveLength(0);
+    expect(outputSignal).toBeDefined();
+    expect(outputSignal).toMatchObject({
+      event_type: "SignalReceived",
+      run_id: "agent-http-hook-signal-only-run",
+      signal_name: "agent_output",
+      span_count: 2,
+      workflow_id: "agent:agent-http-hook-signal-only",
+      workflow_type: "agent-http-hook-signal-only"
+    });
+
+    const spans = (outputSignal?.spans as Array<Record<string, unknown>> | undefined) ?? [];
+    expect(spans).toHaveLength(2);
+    expect(spans[0]).toMatchObject({
+      semantic_type: "llm_completion",
+      stage: "started"
+    });
+    expect(spans[1]).toMatchObject({
+      semantic_type: "llm_completion",
+      stage: "completed"
+    });
+    expect(spans[0]?.span_id).toBe(spans[1]?.span_id);
+    expect(spans[0]).not.toHaveProperty("response_body");
+    const completedResponseBody = spans[1]?.response_body;
+    expect(typeof completedResponseBody).toBe("string");
+    const parsedCompletedResponse = JSON.parse(
+      completedResponseBody as string
+    ) as {
+      model?: string;
+      model_id?: string;
+      usage?: {
+        input_tokens?: number;
+        output_tokens?: number;
+        total_tokens?: number;
+      };
+    };
+    expect(parsedCompletedResponse.model_id).toBe("gpt-4.1");
+    expect(parsedCompletedResponse.usage?.input_tokens).toBe(42);
+    expect(parsedCompletedResponse.usage?.output_tokens).toBe(7);
+    expect(parsedCompletedResponse.usage?.total_tokens).toBe(49);
   });
 
   it("derives governance goal from latest user prompt for agent lifecycle events", async () => {

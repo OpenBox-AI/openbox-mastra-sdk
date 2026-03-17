@@ -1398,6 +1398,28 @@ async function evaluateHookGovernance(
     return;
   }
 
+  const hookSpan = enrichHookSpanForData(
+    cloneHookSpanPayload(input.span)
+  );
+  const hookSpanForPayload =
+    input.stage === "started"
+      ? ensureStartedHookSpan(hookSpan)
+      : ensureCompletedHookSpan(hookSpan);
+
+  // Agent runs already export LLM spans through wrapAgent signal/workflow
+  // telemetry. Emitting hook governance requests here would fabricate a
+  // synthetic parent activity (`agentLlmCompletion`) that OpenBox renders as a
+  // standalone activity row. Queue the hook span for the agent_output signal
+  // instead of evaluating it as a governance activity.
+  if (activityContext.syntheticAgentActivity) {
+    hookGovernance.spanProcessor.appendAgentSignalHookSpan(
+      activityContext.workflowId,
+      activityContext.runId,
+      hookSpanForPayload
+    );
+    return;
+  }
+
   const priorAbortReason = hookGovernance.spanProcessor.getActivityAbort(
     activityContext.workflowId,
     activityContext.activityId
@@ -1429,9 +1451,6 @@ async function evaluateHookGovernance(
   hookGovernance.spanProcessor.markGoverned(
     input.activeSpan.spanContext().spanId
   );
-  const hookSpan = enrichHookSpanForData(
-    cloneHookSpanPayload(input.span)
-  );
   const modelUsage = extractModelUsageFromHookSpan(hookSpan);
   const telemetryModelId = toTelemetryModelId(modelUsage.modelId);
   const hookType =
@@ -1442,10 +1461,6 @@ async function evaluateHookGovernance(
     activityContext.activityType,
     hookType
   );
-  const hookSpanForPayload =
-    input.stage === "started"
-      ? ensureStartedHookSpan(hookSpan)
-      : ensureCompletedHookSpan(hookSpan);
   // OpenBox core stores hook spans as updates on an existing parent
   // ActivityStarted governance event. Emitting a separate hook activity id or
   // a hook ActivityCompleted event causes OpenBox to create extra activity rows
@@ -2875,6 +2890,7 @@ function resolveActivityContext(
   attempt?: number;
   goal?: string;
   runId: string;
+  syntheticAgentActivity?: boolean;
   taskQueue: string;
   workflowId: string;
   workflowType: string;
@@ -2930,6 +2946,7 @@ function resolveActivityContext(
       activityType: "agentLlmCompletion",
       ...(executionContext.goal ? { goal: executionContext.goal } : {}),
       runId: executionContext.runId,
+      syntheticAgentActivity: true,
       taskQueue: executionContext.taskQueue ?? "mastra",
       workflowId: executionContext.workflowId,
       workflowType: executionContext.workflowType,

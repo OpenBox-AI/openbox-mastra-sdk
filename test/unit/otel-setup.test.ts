@@ -279,7 +279,7 @@ describe("setupOpenBoxOpenTelemetry", () => {
     });
   });
 
-  it("emits hook governance events for agent context without tool activity context", async () => {
+  it("does not emit synthetic hook governance events for agent context without tool activity context", async () => {
     const openBoxServer = await startOpenBoxServer({
       evaluate() {
         return { verdict: "allow" };
@@ -399,110 +399,7 @@ describe("setupOpenBoxOpenTelemetry", () => {
       .filter(request => request.pathname === "/api/v1/governance/evaluate")
       .map(request => request.body)
       .filter(payload => payload.hook_trigger === true);
-
-    expect(hookEvents.length).toBeGreaterThanOrEqual(2);
-
-    const startedEvent = hookEvents.find(payload =>
-      isHookSpanPayload(payload, "http_request", "started")
-    );
-    const completedEvent = hookEvents.find(payload =>
-      isHookSpanPayload(payload, "http_request", "completed")
-    );
-
-    expect(startedEvent).toBeDefined();
-    expect(completedEvent).toBeDefined();
-
-    if (!startedEvent || !completedEvent) {
-      throw new Error(
-        "Expected started/completed hook events for agent llm completion"
-      );
-    }
-
-    const startedSpan = getHookSpan(startedEvent);
-    const completedSpan = getHookSpan(completedEvent);
-    const startedRequestBody = (
-      startedSpan as { request_body?: unknown } | undefined
-    )?.request_body;
-    const completedResponseBody = (
-      completedSpan as { response_body?: unknown } | undefined
-    )?.response_body;
-
-    expect(startedEvent).toMatchObject({
-      activity_type: "agentLlmCompletion",
-      attempt: 1,
-      event_type: "ActivityStarted",
-      goal: "Create a sandbox and write hello world",
-      run_id: "run-agent-1",
-      workflow_id: "wf-agent-1",
-      workflow_type: "coding-agent"
-    });
-    expect(completedEvent).toMatchObject({
-      activity_type: "agentLlmCompletion",
-      attempt: 1,
-      event_type: "ActivityStarted",
-      goal: "Create a sandbox and write hello world",
-      input_tokens: 42,
-      model: "gpt-4-1",
-      model_id: "gpt-4.1",
-      model_provider: "openai",
-      output_tokens: 7,
-      provider: "openai",
-      run_id: "run-agent-1",
-      total_tokens: 49,
-      workflow_id: "wf-agent-1",
-      workflow_type: "coding-agent"
-    });
-    expect(startedEvent.activity_id).toBe(
-      "wf-agent-1::agent-llm::run-agent-1"
-    );
-    expect(completedEvent.activity_id).toBe(
-      "wf-agent-1::agent-llm::run-agent-1"
-    );
-    expect(startedEvent.activity_input).toMatchObject([
-      {
-        goal: "Create a sandbox and write hello world",
-        model: "gpt-4-1",
-        model_id: "gpt-4.1",
-        prompt: "Create a sandbox and write hello world"
-      }
-    ]);
-    expect(completedEvent.activity_output).toMatchObject({
-      model: "gpt-4-1",
-      model_id: "gpt-4.1",
-      usage: {
-        input_tokens: 42,
-        output_tokens: 7,
-        total_tokens: 49
-      }
-    });
-
-    expect(typeof startedRequestBody).toBe("string");
-    expect(typeof completedResponseBody).toBe("string");
-    expect(startedEvent.span_count).toBe(1);
-    expect(completedEvent.span_count).toBe(1);
-    expect(startedSpan?.semantic_type).toBe("llm_completion");
-    expect(completedSpan?.semantic_type).toBe("llm_completion");
-    expect(startedSpan?.span_id).toBe(completedSpan?.span_id);
-    expect(startedSpan).not.toHaveProperty("response_body");
-    expect(completedSpan).toHaveProperty("response_body");
-    expect(startedSpan).not.toHaveProperty("http_status_code");
-    expect(completedSpan).toHaveProperty("http_status_code");
-
-    const parsedStartedRequest = JSON.parse(startedRequestBody as string) as {
-      model?: string;
-      model_id?: string;
-    };
-    const parsedCompletedResponse = JSON.parse(
-      completedResponseBody as string
-    ) as {
-      model?: string;
-      model_id?: string;
-    };
-
-    expect(parsedStartedRequest.model).toBe("gpt-4-1");
-    expect(parsedStartedRequest.model_id).toBe("gpt-4.1");
-    expect(parsedCompletedResponse.model).toBe("gpt-4-1");
-    expect(parsedCompletedResponse.model_id).toBe("gpt-4.1");
+    expect(hookEvents).toHaveLength(0);
   });
 
   it("raises ApprovalPendingError when hook-level governance returns REQUIRE_APPROVAL", async () => {
