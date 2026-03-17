@@ -160,11 +160,9 @@ describe("setupOpenBoxOpenTelemetry", () => {
     );
     spanProcessor.setActivityContext("wf-123", "act-123", {
       activity_id: "act-123",
-      activity_input: [
-        {
-          keyword: "bitcoin"
-        }
-      ],
+      activity_input: {
+        keyword: "bitcoin"
+      },
       activity_type: "searchCryptoCoins",
       run_id: "run-123",
       workflow_id: "wf-123",

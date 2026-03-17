@@ -151,11 +151,9 @@ describe("wrapTool", () => {
       .map(request => request.body);
 
     expect(startedEvent).toMatchObject({
-      activity_input: [
-        {
-          prompt: "secret prompt"
-        }
-      ],
+      activity_input: {
+        prompt: "secret prompt"
+      },
       activity_type: "processPrompt",
       event_type: "ActivityStarted",
       run_id: "run-123",

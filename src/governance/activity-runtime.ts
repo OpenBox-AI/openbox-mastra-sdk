@@ -68,8 +68,8 @@ export async function executeGovernedActivity<TInput, TOutput>({
   type
 }: GovernedActivityOptions<TInput, TOutput>): Promise<TOutput | undefined> {
   const descriptor = resolveActivityDescriptor(type, runtimeContext);
-  const inputForEvent = appendGoalToActivityInput(
-    serializeActivityInputForEvent(input),
+  const startedInputForEvent = appendGoalToActivityInput(
+    serializeActivityInputForStartEvent(input),
     descriptor.goal
   );
   let inputForExecution = cloneValue(input);
@@ -88,7 +88,7 @@ export async function executeGovernedActivity<TInput, TOutput>({
     descriptor.activityId,
     {
       activity_id: descriptor.activityId,
-      activity_input: inputForEvent,
+      activity_input: startedInputForEvent,
       activity_type: descriptor.activityType,
       attempt: descriptor.attempt,
       ...(descriptor.goal ? { goal: descriptor.goal } : {}),
@@ -102,7 +102,7 @@ export async function executeGovernedActivity<TInput, TOutput>({
   const startVerdict = dependencies.config.sendActivityStartEvent
     ? await evaluateActivityEvent(dependencies, {
         activity_id: descriptor.activityId,
-        activity_input: inputForEvent,
+        activity_input: startedInputForEvent,
         activity_type: descriptor.activityType,
         attempt: descriptor.attempt,
         event_type: WorkflowEventType.ACTIVITY_STARTED,
@@ -264,7 +264,7 @@ export async function executeGovernedActivity<TInput, TOutput>({
 
           if (!wasAborted) {
             const completedInputForEvent = appendGoalToActivityInput(
-              serializeActivityInputForEvent(inputForExecution),
+              serializeActivityInputForCompletedEvent(inputForExecution),
               descriptor.goal
             );
             const completedActivityTypePayload =
@@ -523,7 +523,19 @@ export function normalizeSpansForGovernance(
   return spans.map(span => normalizeSpanForGovernance(span));
 }
 
-function serializeActivityInputForEvent(value: unknown): unknown[] {
+function serializeActivityInputForStartEvent(value: unknown): unknown {
+  const serialized = serializeValue(value);
+
+  if (serialized == null) {
+    return [];
+  }
+
+  return serialized;
+}
+
+// Guardrails need direct field access on ActivityStarted payloads, while the
+// current AGE service still expects ActivityCompleted.activity_input as a list.
+function serializeActivityInputForCompletedEvent(value: unknown): unknown[] {
   const serialized = serializeValue(value);
 
   if (serialized == null) {
@@ -534,9 +546,9 @@ function serializeActivityInputForEvent(value: unknown): unknown[] {
 }
 
 export function appendGoalToActivityInput(
-  activityInput: unknown[],
+  activityInput: unknown,
   goal: string | undefined
-): unknown[] {
+): unknown {
   if (!goal || goal.trim().length === 0) {
     return activityInput;
   }
@@ -547,24 +559,48 @@ export function appendGoalToActivityInput(
     return activityInput;
   }
 
-  if (activityInput.length === 0) {
+  if (Array.isArray(activityInput)) {
+    const inputItems = activityInput as unknown[];
+
+    if (inputItems.length === 0) {
+      return [{ goal: trimmedGoal }];
+    }
+
+    const [first, ...rest] = inputItems;
+
+    if (first && typeof first === "object" && !Array.isArray(first)) {
+      const firstRecord = first as Record<string, unknown>;
+      const existingGoal = firstRecord.goal;
+
+      if (typeof existingGoal === "string" && existingGoal.trim().length > 0) {
+        return inputItems;
+      }
+
+      return [{ ...firstRecord, goal: trimmedGoal }, ...rest];
+    }
+
+    return [...inputItems, { goal: trimmedGoal }];
+  }
+
+  if (activityInput === undefined || activityInput === null) {
     return [{ goal: trimmedGoal }];
   }
 
-  const [first, ...rest] = activityInput;
-
-  if (first && typeof first === "object" && !Array.isArray(first)) {
-    const firstRecord = first as Record<string, unknown>;
-    const existingGoal = firstRecord.goal;
+  if (activityInput && typeof activityInput === "object") {
+    const activityRecord = activityInput as Record<string, unknown>;
+    const existingGoal = activityRecord.goal;
 
     if (typeof existingGoal === "string" && existingGoal.trim().length > 0) {
       return activityInput;
     }
 
-    return [{ ...firstRecord, goal: trimmedGoal }, ...rest];
+    return {
+      ...activityRecord,
+      goal: trimmedGoal
+    };
   }
 
-  return [...activityInput, { goal: trimmedGoal }];
+  return [activityInput, { goal: trimmedGoal }];
 }
 
 function normalizeRedactedActivityInput(
