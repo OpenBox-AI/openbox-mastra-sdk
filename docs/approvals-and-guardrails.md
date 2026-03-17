@@ -1,32 +1,32 @@
 # Approvals And Guardrails
 
-This document explains how verdicts returned by OpenBox Core are enforced by the SDK.
+This document explains how OpenBox verdicts are enforced by the SDK and how guardrails behave in live runs.
 
 ## Verdicts
 
-The SDK understands five primary verdicts:
+The SDK understands these primary verdicts:
 
 | Verdict | Meaning | Runtime effect |
 | --- | --- | --- |
 | `allow` | continue normally | execution proceeds |
-| `constrain` | advisory or constrained continuation | execution proceeds, constraints are available in the response |
+| `constrain` | continue with advisory constraints | execution proceeds and constraints remain available in the response |
 | `require_approval` | human review required | execution suspends or polls for approval |
-| `block` | operation must not continue | execution throws a stop error |
+| `block` | operation must not continue | execution throws a stop-style error |
 | `halt` | workflow or agent run must stop | execution throws a halt error |
 
-Backward-compatible legacy action strings such as `continue`, `stop`, and `require-approval` are normalized into these verdicts.
+Legacy action strings such as `continue`, `stop`, and `require-approval` are normalized into these verdicts.
 
-## Boundary Event Enforcement
+## Enforcement Model
 
-The SDK applies verdicts at boundary events.
+The SDK enforces verdicts at boundary events.
 
 For governed activities:
 
 1. `ActivityStarted` is evaluated first
-2. guardrails may redact or reject input
-3. execution happens
+2. input-side guardrail handling may apply
+3. the underlying tool or step executes
 4. `ActivityCompleted` is evaluated
-5. guardrails may redact or reject output
+5. output-side guardrail handling may apply
 6. approval may be required on either side
 
 For workflows and agents:
@@ -35,11 +35,22 @@ For workflows and agents:
 - `WorkflowCompleted` can still be evaluated for policy and telemetry
 - `WorkflowFailed` records failure context
 
-## Guardrails
+## Important Live-Run Behavior
+
+In a standard OpenBox Core deployment, policy evaluates before guardrails for an event.
+
+Operational consequence:
+
+- if policy returns a non-`allow` verdict such as `require_approval`, `block`, or `halt`, guardrails for that event may not run
+- if you are testing a guardrail live and it does not fire, inspect the policy verdict first
+
+This is the most common reason a guardrail UI test passes while the live run still shows no guardrail result.
+
+## Guardrail Input And Output Handling
 
 OpenBox responses may contain `guardrails_result`.
 
-The SDK uses it in two ways:
+The SDK uses it in two ways.
 
 ### Input Redaction
 
@@ -48,7 +59,7 @@ If the response for `ActivityStarted` includes:
 - `guardrails_result.input_type = "activity_input"`
 - `guardrails_result.redacted_input`
 
-the SDK applies that redacted input before calling the underlying tool or step.
+the SDK applies the redacted input before calling the underlying tool or step.
 
 ### Output Redaction
 
@@ -63,24 +74,39 @@ the SDK applies that redacted output before returning it to the caller.
 
 If `guardrails_result.validation_passed` is `false`, the SDK throws `GuardrailsValidationError`.
 
-The error message is derived from the guardrail reasons when available.
+## Guardrail Field Selection Guidance
+
+For live activity guardrails, match against `ActivityStarted` fields whenever possible.
+
+Recommended field targets:
+
+| Activity type | Field to check | Example use |
+| --- | --- | --- |
+| `writeFile` | `input.content` | banned content or PII in file contents |
+| `writeFile` | `input.path` | path-based restrictions |
+| `runCommand` | `input.command` | banned shell commands |
+
+Important:
+
+- agent prompts are emitted as `SignalReceived(user_input)`, not as `ActivityStarted`
+- if your OpenBox deployment only evaluates guardrails on activity events, a `user_input` guardrail will not inspect agent prompts directly
 
 ## Human Approval Flow
 
 The approval path depends on where execution is happening.
 
-## Workflow-Backed Activity Execution
+### Workflow-Backed Activity Execution
 
 When a tool or step executes inside a workflow context and OpenBox returns `require_approval`:
 
-- the SDK creates an approval payload
-- the workflow suspends through Mastra suspend/resume
+- the SDK creates approval state
+- the workflow suspends through Mastra suspend or resume behavior
 - approval context is stored in the approval registry
-- later resume paths emit a `SignalReceived` event and poll approval state
+- later resume paths emit `SignalReceived` and poll approval status
 
 This is the preferred path for long-running human review.
 
-## Non-Workflow Activity Execution
+### Non-Workflow Activity Execution
 
 When there is no workflow suspend context available, the SDK polls approval inline.
 
@@ -99,7 +125,7 @@ While polling approval status:
 - `allow` marks the activity approved and execution continues
 - `block` or `halt` throws `ApprovalRejectedError`
 - expired approval throws `ApprovalExpiredError`
-- missing/temporary approval API failure retries with backoff until timeout
+- missing or temporary approval API failures retry with backoff until timeout
 
 ## Output-Time Approval
 
@@ -110,64 +136,28 @@ If `ActivityCompleted` returns `require_approval`, the SDK can:
 - suspend the workflow after execution and before returning output
 - or poll inline when no workflow suspension context exists
 
-This is useful when policy wants to review the actual output, not just the requested action.
+This is useful when policy wants to review actual output, not just the requested action.
 
 ## Agents And Approval
 
-Wrapped agents also participate in approval polling through their workflow-like lifecycle.
+Wrapped agents also participate in approval handling through their workflow-like lifecycle.
 
-Because agent runs emit signals such as `user_input`, `resume`, and `agent_output`, approval state can be resumed consistently across retries or resume calls.
+Because agent runs emit `user_input`, `resume`, and `agent_output`, approval state can be resumed consistently across retries or resume calls.
 
-## Error Types You Should Expect
-
-These are the main runtime errors surfaced by approval and guardrail enforcement:
+## Runtime Errors You Should Expect
 
 | Error | Meaning |
 | --- | --- |
-| `GovernanceHaltError` | OpenBox returned a stop verdict or fail-closed API failure was converted into a halt |
-| `GuardrailsValidationError` | guardrails validation failed |
-| `ApprovalPendingError` | approval is still pending or timed out in inline polling |
+| `GovernanceHaltError` | OpenBox returned a stop or halt verdict, or a fail-closed API failure was converted into a halt |
+| `GuardrailsValidationError` | guardrail validation failed |
+| `ApprovalPendingError` | approval is still pending or inline polling timed out |
 | `ApprovalRejectedError` | approval explicitly rejected the activity |
 | `ApprovalExpiredError` | approval expired before resolution |
 
-## Policy Design Recommendations
+## Production Recommendations
 
-To keep approval flows clean:
-
-1. require approval on business boundary events such as `ActivityStarted` and `ActivityCompleted`
-2. avoid requiring approval on internal hook-triggered telemetry unless intentionally needed
-3. use signal events for agent-specific review and monitoring
-
-If policy requires approval on both:
-
-- `writeFile` boundary events
-- hook-triggered `http_request` or `db_query` telemetry
-
-you can create duplicate approval requests for a single logical operation.
-
-## Example Approval Payload Shape
-
-When the SDK suspends a workflow for approval, it creates a payload similar to:
-
-```json
-{
-  "openbox": {
-    "activityId": "call_abc123",
-    "activityType": "writeFile",
-    "approvalId": "apr_123",
-    "reason": "Human approval required",
-    "requestedAt": "2026-03-17T12:00:00.000Z",
-    "runId": "run-123",
-    "workflowId": "agent:coding-agent",
-    "workflowType": "coding-agent"
-  }
-}
-```
-
-## Operational Guidance
-
-Recommended production behavior:
-
-- model approval as a real operator workflow, not just a transient UI interaction
-- do not suppress `resume` signals if you rely on approval traceability
-- log and surface `ApprovalExpiredError` distinctly from normal business failures
+1. Keep approval policy focused on business boundary events.
+2. Treat hook-triggered telemetry as internal by default.
+3. When testing guardrails live, make sure policy returns `allow` for that event.
+4. Use `ActivityStarted` field selectors for tool-input guardrails.
+5. Do not rely on `SignalReceived(user_input)` guardrails unless your OpenBox deployment explicitly supports guardrails on signals.

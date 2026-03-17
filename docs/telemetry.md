@@ -1,10 +1,10 @@
 # Telemetry
 
-This SDK uses OpenTelemetry internally, but it does not simply forward raw OTel spans to OpenBox. It captures, buffers, enriches, and normalizes spans into governance-ready payloads.
+This SDK uses OpenTelemetry internally, but it does not simply forward raw spans to OpenBox. It captures, buffers, enriches, and normalizes telemetry into governance-ready payloads.
 
-## What Gets Captured
+## What The SDK Captures
 
-## HTTP
+### HTTP
 
 Enabled by default through `httpCapture: true`.
 
@@ -12,9 +12,9 @@ The SDK installs:
 
 - Node HTTP instrumentation
 - Undici instrumentation
-- fetch patching for request/response body capture
+- fetch patching for request and response body capture
 
-In practice this covers:
+This covers:
 
 - `fetch`
 - Node `http` and `https`
@@ -30,13 +30,13 @@ Captured fields can include:
 - response body
 - status code
 
-Text-like content types are eligible for body capture. Binary payloads are not captured as text bodies.
+Only text-like content types are treated as body-capturable text. Binary payloads are not captured as text.
 
-## Databases
+### Databases
 
 Enabled by default through `instrumentDatabases: true`.
 
-Supported database library selectors:
+Supported selectors:
 
 - `pg`
 - `postgres`
@@ -51,9 +51,9 @@ Supported database library selectors:
 - `cassandra`
 - `tedious`
 
-If `dbLibraries` is omitted, the SDK enables all supported database instrumentations it can resolve.
+If `dbLibraries` is omitted, the SDK enables every supported DB instrumentation it can resolve.
 
-## File I/O
+### File I/O
 
 Disabled by default through `instrumentFileIo: false`.
 
@@ -67,7 +67,7 @@ When enabled, the SDK can emit spans for file operations such as:
 - writelines
 - close
 
-Default skip patterns include:
+Built-in skip patterns include:
 
 - `/dev/`
 - `/proc/`
@@ -79,9 +79,9 @@ Default skip patterns include:
 - `.so`
 - `.dylib`
 
-Override with `fileSkipPatterns` when using manual telemetry setup.
+Override them with `fileSkipPatterns` when you install telemetry manually.
 
-## Traced Functions
+### Traced Functions
 
 You can create explicit function spans with `traced()`:
 
@@ -112,10 +112,10 @@ Supported options:
 
 The SDK has two telemetry paths:
 
-1. buffered spans that are attached to later workflow or activity payloads
+1. buffered spans attached to later workflow, activity, or signal payloads
 2. hook-triggered governance payloads sent during execution
 
-Hook-triggered payloads are used for internal operational spans such as HTTP, DB, file, and traced function activity.
+Hook-triggered payloads are used for internal operational spans such as HTTP, DB, file, and traced-function activity.
 
 ## Hook Payload Characteristics
 
@@ -124,28 +124,28 @@ Hook payloads:
 - include `hook_trigger: true`
 - include normalized OpenBox spans under `spans`
 - carry one started or completed span phase per hook event
-- attach to an existing parent workflow/activity context
+- attach to an existing parent workflow, activity, or agent context
 
-For agent-only LLM traffic with no business activity parent:
+For agent-only LLM traffic with no separate business activity parent:
 
 - spans are queued
-- later emitted on `SignalReceived(agent_output)`
+- they are later emitted on `SignalReceived(agent_output)`
 
-## Privacy Design
+## Privacy Boundary
 
 Bodies and headers are not stored as ordinary OTel span attributes. Instead:
 
 1. the SDK captures them into its internal span processor
 2. the SDK merges them into governance payloads when required
-3. external OTel exporters are not relied on to carry sensitive HTTP bodies
+3. generic OTel exporters are not relied on to carry those bodies
 
-This is a deliberate boundary between observability for OpenBox governance and generic distributed tracing infrastructure.
+This keeps OpenBox-specific governance context separate from generic tracing infrastructure.
 
 ## Ignored URLs
 
-Always ignore your OpenBox Core URL so the SDK does not govern its own governance requests.
+Always ignore URLs that should not be governed. At minimum, ignore your OpenBox Core URL.
 
-`withOpenBox()` does this automatically by adding `apiUrl` to ignored URLs during telemetry setup.
+`withOpenBox()` already does this automatically by adding `apiUrl` to the ignored URL set.
 
 If you install telemetry manually, do the same:
 
@@ -159,7 +159,7 @@ const telemetry = setupOpenBoxOpenTelemetry({
 
 ## Payload Budgeting
 
-Agent `WorkflowCompleted` payloads can become large because they may include:
+Agent `WorkflowCompleted` payloads can grow large because they may include:
 
 - workflow output
 - model metadata
@@ -168,42 +168,29 @@ Agent `WorkflowCompleted` payloads can become large because they may include:
 
 The SDK handles this by attempting progressively smaller payloads:
 
-1. full telemetry payload
+1. full payload
 2. compact payload
 3. ultra-minimal payload
 
-The budget threshold is controlled by `maxEvaluatePayloadBytes`.
-
-This fallback logic is especially important for agent runs with large outputs or rich LLM/tool telemetry.
-
-## Telemetry Controller Lifecycle
-
-`setupOpenBoxOpenTelemetry()` returns:
-
-- active instrumentations
-- tracer provider
-- `shutdown()`
-
-Because the SDK maintains one active controller at a time, initialize it once during process bootstrap unless you explicitly want to replace the prior controller.
+The threshold is controlled by `maxEvaluatePayloadBytes`.
 
 ## Operational Recommendations
 
-Recommended defaults:
-
-- keep `httpCapture` enabled
-- keep `instrumentDatabases` enabled
-- enable `instrumentFileIo` only when you actually need file telemetry
-- keep `ignoredUrls` aligned with internal service endpoints that should not be governed
+- Keep `httpCapture` enabled unless payload sensitivity or volume makes that unacceptable.
+- Keep `instrumentDatabases` enabled in most environments.
+- Enable `instrumentFileIo` only when you need file-governance visibility.
+- Keep `ignoredUrls` aligned with internal service endpoints that should not be governed.
+- Do not initialize telemetry twice in the same process unless you intentionally want to replace the active controller.
 
 ## Common Policy Interaction
 
-If policy treats hook-triggered telemetry as separate user actions, you can see:
+If policy treats hook-triggered telemetry as a second user action, you can see:
 
-- duplicate approval requests
-- noisy `http_request` or `db_query` activity rows
+- duplicate approvals
+- noisy `http_request`, `db_query`, `file_operation`, or `function_call` rows
 - approval loops while a parent activity is already pending approval
 
 Recommended policy behavior:
 
 - govern workflow and activity boundary events
-- treat hook-triggered payloads as internal telemetry unless explicitly required
+- treat hook-triggered payloads as internal telemetry unless you have a specific reason to gate them directly

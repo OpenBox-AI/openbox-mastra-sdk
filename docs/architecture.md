@@ -1,231 +1,186 @@
 # Architecture
 
-This document describes how the SDK is structured internally so that production integrations can reason about behavior, ownership, and operational tradeoffs.
+This document explains how the SDK is structured so you can reason about deployment behavior, ownership, and operational tradeoffs.
 
-## High-Level Architecture
+## Design Goals
+
+The SDK is built around four goals:
+
+1. keep governance decisions at clear business boundaries
+2. attach operational telemetry to those boundaries without building a custom tracing layer
+3. preserve approval state across workflow and agent resume paths
+4. make the default integration path safe enough for production bootstrap
+
+## High-Level Layout
 
 ```text
-Mastra Application
-├─ Tools
-├─ Workflows
-└─ Agents
-        │
-        ▼
+Mastra application
+|- tools
+|- workflows
+`- agents
+    |
+    v
 OpenBox Mastra SDK
-├─ Mastra wrappers
-│  ├─ wrapTool()
-│  ├─ wrapWorkflow()
-│  ├─ wrapAgent()
-│  └─ withOpenBox()
-├─ Governance runtime
-│  ├─ OpenBoxClient
-│  ├─ config parsing
-│  └─ approval registry
-├─ Telemetry runtime
-│  ├─ OpenBoxSpanProcessor
-│  ├─ OpenTelemetry instrumentation
-│  └─ hook-governance bridge
-└─ Type surface
-   ├─ verdicts
-   ├─ guardrails
-   ├─ event types
-   └─ errors
-        │
-        ▼
-OpenBox Core API
-├─ /api/v1/auth/validate
-├─ /api/v1/governance/evaluate
-└─ /api/v1/governance/approval
+|- Mastra wrappers
+|  |- wrapTool()
+|  |- wrapWorkflow()
+|  |- wrapAgent()
+|  `- withOpenBox()
+|- Governance runtime
+|  |- OpenBoxClient
+|  |- config parsing
+|  `- approval registry
+|- Telemetry runtime
+|  |- OpenBoxSpanProcessor
+|  |- OpenTelemetry instrumentation
+|  `- hook-governance bridge
+`- Public type surface
+    |- verdicts
+    |- guardrails
+    |- workflow events
+    `- runtime errors
+    |
+    v
+OpenBox Core
+|- /api/v1/auth/validate
+|- /api/v1/governance/evaluate
+`- /api/v1/governance/approval
 ```
 
-## Main Components
+## Main Runtime Components
 
-## `withOpenBox()`
+### `withOpenBox()`
 
 Responsibilities:
 
-- create runtime objects
+- create the OpenBox runtime
 - install process-wide telemetry
 - patch current and future Mastra registries
-- expose the runtime for shutdown and diagnostics
+- expose a runtime handle for shutdown and diagnostics
 
-Why it exists:
+Operational implication:
 
-- most applications want one OpenBox runtime per Mastra process
-- startup should be deterministic and centralized
-- patching future registrations prevents drift after bootstrap
+- one governed Mastra process should normally have one active OpenBox runtime
 
-## `OpenBoxClient`
+### `OpenBoxClient`
 
 Responsibilities:
 
-- validate API key
-- send governance evaluate payloads
+- validate the API key
+- send evaluate requests
 - poll approval status
 - apply retry and timeout policy
-- normalize evaluate payloads before sending
+- summarize debug logging when `OPENBOX_DEBUG=true`
 
-Notable behavior:
+Operational implication:
 
-- evaluate retries are bounded and exponential
-- debug logs are summarized, not full raw payload dumps
-- `fail_open` returns `null` on API failure instead of throwing
+- API failure behavior is controlled centrally through `onApiError`
 
-## `OpenBoxSpanProcessor`
+### `OpenBoxSpanProcessor`
 
 Responsibilities:
 
-- buffer spans per workflow and run
-- associate traces with workflow and activity context
-- hold captured bodies and headers until governance payload assembly
-- maintain hook-related runtime state used by approvals and agent signals
+- buffer spans by workflow and run
+- associate child telemetry with parent activity or workflow context
+- hold captured HTTP bodies and headers until governance payload assembly
+- queue agent-only LLM telemetry until the `agent_output` signal is emitted
 
-Why buffering exists:
+Operational implication:
 
-- OpenBox governance payloads need enriched spans, not raw exported OTel spans
-- HTTP bodies and headers should not live on ordinary OTel span attributes
-- parent activity context must be recoverable when child spans complete later
+- telemetry is enriched inside the SDK before it becomes an OpenBox governance payload
 
-## Telemetry Setup
-
-`setupOpenBoxOpenTelemetry()` installs:
-
-- HTTP instrumentation
-- optional database instrumentation
-- optional file I/O instrumentation
-- fetch patching for request/response body capture
-- hook-governance evaluation when a governance client is supplied
-
-Operational constraint:
-
-- the SDK maintains one active telemetry controller per process
-- re-running telemetry setup tears down the previously active one
-
-## Mastra Wrapper Layer
-
-## Tool Wrapper
-
-`wrapTool()` routes a tool through `executeGovernedActivity()`.
-
-That path:
-
-1. resolves activity identity and workflow context
-2. emits `ActivityStarted` if enabled
-3. applies guardrail redaction or validation
-4. executes the underlying tool in a traced activity span
-5. collects child telemetry
-6. emits `ActivityCompleted`
-7. enforces verdicts and approval flow
-
-## Workflow Wrapper
-
-`wrapWorkflow()` governs:
-
-- workflow lifecycle
-- workflow resumes
-- non-tool steps
-
-Workflow wrapper responsibilities:
-
-- emit `WorkflowStarted`, `WorkflowCompleted`, `WorkflowFailed`
-- emit `SignalReceived` on resume
-- wrap step execution through `executeGovernedActivity()`
-
-Tool component steps are intentionally not double-wrapped.
-
-## Agent Wrapper
-
-`wrapAgent()` models an agent run as a workflow-like entity.
+### Approval Registry
 
 Responsibilities:
 
-- emit workflow lifecycle events for the agent run
-- emit `user_input`, `resume`, and `agent_output` signals
-- infer and propagate agent `goal`
-- route agent-only LLM spans into the `agent_output` signal instead of fabricating a separate business activity
-- compact large `WorkflowCompleted` payloads to respect payload budgets
+- track approval state across resume paths
+- keep workflow-backed approval flows coherent
+- prevent approval handling from being tied only to a single stack frame
 
-## Approval Registry
+Operational implication:
 
-Approval state is maintained separately from OpenBox Core responses so the SDK can:
+- approval state is runtime control data, not a persistence layer
 
-- suspend and resume workflows correctly
-- avoid duplicate approval loops for nested hook telemetry
-- remember activity approval state across retries or resumes
+## Boundary And Telemetry Model
 
-This registry is part of runtime control flow, not a persistence layer.
+The SDK distinguishes between two kinds of data:
 
-## Event Flow
+- business boundary events such as `ActivityStarted`, `ActivityCompleted`, and workflow lifecycle events
+- internal operational telemetry such as HTTP, database, file, and traced-function spans
 
-## Tool Or Step Flow
+This distinction matters because:
 
-```text
-wrapped activity starts
-→ ActivityStarted evaluate
-→ possible guardrails or approval requirement
-→ underlying execution runs
-→ HTTP/DB/file/function spans are captured
-→ ActivityCompleted evaluate
-→ possible output redaction or approval requirement
-→ return or suspend
-```
+- policy is usually easiest to reason about at business boundaries
+- hook-triggered telemetry can be noisy if treated as a second user action
+- approvals become harder to operate if both layers are governed the same way
 
-## Workflow Flow
+## Execution Flows
+
+### Tool Or Step Execution
 
 ```text
-workflow start
-→ WorkflowStarted
-→ governed steps execute
-→ optional SignalReceived on resume
-→ WorkflowCompleted or WorkflowFailed
+boundary starts
+-> ActivityStarted
+-> verdict and guardrail handling
+-> underlying execution
+-> telemetry capture during execution
+-> ActivityCompleted
+-> output verdict and guardrail handling
+-> return or suspend
 ```
 
-## Agent Flow
+### Workflow Execution
 
 ```text
-agent generate/stream starts
-→ WorkflowStarted
-→ SignalReceived(user_input)
-→ underlying agent execution
-→ LLM and hook spans buffered
-→ SignalReceived(agent_output) with spans
-→ WorkflowCompleted or WorkflowFailed
+workflow starts
+-> WorkflowStarted
+-> governed steps run
+-> optional SignalReceived on resume
+-> WorkflowCompleted or WorkflowFailed
 ```
 
-## Hook Telemetry Flow
+### Agent Execution
 
-Operational spans such as HTTP or DB work use a hook-governance path:
+```text
+agent run starts
+-> WorkflowStarted
+-> SignalReceived(user_input)
+-> underlying agent execution
+-> agent LLM and hook telemetry captured
+-> SignalReceived(agent_output)
+-> WorkflowCompleted or WorkflowFailed
+```
 
-1. the span is converted into a normalized OpenBox span payload
-2. the SDK attaches it to the current parent workflow/activity context
-3. the payload is marked with `hook_trigger: true`
-4. the span is sent as a governance event or queued for agent-output signal emission
+## Why Signals Matter
 
-For agent-only LLM activity without a real business activity parent:
+Signals are not just a workflow resume mechanism in this SDK. They also carry agent-specific lifecycle state.
 
-- the SDK queues the spans
-- `agent_output` emits them later
-- this avoids synthetic `agentLlmCompletion` business activity rows
+Production implications:
 
-## Data Ownership Boundaries
+- agent prompt input is emitted as `SignalReceived(user_input)`
+- agent output and agent-only LLM spans are emitted through `SignalReceived(agent_output)`
+- if you suppress or ignore those signals, you lose the main observability path for agent-level prompt and completion context
 
-| Data | Owned by |
-| --- | --- |
-| runtime config | `OpenBoxConfig` |
-| API transport | `OpenBoxClient` |
-| span buffering | `OpenBoxSpanProcessor` |
-| Mastra lifecycle interception | wrapper layer |
-| approval state | approval registry |
-| final policy decisions | OpenBox Core |
+## Telemetry Ownership
 
-## Failure Handling Model
+`setupOpenBoxOpenTelemetry()` manages one active telemetry controller per process.
 
-The SDK distinguishes between:
+Operational implications:
+
+- initializing telemetry twice replaces the previous controller
+- shutdown should happen during process termination
+- the OpenBox API URL should be ignored to avoid tracing and governing the SDK's own API traffic
+
+## Failure Model
+
+The SDK treats these as distinct classes of failure:
 
 - OpenBox API failure
-- governance stop verdict
-- approval pending / rejected / expired
-- guardrails validation failure
-- underlying tool/workflow/agent error
+- governance stop or halt verdict
+- approval pending, rejected, or expired
+- guardrail validation failure
+- underlying tool, workflow, or agent failure
 
-These are surfaced as distinct runtime errors so application code can reason about them intentionally. See [approvals-and-guardrails.md](./approvals-and-guardrails.md) and [api-reference.md](./api-reference.md).
+Those differences are preserved in the surfaced runtime errors so application code can respond intentionally.
+
+See [approvals-and-guardrails.md](./approvals-and-guardrails.md) for enforcement details and [troubleshooting.md](./troubleshooting.md) for common failure modes.

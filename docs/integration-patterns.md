@@ -2,13 +2,21 @@
 
 This SDK supports three integration patterns:
 
-1. zero-code Mastra patching with `withOpenBox()`
-2. selective wrapping with `wrapTool()`, `wrapWorkflow()`, and `wrapAgent()`
-3. telemetry-only installation with `setupOpenBoxOpenTelemetry()` plus optional `traced()`
+1. `withOpenBox()` for standard application bootstrap
+2. manual wrapping with `wrapTool()`, `wrapWorkflow()`, and `wrapAgent()`
+3. telemetry-only setup with `setupOpenBoxOpenTelemetry()` and optional `traced()`
 
-## 1. Recommended: `withOpenBox()`
+## Choose The Right Pattern
 
-Use `withOpenBox()` when you want the SDK to own runtime setup and patch the entire Mastra instance.
+| Pattern | Use it when |
+| --- | --- |
+| `withOpenBox()` | you want one production runtime to govern the whole Mastra instance |
+| manual wrappers | you need explicit startup order or selective adoption |
+| telemetry-only | you want OpenBox span capture without full Mastra wrapping |
+
+## `withOpenBox()`
+
+`withOpenBox()` is the recommended integration path for most applications.
 
 ```ts
 import { withOpenBox } from "@openbox-ai/openbox-mastra-sdk";
@@ -19,34 +27,21 @@ const governedMastra = await withOpenBox(mastra, {
 });
 ```
 
-### What `withOpenBox()` Wraps
+What it does:
 
-At initialization time:
-
-- current top-level tools returned by `mastra.listTools()`
-- current workflows returned by `mastra.listWorkflows()`
-- current agents returned by `mastra.listAgents()`
-
-After initialization:
-
-- future `mastra.addTool()` registrations
-- future `mastra.addWorkflow()` registrations
-- future `mastra.addAgent()` registrations
-- agent-local tool and workflow registries where Mastra exposes them
-
-### What `withOpenBox()` Creates
-
-- `OpenBoxClient`
-- parsed `OpenBoxConfig`
-- `OpenBoxSpanProcessor`
-- telemetry controller from `setupOpenBoxOpenTelemetry()`
-- a reusable runtime object accessible through `getOpenBoxRuntime()`
+- parses and validates configuration
+- creates an `OpenBoxClient`
+- creates an `OpenBoxSpanProcessor`
+- installs process-wide telemetry
+- wraps current top-level tools, workflows, and agents
+- patches future `addTool()`, `addWorkflow()`, and `addAgent()` calls
+- hydrates agent-local tool and workflow registries where Mastra exposes them
 
 ### Idempotency
 
 Calling `withOpenBox()` again on the same Mastra instance reuses the existing runtime instead of creating a second one.
 
-## 2. Passing An App Object Instead Of A Raw Mastra Instance
+### Accepted Targets
 
 `withOpenBox()` accepts either:
 
@@ -62,9 +57,9 @@ await withOpenBox({ mastra }, {
 });
 ```
 
-## 3. Manual Wrapping
+## Manual Wrapping
 
-Use manual wiring when you need finer control over startup order or only want to govern selected components.
+Use manual wiring when you need to control bootstrap order or govern only a subset of components.
 
 ```ts
 import {
@@ -122,13 +117,18 @@ const governedAgent = wrapAgent(agent, {
   spanProcessor
 });
 
-// On shutdown:
 await telemetry.shutdown();
 ```
 
-## 4. Telemetry-Only Installation
+Use this pattern when:
 
-If you want telemetry capture but not automatic Mastra patching, install the telemetry layer directly:
+- another subsystem owns telemetry bootstrap order
+- you only want to govern selected tools, workflows, or agents
+- you need a custom `OpenBoxClient` or `OpenBoxSpanProcessor`
+
+## Telemetry-Only Setup
+
+If you want telemetry capture without automatic Mastra patching, install the telemetry layer directly:
 
 ```ts
 import {
@@ -147,97 +147,68 @@ const spanProcessor = new OpenBoxSpanProcessor({
   ignoredUrlPrefixes: [process.env.OPENBOX_URL!]
 });
 
-setupOpenBoxOpenTelemetry({
+const telemetry = setupOpenBoxOpenTelemetry({
   governanceClient: client,
+  ignoredUrls: [process.env.OPENBOX_URL!],
   spanProcessor
 });
 
-const governedFn = traced(async function sendEmail(input: { to: string }) {
-  return { delivered: true, to: input.to };
-}, {
-  captureArgs: true,
-  captureResult: true,
-  module: "email"
-});
+const governedFn = traced(
+  async function sendEmail(input: { to: string }) {
+    return { delivered: true, to: input.to };
+  },
+  {
+    captureArgs: true,
+    captureResult: true,
+    module: "email"
+  }
+);
+
+await telemetry.shutdown();
 ```
 
 This pattern is useful when:
 
-- your orchestration layer is not entirely Mastra-managed
-- you need custom lifecycle emission around wrappers
-- you want function-level spans without full Mastra patching
+- orchestration is not fully Mastra-managed
+- you want function-level tracing without wrapping all Mastra boundaries
+- you intend to emit lifecycle events yourself
 
-## 5. Tools
+## Wrapper Behavior Summary
 
-`wrapTool()` wraps a Mastra tool so that:
+### `wrapTool()`
 
-- `ActivityStarted` is emitted before execution when enabled
-- verdicts and guardrails are applied before the underlying tool runs
-- HTTP/DB/file/function spans produced during execution are attached to the activity context
-- `ActivityCompleted` is emitted with serialized output and runtime metadata
-- `REQUIRE_APPROVAL` can suspend workflow-backed execution or poll inline
+`wrapTool()` adds:
 
-## 6. Workflows
+- `ActivityStarted` and `ActivityCompleted`
+- verdict enforcement
+- guardrail input and output handling
+- approval suspension or polling
+- telemetry association for work performed during the tool call
 
-`wrapWorkflow()` wraps:
+### `wrapWorkflow()`
 
-- workflow lifecycle methods such as `start()`, `resume()`, `stream()`, and `resumeStream()`
-- non-tool workflow steps
+`wrapWorkflow()` adds:
 
-Behavior:
+- `WorkflowStarted`, `WorkflowCompleted`, and `WorkflowFailed`
+- `SignalReceived` on resume
+- governed execution for non-tool workflow steps
 
-- emits `WorkflowStarted`, `WorkflowCompleted`, and `WorkflowFailed`
-- emits `SignalReceived` on workflow resume
-- wraps non-tool steps as governed activities
-- does not double-wrap tool component steps, because those are expected to be governed via tool wrapping
+Tool component steps are intentionally not double-wrapped.
 
-## 7. Agents
+### `wrapAgent()`
 
-`wrapAgent()` treats an agent run as a workflow-like governance unit.
+`wrapAgent()` models an agent run as a workflow-like unit and adds:
 
-Behavior:
+- workflow lifecycle events for the agent run
+- `SignalReceived` for `user_input`, `resume`, and `agent_output`
+- agent goal propagation
+- agent-only LLM spans routed through `agent_output`
 
-- assigns `workflow_id` as `agent:<agentIdOrName>`
-- emits `WorkflowStarted`, `WorkflowCompleted`, and `WorkflowFailed`
-- emits `SignalReceived` for:
-  - `user_input`
-  - `resume`
-  - `agent_output`
-- routes agent-only LLM spans into `agent_output` telemetry rather than standalone business activity rows
+## Bootstrap Guidance
 
-## 8. Goal Propagation For Agents
+For production services:
 
-The SDK includes `goal` on agent events when it can infer one.
-
-Goal resolution order:
-
-1. `OPENBOX_AGENT_GOAL`
-2. goal already associated with the current run
-3. the latest user prompt from the interaction payload
-4. `agent.getInstructions()`
-
-This matters if you rely on OpenBox goal alignment or drift monitoring.
-
-## 9. Process-Wide Telemetry Ownership
-
-`setupOpenBoxOpenTelemetry()` manages module-level global state for the SDK’s active telemetry controller. Re-initializing it replaces the previous active controller.
-
-Operational recommendation:
-
-- initialize telemetry once during process bootstrap
-- reuse the resulting runtime for all governed components in that process
-
-## 10. Shutdown Guidance
-
-If you call `withOpenBox()`, use:
-
-```ts
-await getOpenBoxRuntime(mastra)?.shutdown();
-```
-
-If you call `setupOpenBoxOpenTelemetry()` directly, keep the returned controller and shut it down yourself:
-
-```ts
-const telemetry = setupOpenBoxOpenTelemetry({ ... });
-await telemetry.shutdown();
-```
+1. initialize the SDK once during process startup
+2. keep a reference to the governed Mastra instance or runtime
+3. shut telemetry down during process termination
+4. avoid calling `setupOpenBoxOpenTelemetry()` multiple times in the same process unless you intentionally want to replace the active controller

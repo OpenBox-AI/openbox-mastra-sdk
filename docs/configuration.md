@@ -1,75 +1,94 @@
 # Configuration
 
-This document covers:
+This document covers runtime options, environment variables, parsing rules, defaults, and production recommendations.
 
-- `OpenBoxConfigInput`
-- environment variable mapping
-- runtime defaults
-- telemetry-specific options used by manual setup
-- production recommendations
+## How Configuration Is Resolved
+
+Configuration is resolved in this order:
+
+1. explicit options passed to `withOpenBox()` or `parseOpenBoxConfig()`
+2. environment variables
+3. SDK defaults for optional fields
+
+`apiUrl` and `apiKey` are always required from either code or environment.
 
 ## `OpenBoxConfigInput`
 
 The SDK parses configuration through `parseOpenBoxConfig()` and `withOpenBox()`.
 
-| Option | Type | Default | Description |
+| Option | Type | Default | Use it to |
 | --- | --- | --- | --- |
-| `apiUrl` | `string` | required | OpenBox Core base URL |
-| `apiKey` | `string` | required | OpenBox API key |
-| `evaluateMaxRetries` | `number` | `2` | Retries for `evaluate()` on retryable API failures |
-| `evaluateRetryBaseDelayMs` | `number` | `150` | Exponential backoff base delay for evaluate retries |
-| `governanceTimeout` | `number` | `30` | Request timeout in seconds for OpenBox API calls |
-| `hitlEnabled` | `boolean` | `true` | Enables approval polling / suspension behavior |
-| `httpCapture` | `boolean` | `true` | Capture text-like HTTP bodies and headers |
-| `instrumentDatabases` | `boolean` | `true` | Enable supported DB instrumentation |
-| `instrumentFileIo` | `boolean` | `false` | Enable file operation spans |
-| `maxEvaluatePayloadBytes` | `number` | `256000` | Soft payload budget used by compact fallback logic |
-| `onApiError` | `"fail_open" \| "fail_closed"` | `"fail_open"` | Continue or halt when OpenBox API calls fail |
-| `sendActivityStartEvent` | `boolean` | `true` | Emit boundary `ActivityStarted` events |
-| `sendStartEvent` | `boolean` | `true` | Emit boundary `WorkflowStarted` events |
-| `skipActivityTypes` | `Iterable<string>` | `["send_governance_event"]` | Skip matching governed activity types |
-| `skipHitlActivityTypes` | `Iterable<string>` | `["send_governance_event"]` | Parsed and stored for compatibility; not currently enforced by wrappers |
-| `skipSignals` | `Iterable<string>` | `[]` | Skip matching signal names |
-| `skipWorkflowTypes` | `Iterable<string>` | `[]` | Skip matching workflow or agent workflow types |
-| `validate` | `boolean` | `true` | Validate API key during startup |
+| `apiUrl` | `string` | required | point the SDK at OpenBox Core |
+| `apiKey` | `string` | required | authenticate evaluate and approval calls |
+| `evaluateMaxRetries` | `number` | `2` | retry transient evaluate failures |
+| `evaluateRetryBaseDelayMs` | `number` | `150` | control exponential retry backoff |
+| `governanceTimeout` | `number` | `30` | set request timeout in seconds |
+| `hitlEnabled` | `boolean` | `true` | enable approval suspension and polling behavior |
+| `httpCapture` | `boolean` | `true` | capture text HTTP bodies and headers |
+| `instrumentDatabases` | `boolean` | `true` | enable supported database instrumentations |
+| `instrumentFileIo` | `boolean` | `false` | enable file operation telemetry |
+| `maxEvaluatePayloadBytes` | `number` | `256000` | cap payload size before compact fallback logic applies |
+| `onApiError` | `"fail_open" \| "fail_closed"` | `"fail_open"` | decide whether OpenBox outages should halt execution |
+| `sendActivityStartEvent` | `boolean` | `true` | emit `ActivityStarted` |
+| `sendStartEvent` | `boolean` | `true` | emit `WorkflowStarted` |
+| `skipActivityTypes` | `Iterable<string>` | `["send_governance_event"]` | suppress matching activity types entirely |
+| `skipHitlActivityTypes` | `Iterable<string>` | `["send_governance_event"]` | retained for compatibility but not currently enforced by wrappers |
+| `skipSignals` | `Iterable<string>` | `[]` | suppress matching signal names |
+| `skipWorkflowTypes` | `Iterable<string>` | `[]` | suppress matching workflow or agent workflow types |
+| `validate` | `boolean` | `true` | validate the API key at startup |
 
 ## Environment Variables
 
-These environment variables are read by `parseOpenBoxConfig()`:
+These environment variables are read during config parsing:
 
-| Environment variable | Maps to | Default |
+| Environment variable | Purpose | Default |
 | --- | --- | --- |
-| `OPENBOX_URL` | `apiUrl` | required |
-| `OPENBOX_API_KEY` | `apiKey` | required |
-| `OPENBOX_EVALUATE_MAX_RETRIES` | `evaluateMaxRetries` | `2` |
-| `OPENBOX_EVALUATE_RETRY_BASE_DELAY_MS` | `evaluateRetryBaseDelayMs` | `150` |
-| `OPENBOX_GOVERNANCE_TIMEOUT` | `governanceTimeout` | `30` |
-| `OPENBOX_HITL_ENABLED` | `hitlEnabled` | `true` |
-| `OPENBOX_HTTP_CAPTURE` | `httpCapture` | `true` |
-| `OPENBOX_INSTRUMENT_DATABASES` | `instrumentDatabases` | `true` |
-| `OPENBOX_INSTRUMENT_FILE_IO` | `instrumentFileIo` | `false` |
-| `OPENBOX_MAX_EVALUATE_PAYLOAD_BYTES` | `maxEvaluatePayloadBytes` | `256000` |
-| `OPENBOX_GOVERNANCE_POLICY` | `onApiError` | `"fail_open"` |
-| `OPENBOX_SEND_ACTIVITY_START_EVENT` | `sendActivityStartEvent` | `true` |
-| `OPENBOX_SEND_START_EVENT` | `sendStartEvent` | `true` |
-| `OPENBOX_SKIP_ACTIVITY_TYPES` | `skipActivityTypes` | `send_governance_event` |
-| `OPENBOX_SKIP_HITL_ACTIVITY_TYPES` | `skipHitlActivityTypes` | `send_governance_event` |
-| `OPENBOX_SKIP_SIGNALS` | `skipSignals` | empty |
-| `OPENBOX_SKIP_WORKFLOW_TYPES` | `skipWorkflowTypes` | empty |
-| `OPENBOX_VALIDATE` | `validate` | `true` |
+| `OPENBOX_URL` | OpenBox Core base URL | required |
+| `OPENBOX_API_KEY` | OpenBox API key | required |
+| `OPENBOX_EVALUATE_MAX_RETRIES` | evaluate retry count | `2` |
+| `OPENBOX_EVALUATE_RETRY_BASE_DELAY_MS` | evaluate retry base delay in milliseconds | `150` |
+| `OPENBOX_GOVERNANCE_TIMEOUT` | OpenBox API timeout in seconds | `30` |
+| `OPENBOX_HITL_ENABLED` | enable approval handling | `true` |
+| `OPENBOX_HTTP_CAPTURE` | capture text HTTP bodies and headers | `true` |
+| `OPENBOX_INSTRUMENT_DATABASES` | enable supported database instrumentation | `true` |
+| `OPENBOX_INSTRUMENT_FILE_IO` | enable file instrumentation | `false` |
+| `OPENBOX_MAX_EVALUATE_PAYLOAD_BYTES` | payload budget before compaction | `256000` |
+| `OPENBOX_GOVERNANCE_POLICY` | API failure policy: `fail_open` or `fail_closed` | `"fail_open"` |
+| `OPENBOX_SEND_ACTIVITY_START_EVENT` | emit `ActivityStarted` | `true` |
+| `OPENBOX_SEND_START_EVENT` | emit `WorkflowStarted` | `true` |
+| `OPENBOX_SKIP_ACTIVITY_TYPES` | comma-separated list of skipped activity types | `send_governance_event` |
+| `OPENBOX_SKIP_HITL_ACTIVITY_TYPES` | compatibility field for skipped approval activity types | `send_governance_event` |
+| `OPENBOX_SKIP_SIGNALS` | comma-separated list of skipped signals | empty |
+| `OPENBOX_SKIP_WORKFLOW_TYPES` | comma-separated list of skipped workflow types | empty |
+| `OPENBOX_VALIDATE` | validate the API key at startup | `true` |
 
-Additional environment variables used outside config parsing:
+Additional runtime flags used outside config parsing:
 
 | Environment variable | Purpose |
 | --- | --- |
-| `OPENBOX_DEBUG` | Enables summarized debug logs for evaluate requests, approval polling, and retries |
-| `OPENBOX_AGENT_GOAL` | Overrides inferred agent goal used in signal and workflow payloads |
+| `OPENBOX_DEBUG` | enable summarized debug logs for evaluate requests, retries, and approval polling |
+| `OPENBOX_AGENT_GOAL` | override the inferred agent goal included in agent payloads |
+
+## Parsing Rules
+
+Boolean environment variables accept:
+
+- `true`, `1`, `yes`
+- `false`, `0`, `no`
+
+CSV environment variables such as `OPENBOX_SKIP_ACTIVITY_TYPES` accept comma-separated values with surrounding whitespace trimmed.
+
+Example:
+
+```bash
+export OPENBOX_SKIP_ACTIVITY_TYPES="send_governance_event, healthCheck"
+```
 
 ## Activity Type Matching
 
-`skipActivityTypes` is matched against normalized activity types.
+`skipActivityTypes` is matched against normalized activity types. The runtime converts names to camelCase before sending them to OpenBox.
 
-The runtime converts activity names to camelCase. Examples:
+Examples:
 
 | Input | Emitted `activity_type` |
 | --- | --- |
@@ -78,9 +97,9 @@ The runtime converts activity names to camelCase. Examples:
 | `search_crypto_coins` | `searchCryptoCoins` |
 | `Search crypto coins` | `searchCryptoCoins` |
 
-Use the normalized form in `skipActivityTypes`.
+Use the emitted form in policy, UI filters, and skip lists.
 
-## Signal Names You Can Skip
+## Signals You Can Skip
 
 Signals emitted by the SDK include:
 
@@ -90,82 +109,84 @@ Signals emitted by the SDK include:
 | `resume` | workflow resumes and agent resume paths |
 | `agent_output` | agent completion signal carrying output and agent LLM spans |
 
-Use `skipSignals` to suppress any of them.
+If you skip `agent_output`, you also suppress the main signal path used for agent-only LLM telemetry.
 
 ## `onApiError`
 
-`onApiError` controls how the SDK reacts when the OpenBox API is unavailable.
+`onApiError` controls how the SDK reacts when OpenBox cannot be reached.
 
 ### `fail_open`
 
+Use this when service availability is more important than strict governance enforcement.
+
 Behavior:
 
-- governance API failures are treated as non-blocking
-- execution continues where possible
-- useful when availability is more important than strict enforcement
+- retryable OpenBox failures are retried first
+- once retries are exhausted, execution usually continues
+- no live verdict is enforced for the failed request
 
 ### `fail_closed`
 
+Use this when ungoverned execution is unacceptable.
+
 Behavior:
 
-- governance API failures are converted into blocking behavior
-- wrapped activities or workflows may halt instead of continuing
-- appropriate for environments where governance must be enforced strictly
+- retryable OpenBox failures are retried first
+- once retries are exhausted, execution is halted
+- wrapped activities or workflows can fail even if the underlying tool would otherwise succeed
 
-## Human Approval
+## Human Approval Behavior
 
-`hitlEnabled` controls approval handling for `REQUIRE_APPROVAL` verdicts.
+`hitlEnabled` controls approval handling for `require_approval` verdicts.
 
 When `hitlEnabled` is `true`:
 
-- workflow-backed tool and step execution can suspend via Mastra workflow suspend/resume
-- non-workflow executions fall back to inline approval polling
-- agents poll approval status when resuming governed runs
+- workflow-backed tools and steps can suspend through Mastra workflow resume paths
+- non-workflow activity execution falls back to inline approval polling
+- agent runs poll approval state when resuming governed flows
 
 When `hitlEnabled` is `false`:
 
-- the SDK does not run human approval flow logic
-- the boundary completed event still carries completion metadata, but approval handling is not performed
+- the SDK does not run approval suspension or inline approval polling
+- verdict handling still occurs, but approval-specific runtime behavior is disabled
 
 ## Telemetry Options For Manual Wiring
 
-If you use `setupOpenBoxOpenTelemetry()` directly, these options apply:
+If you call `setupOpenBoxOpenTelemetry()` directly, these options apply:
 
-| Option | Type | Default | Description |
+| Option | Type | Default | Use it to |
 | --- | --- | --- | --- |
-| `spanProcessor` | `OpenBoxSpanProcessor` | required | Active span processor used by the SDK |
-| `governanceClient` | `OpenBoxClient` | unset | Enables hook-triggered governance evaluation for captured spans |
-| `captureHttpBodies` | `boolean` | `true` | Capture text HTTP bodies and headers |
-| `dbLibraries` | `ReadonlySet<string>` | all supported | Limit DB instrumentation to selected libraries |
-| `ignoredUrls` | `string[]` | `[]` | Prevent telemetry capture for matching URL prefixes |
-| `instrumentDatabases` | `boolean` | `true` | Enable DB instrumentation |
-| `instrumentFileIo` | `boolean` | `false` | Enable file instrumentation |
-| `fileSkipPatterns` | `string[]` | built-in defaults | Skip matching file paths |
-| `onHookApiError` | `"fail_open" \| "fail_closed"` | client default | Error policy for hook-triggered evaluate calls |
+| `spanProcessor` | `OpenBoxSpanProcessor` | required | provide the active span buffer |
+| `governanceClient` | `OpenBoxClient` | unset | enable hook-triggered governance evaluation |
+| `captureHttpBodies` | `boolean` | `true` | capture text HTTP bodies and headers |
+| `dbLibraries` | `ReadonlySet<string>` | all supported | restrict DB instrumentation to selected libraries |
+| `ignoredUrls` | `string[]` | `[]` | prevent capture for selected URL prefixes |
+| `instrumentDatabases` | `boolean` | `true` | enable DB instrumentation |
+| `instrumentFileIo` | `boolean` | `false` | enable file instrumentation |
+| `fileSkipPatterns` | `string[]` | built-in defaults | skip selected file paths |
+| `onHookApiError` | `"fail_open" \| "fail_closed"` | client default | set API failure policy for hook-triggered evaluate calls |
 
-## Production Recommendations
-
-Recommended baseline:
+## Recommended Production Baseline
 
 | Setting | Recommended value | Why |
 | --- | --- | --- |
-| `validate` | `true` | Catch invalid URL or API key at startup |
-| `onApiError` | depends on environment | `fail_open` for availability-first, `fail_closed` for strict governance |
-| `httpCapture` | `true` unless payloads are highly sensitive | Required for rich policy and debugging context |
-| `instrumentDatabases` | `true` | Low-cost visibility for DB access patterns |
-| `instrumentFileIo` | `false` unless needed | File telemetry can be noisy and should be intentional |
-| `maxEvaluatePayloadBytes` | keep default initially | The SDK already compacts agent completion payloads when needed |
-| `skipSignals` | avoid skipping `agent_output` unless intentional | Agent LLM spans are delivered through this signal |
+| `validate` | `true` | catch invalid credentials or insecure URLs during startup |
+| `onApiError` | explicit per environment | avoid accidental fail-open or fail-closed behavior |
+| `httpCapture` | `true` unless payload sensitivity is prohibitive | preserve request context for policy and troubleshooting |
+| `instrumentDatabases` | `true` | low-friction visibility into database access |
+| `instrumentFileIo` | `false` unless you need file telemetry | reduce noise and sensitive-path exposure |
+| `maxEvaluatePayloadBytes` | default initially | agent payload compaction already uses this budget |
+| `skipSignals` | do not skip `agent_output` unless intentional | that signal carries agent output and agent LLM spans |
 
-## Compatibility Note: `skipHitlActivityTypes`
+## Known Limitation: `skipHitlActivityTypes`
 
-`skipHitlActivityTypes` is parsed into config and preserved in runtime state, but current Mastra wrappers do not consult it when deciding whether to enter approval handling.
+`skipHitlActivityTypes` is parsed into config and stored in runtime state, but current Mastra wrappers do not consult it when deciding whether to enter approval handling.
 
-Today, if you need to change approval behavior for specific operations, use:
+Today, if you need to change approval behavior for a subset of operations, do it with:
 
-- OpenBox policy rules
-- `skipActivityTypes` if you want to suppress those activities entirely
-- `skipSignals` for signal-level suppression
+- OpenBox policy
+- `skipActivityTypes` if the activity should not be emitted at all
+- `skipSignals` if the signal should not be emitted
 
 ## Example
 

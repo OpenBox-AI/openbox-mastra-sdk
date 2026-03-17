@@ -2,19 +2,40 @@
 
 This document summarizes the public API exported by `@openbox-ai/openbox-mastra-sdk`.
 
-It is not a generated API reference. It is an integration-focused reference describing the public surface and how each export is intended to be used.
+It is an integration-focused reference, not a generated type reference. Use it to decide which module to import from and which entrypoints the SDK expects you to use.
 
-## Root Exports
+## Recommended Imports
+
+Most applications should import from the package root:
+
+```ts
+import {
+  getOpenBoxRuntime,
+  withOpenBox
+} from "@openbox-ai/openbox-mastra-sdk";
+```
+
+Use subpath imports only when you want to make module ownership explicit:
+
+- `@openbox-ai/openbox-mastra-sdk/client`
+- `@openbox-ai/openbox-mastra-sdk/config`
+- `@openbox-ai/openbox-mastra-sdk/mastra`
+- `@openbox-ai/openbox-mastra-sdk/otel`
+- `@openbox-ai/openbox-mastra-sdk/span`
+- `@openbox-ai/openbox-mastra-sdk/types`
+
+The `./governance` subpath exists, but it does not currently expose a public API surface of its own.
+
+## Root Export Families
 
 The root module re-exports:
 
-- `./client`
-- `./config`
-- `./governance`
-- `./mastra`
-- `./otel`
-- `./span`
-- `./types`
+- client
+- config
+- mastra integration
+- telemetry
+- span processing
+- public types
 
 ## Client Module
 
@@ -52,7 +73,7 @@ Main methods:
 - `evaluate(payload): Promise<GovernanceVerdictResponse | null>`
 - `pollApproval(payload): Promise<ApprovalPollResponse | null>`
 
-Use this class when you want explicit control over transport and governance requests.
+Use this class when you need explicit control over transport, retries, or approval polling.
 
 ## Config Module
 
@@ -72,7 +93,7 @@ import {
 
 ### `interface OpenBoxConfigInput`
 
-User-supplied config surface. See [configuration.md](./configuration.md) for the full table.
+User-supplied config surface. See [configuration.md](./configuration.md) for the complete option table.
 
 ### `interface OpenBoxConfig`
 
@@ -82,7 +103,7 @@ Normalized runtime config with defaults applied and iterable fields converted to
 
 Parses:
 
-- explicit config object
+- explicit config options
 - environment variables
 
 Performs:
@@ -96,16 +117,16 @@ Performs:
 
 Parses config and, if validation is enabled, validates the API key against OpenBox Core.
 
-Useful when:
+Use it when:
 
 - you want config initialized before wiring wrappers
 - you want startup validation separate from `withOpenBox()`
 
-### `getOpenBoxConfig()` / `setOpenBoxConfig()`
+### `getOpenBoxConfig()` and `setOpenBoxConfig()`
 
 Access or override the global config singleton.
 
-Use sparingly. Prefer explicit runtime injection where possible.
+Use sparingly. Prefer explicit runtime injection where practical.
 
 ## Mastra Module
 
@@ -136,8 +157,9 @@ Wraps a Mastra tool in governed activity execution.
 Typical effects:
 
 - boundary activity events
-- guardrails
-- approvals
+- verdict enforcement
+- guardrail handling
+- approval handling
 - telemetry association
 
 ### `wrapWorkflow(workflow, options)`
@@ -146,7 +168,7 @@ Wraps workflow lifecycle and non-tool workflow steps.
 
 Typical effects:
 
-- workflow start/completion/failure events
+- workflow start, completion, and failure events
 - resume signal events
 - governed step execution
 
@@ -159,7 +181,7 @@ Typical effects:
 - workflow-like lifecycle events for the agent run
 - `user_input`, `resume`, and `agent_output` signals
 - agent goal propagation
-- agent LLM spans routed through signal telemetry
+- agent-only LLM spans routed through signal telemetry
 
 ### `interface WithOpenBoxOptions`
 
@@ -200,10 +222,10 @@ Creates runtime, patches Mastra, installs telemetry, and returns the same logica
 Returns the installed runtime when available. Use it for:
 
 - shutdown
-- access to the normalized config
+- access to normalized config
 - direct access to the client or span processor
 
-## OTel Module
+## Telemetry Module
 
 Import path:
 
@@ -238,13 +260,13 @@ Fields:
 
 ### `setupOpenBoxOpenTelemetry(options)`
 
-Installs the SDK’s process-wide telemetry layer.
+Installs the SDK's process-wide telemetry layer.
 
-Use this directly when:
+Use it directly when:
 
 - you are not using `withOpenBox()`
 - you need explicit bootstrap order
-- you only want telemetry, not full Mastra patching
+- you only want telemetry without full Mastra patching
 
 ### `interface OpenBoxTracedOptions`
 
@@ -262,7 +284,7 @@ Wraps an async function in a traced function span.
 
 Use it for:
 
-- custom operations outside standard tool/workflow boundaries
+- custom operations outside standard tool or workflow boundaries
 - explicitly named operational spans
 - additional policy-relevant function telemetry
 
@@ -276,13 +298,13 @@ import { OpenBoxSpanProcessor } from "@openbox-ai/openbox-mastra-sdk";
 
 ### `class OpenBoxSpanProcessor`
 
-Implements the OpenTelemetry `SpanProcessor` interface and manages the SDK’s enriched governance span buffer.
+Implements the OpenTelemetry `SpanProcessor` interface and manages the SDK's enriched governance span buffer.
 
 Typical usage:
 
 - pass it to `setupOpenBoxOpenTelemetry()`
 - reuse it across wrappers
-- let `withOpenBox()` create it for you unless you need manual control
+- let `withOpenBox()` create it unless you need manual control
 
 Exported companion types:
 
@@ -303,8 +325,8 @@ import {
   ApprovalPendingError,
   ApprovalRejectedError,
   GovernanceAPIError,
-  GovernanceHaltError,
   GovernanceVerdictResponse,
+  GovernanceHaltError,
   GuardrailsCheckResult,
   GuardrailsValidationError,
   OpenBoxAuthError,
@@ -318,81 +340,9 @@ import {
 } from "@openbox-ai/openbox-mastra-sdk";
 ```
 
-### Verdicts
+Use the exported types for:
 
-`Verdict` exposes:
-
-- `ALLOW`
-- `CONSTRAIN`
-- `REQUIRE_APPROVAL`
-- `BLOCK`
-- `HALT`
-
-Utility methods:
-
-- `fromString()`
-- `highestPriority()`
-- `priorityOf()`
-- `requiresApproval()`
-- `shouldStop()`
-
-### `WorkflowEventType`
-
-Enum values:
-
-- `WorkflowStarted`
-- `WorkflowCompleted`
-- `WorkflowFailed`
-- `SignalReceived`
-- `ActivityStarted`
-- `ActivityCompleted`
-
-### `GovernanceVerdictResponse`
-
-Normalized response object returned by the OpenBox API wrapper.
-
-Important fields:
-
-- `verdict`
-- `reason`
-- `approvalId`
-- `constraints`
-- `guardrailsResult`
-- `alignmentScore`
-- `riskScore`
-- `metadata`
-
-### `GuardrailsCheckResult`
-
-Represents guardrail output including:
-
-- `inputType`
-- `redactedInput`
-- `validationPassed`
-- `reasons`
-- `rawLogs`
-
-### Error Classes
-
-Configuration and transport:
-
-- `OpenBoxError`
-- `OpenBoxConfigError`
-- `OpenBoxAuthError`
-- `OpenBoxNetworkError`
-- `OpenBoxInsecureURLError`
-- `GovernanceAPIError`
-
-Governance and approval:
-
-- `GovernanceHaltError`
-- `GuardrailsValidationError`
-- `ApprovalPendingError`
-- `ApprovalRejectedError`
-- `ApprovalExpiredError`
-
-## Governance Module
-
-The `governance` entrypoint exists in the export map for completeness, but the primary public integration surface is the root package plus the `mastra`, `client`, `config`, `otel`, `span`, and `types` exports documented above.
-
-For normal integrations, prefer importing from the root package unless you need a narrower subpath import.
+- explicit error handling
+- verdict inspection
+- workflow event matching
+- testing and integration typing

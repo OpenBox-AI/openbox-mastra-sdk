@@ -1,20 +1,21 @@
 # OpenBox Mastra SDK
 
-`@openbox-ai/openbox-mastra-sdk` adds OpenBox governance, approvals, guardrails, and OpenTelemetry-backed operational telemetry to Mastra tools, workflows, and agents.
+`@openbox-ai/openbox-mastra-sdk` adds OpenBox governance, approvals, guardrails, and OpenTelemetry-backed operational telemetry to Mastra applications.
 
-It is designed for production Mastra applications that need:
+Use it when you need to:
 
-- boundary governance on tools, workflow steps, workflows, and agents
-- human approval flows backed by OpenBox verdicts
-- input/output guardrail validation and redaction
-- HTTP, database, file, and traced function span capture
-- policy-relevant telemetry without building a custom instrumentation layer
+- evaluate tools, workflow steps, workflows, and agents against OpenBox policy
+- enforce approval flows from OpenBox verdicts
+- apply input and output guardrails
+- attach HTTP, database, file, and traced-function telemetry to governed runs
+- install the integration once and keep future Mastra registrations governed
 
 ## Requirements
 
 - Node.js `24.10.0`
 - `@mastra/core` `^1.8.0`
-- An OpenBox Core deployment reachable from your Mastra runtime
+- an OpenBox Core deployment reachable from the Mastra runtime
+- an ESM-capable runtime and build pipeline
 
 ## Installation
 
@@ -29,13 +30,21 @@ export OPENBOX_URL="https://your-openbox-core.example"
 export OPENBOX_API_KEY="obx_live_your_key"
 ```
 
-For local development against a mock or non-validating server, pass `validate: false`.
+Optional but commonly used:
+
+```bash
+export OPENBOX_GOVERNANCE_POLICY="fail_open"
+export OPENBOX_DEBUG="false"
+```
 
 ## Quick Start
 
 ```ts
 import { Mastra } from "@mastra/core/mastra";
-import { withOpenBox, getOpenBoxRuntime } from "@openbox-ai/openbox-mastra-sdk";
+import {
+  getOpenBoxRuntime,
+  withOpenBox
+} from "@openbox-ai/openbox-mastra-sdk";
 
 const mastra = new Mastra({
   agents: {
@@ -54,149 +63,96 @@ const governedMastra = await withOpenBox(mastra, {
   apiUrl: process.env.OPENBOX_URL
 });
 
-// Later, during process shutdown:
-await getOpenBoxRuntime(governedMastra)?.shutdown();
+process.on("SIGTERM", async () => {
+  await getOpenBoxRuntime(governedMastra)?.shutdown();
+});
 ```
 
 `withOpenBox()` is the recommended production entrypoint. It:
 
-1. parses and validates OpenBox configuration
-2. creates an `OpenBoxClient`
-3. installs OpenTelemetry instrumentation for the current process
-4. wraps existing Mastra tools, workflows, and agents
-5. patches future `addTool()`, `addWorkflow()`, and `addAgent()` registrations
+1. parses and validates SDK configuration
+2. validates the API key unless `validate: false` is set
+3. creates the OpenBox client and span processor
+4. installs process-wide telemetry
+5. wraps existing Mastra tools, workflows, and agents
+6. patches future `addTool()`, `addWorkflow()`, and `addAgent()` calls
 
-## What The SDK Emits
+## Runtime Model
 
-Primary governance events:
+The SDK emits three categories of OpenBox payloads:
 
-| Event | Where it comes from |
-| --- | --- |
-| `WorkflowStarted` | Wrapped workflows and agents at run start |
-| `WorkflowCompleted` | Wrapped workflows and agents on successful completion |
-| `WorkflowFailed` | Wrapped workflows and agents on failure |
-| `SignalReceived` | Workflow resumes, agent `user_input`, agent `resume`, agent `agent_output` |
-| `ActivityStarted` | Wrapped tools and non-tool workflow steps |
-| `ActivityCompleted` | Wrapped tools and non-tool workflow steps |
+- boundary workflow events: `WorkflowStarted`, `WorkflowCompleted`, `WorkflowFailed`
+- boundary activity events: `ActivityStarted`, `ActivityCompleted`
+- signal events: `SignalReceived` for workflow resume, agent `user_input`, agent `resume`, and agent `agent_output`
 
-Operational spans captured by telemetry:
+It also captures operational spans for:
 
-- HTTP request spans
-- database query spans
-- file operation spans when file I/O instrumentation is enabled
-- traced function spans from `traced()`
+- HTTP requests
+- supported database libraries
+- file operations when file instrumentation is enabled
+- custom functions wrapped with `traced()`
 
-Agent-specific note:
+Important production behavior:
 
-- agent LLM activity is represented as telemetry spans on `SignalReceived` (`agent_output`) and `WorkflowCompleted`
-- agent-only LLM completions are not intended to appear as standalone business activities
+- agent-only LLM activity is represented as telemetry spans, not as standalone business activities
+- agent prompts are emitted as `SignalReceived(user_input)`, not as tool activities
+- the SDK ignores its own OpenBox API URL during telemetry setup to avoid feedback loops
 
-## Integration Modes
+## Configuration Highlights
 
-Recommended:
+Most applications only need a small part of the config surface:
 
-- `withOpenBox()` for zero-code process wiring
-
-Manual:
-
-- `OpenBoxClient`
-- `OpenBoxSpanProcessor`
-- `setupOpenBoxOpenTelemetry()`
-- `wrapTool()`
-- `wrapWorkflow()`
-- `wrapAgent()`
-- `traced()`
-
-Use manual wiring when you need to:
-
-- reuse an existing OpenBox client instance
-- control telemetry bootstrap order
-- wrap only selected Mastra components
-- install telemetry outside `withOpenBox()`
-
-## Core Configuration
-
-Most-used options:
-
-| Option | Default | Purpose |
+| Option | Default | Use it to |
 | --- | --- | --- |
-| `apiUrl` | required | OpenBox Core base URL |
-| `apiKey` | required | OpenBox API key |
-| `validate` | `true` | Validate API key at startup |
-| `onApiError` | `"fail_open"` | Continue or halt when OpenBox cannot be reached |
-| `hitlEnabled` | `true` | Enable approval polling / resume handling |
-| `sendStartEvent` | `true` | Emit `WorkflowStarted` |
-| `sendActivityStartEvent` | `true` | Emit `ActivityStarted` |
-| `httpCapture` | `true` | Capture text HTTP bodies and headers for governance payloads |
-| `instrumentDatabases` | `true` | Enable supported database instrumentations |
-| `instrumentFileIo` | `false` | Enable file I/O span capture |
-| `skipWorkflowTypes` | empty | Skip workflow/agent lifecycle events for matching workflow types |
-| `skipActivityTypes` | `["send_governance_event"]` | Skip matching activity types |
-| `skipSignals` | empty | Skip matching signal names |
-| `maxEvaluatePayloadBytes` | `256000` | Payload budget before compact fallback logic is applied |
+| `apiUrl` | required | point the SDK at OpenBox Core |
+| `apiKey` | required | authenticate governance and approval calls |
+| `validate` | `true` | fail fast on invalid credentials or insecure URL setup |
+| `onApiError` | `"fail_open"` | decide whether OpenBox outages should halt execution |
+| `hitlEnabled` | `true` | enable approval suspension or polling flows |
+| `httpCapture` | `true` | attach text HTTP bodies and headers to governance-relevant telemetry |
+| `instrumentDatabases` | `true` | capture supported database activity |
+| `instrumentFileIo` | `false` | enable file operation telemetry when required |
+| `sendStartEvent` | `true` | emit `WorkflowStarted` |
+| `sendActivityStartEvent` | `true` | emit `ActivityStarted` |
+| `skipActivityTypes` | `["send_governance_event"]` | suppress selected activity types entirely |
+| `skipSignals` | empty | suppress selected signal names |
+| `maxEvaluatePayloadBytes` | `256000` | cap payload size before compact fallback logic applies |
 
-Environment variables:
+See [docs/configuration.md](./docs/configuration.md) for the complete surface.
 
-- `OPENBOX_URL`
-- `OPENBOX_API_KEY`
-- `OPENBOX_GOVERNANCE_TIMEOUT`
-- `OPENBOX_GOVERNANCE_POLICY`
-- `OPENBOX_EVALUATE_MAX_RETRIES`
-- `OPENBOX_EVALUATE_RETRY_BASE_DELAY_MS`
-- `OPENBOX_HTTP_CAPTURE`
-- `OPENBOX_INSTRUMENT_DATABASES`
-- `OPENBOX_INSTRUMENT_FILE_IO`
-- `OPENBOX_SEND_START_EVENT`
-- `OPENBOX_SEND_ACTIVITY_START_EVENT`
-- `OPENBOX_SKIP_WORKFLOW_TYPES`
-- `OPENBOX_SKIP_ACTIVITY_TYPES`
-- `OPENBOX_SKIP_HITL_ACTIVITY_TYPES`
-- `OPENBOX_SKIP_SIGNALS`
-- `OPENBOX_MAX_EVALUATE_PAYLOAD_BYTES`
-- `OPENBOX_VALIDATE`
-- `OPENBOX_DEBUG`
-- `OPENBOX_AGENT_GOAL`
+## Production Guidance
 
-The full configuration reference is in [docs/configuration.md](./docs/configuration.md).
-
-## Production Behavior Highlights
-
-- Non-localhost `http://` OpenBox URLs are rejected at config parse time.
-- HTTP bodies are kept in the SDK span processor and merged into governance payloads; they are not stored as ordinary OTel span attributes.
-- The SDK automatically ignores its own OpenBox API URL during telemetry setup to avoid governance loops.
-- `withOpenBox()` is idempotent per Mastra instance and reuses the existing runtime when called again.
-- `setupOpenBoxOpenTelemetry()` manages process-wide instrumentation. Initialize it once per process unless you intentionally want to replace the active controller.
-- Agent `WorkflowCompleted` payloads automatically fall back to smaller payload shapes when they exceed the configured byte budget.
-
-## Policy Design Guidance
-
-Hook-triggered telemetry payloads are internal observability signals, not user-facing business activities. In practice, policy should usually treat payloads with `hook_trigger: true` or hook span content as internal telemetry and avoid requiring separate human approval for them.
-
-If you approve on both boundary activities and internal hook telemetry, you can create duplicate or confusing approval flows.
+- Keep `validate` enabled outside tests and local mocks.
+- Use HTTPS for all non-localhost OpenBox endpoints.
+- Decide explicitly between `fail_open` and `fail_closed` before deployment.
+- Treat hook-triggered telemetry as internal operational data unless your policy intentionally governs it.
+- Keep `instrumentFileIo` disabled until you have a concrete file-governance requirement.
+- Initialize telemetry once per process and shut it down on process exit.
 
 ## Documentation
 
-- [docs/README.md](./docs/README.md): documentation index and recommended reading order
-- [docs/installation.md](./docs/installation.md): installation, requirements, and first startup
-- [docs/configuration.md](./docs/configuration.md): complete configuration and environment variable reference
-- [docs/integration-patterns.md](./docs/integration-patterns.md): `withOpenBox()` and manual wiring patterns
-- [docs/architecture.md](./docs/architecture.md): runtime architecture and component responsibilities
-- [docs/event-model.md](./docs/event-model.md): event types, signals, activity naming, and agent semantics
-- [docs/telemetry.md](./docs/telemetry.md): HTTP/DB/file/function span capture and payload behavior
-- [docs/approvals-and-guardrails.md](./docs/approvals-and-guardrails.md): verdict handling, approvals, and redaction
-- [docs/security-and-privacy.md](./docs/security-and-privacy.md): operational security and data-handling guidance
-- [docs/troubleshooting.md](./docs/troubleshooting.md): common integration failures and diagnostics
-- [docs/api-reference.md](./docs/api-reference.md): public API reference
+- [docs/README.md](./docs/README.md): documentation index and reading order
+- [docs/installation.md](./docs/installation.md): installation, startup, and shutdown
+- [docs/configuration.md](./docs/configuration.md): configuration surface, env vars, and defaults
+- [docs/integration-patterns.md](./docs/integration-patterns.md): `withOpenBox()` and manual integration patterns
+- [docs/architecture.md](./docs/architecture.md): runtime architecture and data flow
+- [docs/event-model.md](./docs/event-model.md): event types, payload shape, signals, and activity semantics
+- [docs/telemetry.md](./docs/telemetry.md): HTTP, database, file, and traced-function capture
+- [docs/approvals-and-guardrails.md](./docs/approvals-and-guardrails.md): verdict enforcement, approvals, and guardrails
+- [docs/security-and-privacy.md](./docs/security-and-privacy.md): transport, capture boundaries, and hardening guidance
+- [docs/troubleshooting.md](./docs/troubleshooting.md): common failures and diagnostics
+- [docs/api-reference.md](./docs/api-reference.md): public API summary
 
 ## Public API Summary
 
-Top-level exports:
+Top-level exports include:
 
-- client: `OpenBoxClient`
-- config: `parseOpenBoxConfig()`, `initializeOpenBox()`, `validateApiKeyFormat()`, `validateUrlSecurity()`
-- Mastra integration: `withOpenBox()`, `getOpenBoxRuntime()`, `wrapTool()`, `wrapWorkflow()`, `wrapAgent()`
-- telemetry: `setupOpenBoxOpenTelemetry()`, `traced()`
-- span processing: `OpenBoxSpanProcessor`
-- types: verdicts, errors, guardrail types, workflow event types
+- `withOpenBox()` and `getOpenBoxRuntime()`
+- `wrapTool()`, `wrapWorkflow()`, and `wrapAgent()`
+- `OpenBoxClient`
+- `parseOpenBoxConfig()` and `initializeOpenBox()`
+- `setupOpenBoxOpenTelemetry()` and `traced()`
+- `OpenBoxSpanProcessor`
+- verdict, guardrail, workflow event, and error types
 
-See [docs/api-reference.md](./docs/api-reference.md) for signatures and behavior.
+See [docs/api-reference.md](./docs/api-reference.md) for the full reference.
