@@ -4,10 +4,25 @@
   "description": "OpenBox governance and observability SDK for Mastra",
   "license": "MIT",
   "author": "Shorya Singh (OpenBox Team)",
+  "homepage": "https://github.com/OpenBox-AI/openbox-mastra-sdk#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OpenBox-AI/openbox-mastra-sdk.git"
+  },
+  "bugs": {
+    "url": "https://github.com/OpenBox-AI/openbox-mastra-sdk/issues"
+  },
+  "keywords": [
+    "openbox",
+    "mastra",
+    "governance",
+    "observability",
+    "opentelemetry"
+  ],
   "type": "module",
   "sideEffects": false,
   "engines": {
-    "node": "24.10.0"
+    "node": ">=24.10.0"
   },
   "files": [
     "dist",
@@ -66,10 +81,14 @@
   "types": "./dist/index.d.ts",
   "scripts": {
     "build": "tsup",
+    "ci:check": "npm run lint && npm run typecheck && npm run test && npm run build",
     "clean": "rm -rf coverage dist",
     "example:quickstart": "npm run build && node ./examples/quickstart/index.mjs",
     "format": "prettier --write .",
     "lint": "eslint .",
+    "pack:check": "npm pack --dry-run",
+    "prepack": "npm run clean && npm run build",
+    "prepublishOnly": "npm run lint && npm run typecheck && npm run test",
     "test": "vitest run --coverage",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"

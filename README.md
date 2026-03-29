@@ -12,7 +12,7 @@ Use it when you need to:
 
 ## Requirements
 
-- Node.js `24.10.0`
+- Node.js `>=24.10.0`
 - `@mastra/core` `^1.8.0`
 - an OpenBox Core deployment reachable from the Mastra runtime
 - an ESM-capable runtime and build pipeline

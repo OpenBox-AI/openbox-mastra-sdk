@@ -6,7 +6,7 @@ This document covers package installation, startup requirements, validation beha
 
 The package currently targets:
 
-- Node.js `24.10.0`
+- Node.js `>=24.10.0`
 - `@mastra/core` `^1.8.0`
 - an OpenBox Core deployment reachable from the application runtime
 - ESM-compatible application code

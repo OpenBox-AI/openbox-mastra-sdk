@@ -41,7 +41,7 @@ If you are integrating the SDK into a new service, read in this order:
 
 | Dependency | Requirement |
 | --- | --- |
-| Node.js | `24.10.0` |
+| Node.js | `>=24.10.0` |
 | Mastra | `@mastra/core ^1.8.0` |
 | Module format | ESM |
 | OpenBox Core | reachable over HTTPS except localhost development |
