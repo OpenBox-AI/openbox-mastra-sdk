@@ -41,6 +41,18 @@ The release workflow uses:
 
 The workflow does nothing for ordinary pushes to `main` that do not change `package.json` version.
 
+## Manual Recovery
+
+The release workflow also supports manual dispatch from the GitHub Actions UI.
+
+Use that when:
+
+- the first `dev` -> `main` release failed before publish
+- npm publish succeeded but the GitHub release was not created
+- you need to retry the release logic without forcing another merge
+
+The manual run still checks npm first, so it will not republish a version that already exists.
+
 ## What To Push Where
 
 Normal development:
