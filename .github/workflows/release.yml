@@ -1,0 +1,112 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.10.0
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install
+        run: npm ci
+
+      - name: Validate
+        run: npm run ci:check
+
+      - name: Verify Package Tarball
+        run: npm run pack:check
+
+      - name: Read Package Metadata
+        id: package
+        run: |
+          echo "name=$(node -p "require('./package.json').name")" >> "$GITHUB_OUTPUT"
+          echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Detect Version Change In Push
+        id: version_change
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          if [ -z "$BEFORE_SHA" ] || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "previous_version=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          PREVIOUS_VERSION="$(git show "${BEFORE_SHA}:package.json" | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version")"
+          CURRENT_VERSION="${{ steps.package.outputs.version }}"
+
+          echo "previous_version=${PREVIOUS_VERSION}" >> "$GITHUB_OUTPUT"
+
+          if [ "$PREVIOUS_VERSION" != "$CURRENT_VERSION" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip If Version Was Not Changed In This Push
+        if: steps.version_change.outputs.changed != 'true'
+        run: |
+          echo "package.json version was not changed in this push."
+          echo "Current version: ${{ steps.package.outputs.version }}"
+          echo "Previous version: ${{ steps.version_change.outputs.previous_version }}"
+
+      - name: Read Published npm Version
+        id: npm
+        if: steps.version_change.outputs.changed == 'true'
+        run: |
+          PUBLISHED_VERSION="$(npm view "${{ steps.package.outputs.name }}" version 2>/dev/null || true)"
+          echo "published_version=${PUBLISHED_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Check GitHub Release
+        id: github_release
+        if: steps.version_change.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "v${{ steps.package.outputs.version }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip If Version Already Published
+        if: steps.version_change.outputs.changed == 'true' && steps.package.outputs.version == steps.npm.outputs.published_version
+        run: echo "Version ${{ steps.package.outputs.version }} is already published. Skipping release."
+
+      - name: Publish To npm
+        if: steps.version_change.outputs.changed == 'true' && steps.package.outputs.version != steps.npm.outputs.published_version
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create GitHub Release
+        if: steps.version_change.outputs.changed == 'true' && steps.github_release.outputs.exists != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.package.outputs.version }}
+          name: v${{ steps.package.outputs.version }}
+          generate_release_notes: true
+          target_commitish: ${{ github.sha }}
