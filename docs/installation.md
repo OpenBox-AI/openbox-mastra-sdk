@@ -13,9 +13,13 @@ The package currently targets:
 
 ## Install The Package
 
+The standard production path is the published npm package:
+
 ```bash
 npm install @openbox-ai/openbox-mastra-sdk @mastra/core
 ```
+
+Clone the repository only if you want to run the bundled quickstart example or work on the SDK itself.
 
 ## Required Environment Variables
 
@@ -101,7 +105,7 @@ Before declaring the integration healthy:
 1. Confirm the application can reach `OPENBOX_URL`.
 2. Confirm startup validation succeeds, or `validate: false` is intentionally set.
 3. Trigger a governed tool or workflow and verify events appear in OpenBox.
-4. If consuming the SDK from a local path, make sure the consuming service is running the rebuilt package output.
+4. If you are intentionally consuming a local SDK checkout instead of npm, make sure the consuming service is running the rebuilt package output.
 
 ## Next Step
 

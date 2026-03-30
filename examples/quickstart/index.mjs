@@ -258,7 +258,8 @@ async function startMockOpenBoxServer() {
     if (pathname === "/api/v1/governance/evaluate") {
       if (
         body.event_type === "ActivityStarted" &&
-        body.activity_type === "prepare-transfer-step" &&
+        // Activity types are normalized before they reach OpenBox.
+        body.activity_type === "prepareTransferStep" &&
         !approvalRequested
       ) {
         approvalRequested = true;

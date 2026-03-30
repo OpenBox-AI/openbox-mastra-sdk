@@ -19,6 +19,8 @@ Use it when you need to:
 
 ## Installation
 
+The SDK is published on npm as `@openbox-ai/openbox-mastra-sdk`.
+
 ```bash
 npm install @openbox-ai/openbox-mastra-sdk @mastra/core
 ```
@@ -76,6 +78,23 @@ process.on("SIGTERM", async () => {
 4. installs process-wide telemetry
 5. wraps existing Mastra tools, workflows, and agents
 6. patches future `addTool()`, `addWorkflow()`, and `addAgent()` calls
+
+## Local Example
+
+If you want to validate the SDK locally before wiring a real OpenBox environment, the repository includes a bundled quickstart example:
+
+```bash
+npm run example:quickstart
+```
+
+This example runs against a local mock OpenBox server and demonstrates:
+
+- a governed workflow
+- a suspended approval and resume path
+- a governed tool execution
+- a wrapped summary agent
+
+Use the npm package for real integrations. Clone the repository only when you want to run or inspect the example itself.
 
 ## Runtime Model
 

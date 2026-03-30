@@ -26,9 +26,9 @@ Checks:
 2. Confirm the first operation is actually wrapped.
 3. Enable `OPENBOX_DEBUG=true`.
 4. Confirm the OpenBox API URL is reachable from the runtime.
-5. If consuming the SDK from a local path, confirm the consuming app is loading the rebuilt package output.
+5. If you are intentionally consuming a local SDK checkout instead of the npm package, confirm the consuming app is loading the rebuilt package output.
 
-If you are consuming this repo locally:
+If you are consuming this repo locally instead of the published npm package:
 
 ```bash
 npm run build
@@ -164,7 +164,7 @@ For inline approval paths, remember:
 
 ## Local Code Changes Are Not Reflected In My App
 
-If you are consuming this repo locally, source changes are not enough. The consuming app needs the rebuilt package output.
+If you are consuming this repo locally instead of the published npm package, source changes are not enough. The consuming app needs the rebuilt package output.
 
 Run:
 
