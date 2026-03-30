@@ -79,9 +79,17 @@ process.on("SIGTERM", async () => {
 5. wraps existing Mastra tools, workflows, and agents
 6. patches future `addTool()`, `addWorkflow()`, and `addAgent()` calls
 
-## Local Example
+## Reference Demo
 
-If you want to validate the SDK locally before wiring a real OpenBox environment, the repository includes a bundled quickstart example:
+For a runnable reference application, use the Mastra coding-agent POC:
+
+- GitHub: https://github.com/OpenBox-AI/poc-mastra-coding-agent/tree/dev
+
+The POC installs `@openbox-ai/openbox-mastra-sdk` from npm. You do not need a sibling checkout of this repository to run it.
+
+## Bundled Example
+
+If you want to validate the SDK locally before wiring a real OpenBox environment, this repository also includes a bundled quickstart example:
 
 ```bash
 npm run example:quickstart
@@ -94,7 +102,7 @@ This example runs against a local mock OpenBox server and demonstrates:
 - a governed tool execution
 - a wrapped summary agent
 
-Use the npm package for real integrations. Clone the repository only when you want to run or inspect the example itself.
+Use the npm package for real integrations. Clone this repository only when you want to run the bundled example or work on the SDK itself.
 
 ## Runtime Model
 

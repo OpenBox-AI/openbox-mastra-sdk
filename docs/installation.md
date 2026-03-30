@@ -21,6 +21,12 @@ npm install @openbox-ai/openbox-mastra-sdk @mastra/core
 
 Clone the repository only if you want to run the bundled quickstart example or work on the SDK itself.
 
+If you want a fuller runnable demo application, use the Mastra coding-agent POC:
+
+- `https://github.com/OpenBox-AI/poc-mastra-coding-agent/tree/dev`
+
+That demo installs `@openbox-ai/openbox-mastra-sdk` from npm. You do not need a sibling checkout of this repository to run it.
+
 ## Required Environment Variables
 
 ```bash
