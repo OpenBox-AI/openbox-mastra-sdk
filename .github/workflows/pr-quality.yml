@@ -33,6 +33,8 @@ jobs:
   quality:
     name: Quality
     runs-on: ubuntu-latest
+    outputs:
+      coverage_available: ${{ steps.coverage_status.outputs.available }}
 
     steps:
       - name: Checkout repository
@@ -47,21 +49,40 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Run CI validation
-        run: npm run ci:check
+      - name: Run lint
+        id: lint
+        run: npm run lint
 
-      - name: Verify package tarball
-        run: npm run pack:check
+      - name: Run typecheck
+        id: typecheck
+        run: npm run typecheck
+
+      - name: Run tests
+        id: test
+        continue-on-error: true
+        run: npm run test
+
+      - name: Check coverage report
+        if: ${{ always() }}
+        id: coverage_status
+        shell: bash
+        run: |
+          if [ -f coverage/lcov.info ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Upload coverage report
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: coverage-lcov
           path: coverage/lcov.info
-          if-no-files-found: error
+          if-no-files-found: warn
 
       - name: Upload coverage to Codecov
-        if: ${{ env.CODECOV_TOKEN != '' }}
+        if: ${{ always() && env.CODECOV_TOKEN != '' && steps.coverage_status.outputs.available == 'true' }}
         uses: codecov/codecov-action@v5
         with:
           files: ./coverage/lcov.info
@@ -71,9 +92,43 @@ jobs:
           verbose: true
           token: ${{ env.CODECOV_TOKEN }}
 
+      - name: Run build
+        id: build
+        if: ${{ always() }}
+        run: npm run build
+
+      - name: Verify package tarball
+        id: pack
+        if: ${{ always() }}
+        run: npm run pack:check
+
+      - name: Fail job when validation fails
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          failed=0
+
+          if [[ "${{ steps.test.outcome }}" == "failure" ]]; then
+            echo "Tests failed."
+            failed=1
+          fi
+
+          if [[ "${{ steps.build.outcome }}" == "failure" ]]; then
+            echo "Build failed."
+            failed=1
+          fi
+
+          if [[ "${{ steps.pack.outcome }}" == "failure" ]]; then
+            echo "Package verification failed."
+            failed=1
+          fi
+
+          exit "${failed}"
+
   sonarqube:
     name: SonarQube
     runs-on: ubuntu-latest
+    if: ${{ always() && needs.quality.result != 'cancelled' }}
     needs:
       - quality
 
@@ -89,11 +144,15 @@ jobs:
           fetch-depth: 0
 
       - name: Download coverage report
-        if: ${{ env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '' }}
+        if: ${{ env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '' && needs.quality.outputs.coverage_available == 'true' }}
         uses: actions/download-artifact@v4
         with:
           name: coverage-lcov
           path: coverage
+
+      - name: Skip coverage download when report is unavailable
+        if: ${{ env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '' && needs.quality.outputs.coverage_available != 'true' }}
+        run: echo "Skipping coverage download because coverage/lcov.info was not produced."
 
       - name: Set up Java
         if: ${{ env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '' }}
