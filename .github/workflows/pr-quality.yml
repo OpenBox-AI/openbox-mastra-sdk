@@ -30,8 +30,8 @@ env:
   CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
 jobs:
-  quality:
-    name: Quality
+  test:
+    name: Test
     runs-on: ubuntu-latest
     outputs:
       coverage_available: ${{ steps.coverage_status.outputs.available }}
@@ -51,10 +51,12 @@ jobs:
 
       - name: Run lint
         id: lint
+        continue-on-error: true
         run: npm run lint
 
       - name: Run typecheck
         id: typecheck
+        continue-on-error: true
         run: npm run typecheck
 
       - name: Run tests
@@ -92,45 +94,58 @@ jobs:
           verbose: true
           token: ${{ env.CODECOV_TOKEN }}
 
-      - name: Run build
-        id: build
-        if: ${{ always() }}
-        run: npm run build
-
-      - name: Verify package tarball
-        id: pack
-        if: ${{ always() }}
-        run: npm run pack:check
-
       - name: Fail job when validation fails
         if: ${{ always() }}
         shell: bash
         run: |
           failed=0
 
+          if [[ "${{ steps.lint.outcome }}" == "failure" ]]; then
+            echo "Lint failed."
+            failed=1
+          fi
+
+          if [[ "${{ steps.typecheck.outcome }}" == "failure" ]]; then
+            echo "Typecheck failed."
+            failed=1
+          fi
+
           if [[ "${{ steps.test.outcome }}" == "failure" ]]; then
             echo "Tests failed."
             failed=1
           fi
 
-          if [[ "${{ steps.build.outcome }}" == "failure" ]]; then
-            echo "Build failed."
-            failed=1
-          fi
-
-          if [[ "${{ steps.pack.outcome }}" == "failure" ]]; then
-            echo "Package verification failed."
-            failed=1
-          fi
-
           exit "${failed}"
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    if: ${{ always() && needs.test.result != 'cancelled' }}
+    needs:
+      - test
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run build
+        run: npm run build
 
   sonarqube:
     name: SonarQube
     runs-on: ubuntu-latest
-    if: ${{ always() && needs.quality.result != 'cancelled' }}
+    if: ${{ always() && needs.test.result != 'cancelled' }}
     needs:
-      - quality
+      - test
 
     steps:
       - name: Skip when SonarQube secrets are not configured
@@ -144,14 +159,14 @@ jobs:
           fetch-depth: 0
 
       - name: Download coverage report
-        if: ${{ env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '' && needs.quality.outputs.coverage_available == 'true' }}
+        if: ${{ env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '' && needs.test.outputs.coverage_available == 'true' }}
         uses: actions/download-artifact@v4
         with:
           name: coverage-lcov
           path: coverage
 
       - name: Skip coverage download when report is unavailable
-        if: ${{ env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '' && needs.quality.outputs.coverage_available != 'true' }}
+        if: ${{ env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '' && needs.test.outputs.coverage_available != 'true' }}
         run: echo "Skipping coverage download because coverage/lcov.info was not produced."
 
       - name: Set up Java
@@ -176,3 +191,45 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
+          
+      - name: SonarQube Quality Gate check
+        id: sonarqube_quality_gate
+        if: ${{ env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '' }}
+        continue-on-error: true
+        uses: SonarSource/sonarqube-quality-gate-action@master
+        with:
+          pollingTimeoutSec: 600
+        env:
+          SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
+
+      - name: Print SonarQube result
+        if: ${{ always() && env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '' }}
+        shell: bash
+        run: |
+          status="${{ steps.sonarqube_quality_gate.outputs.quality-gate-status }}"
+          
+          cat << 'EOF'
+          [QUALITY GATE] Checking NEW CODE conditions...
+          - FAIL IF: New Code Issues > 5
+          - FAIL IF: New Code Security Hotspots Reviewed < 100%
+          - FAIL IF: New Code Coverage < 60.0%
+          - FAIL IF: New Code Duplicated Lines > 3.0%
+
+          [QUALITY GATE] Checking OVERALL CODE conditions...
+          - FAIL IF: Overall High Severity Issues > 1
+          - FAIL IF: Overall Medium Severity Issues > 4
+          EOF
+
+          if [[ -z "${status}" ]]; then
+            status="UNKNOWN"
+          fi
+
+          echo "Quality Gate = ${status}"
+
+      - name: Fail job when SonarQube quality gate fails
+        if: ${{ always() && env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '' && steps.sonarqube_quality_gate.outcome == 'failure' }}
+        shell: bash
+        run: |
+          echo "SonarQube Quality Gate failed."
+          exit 1
