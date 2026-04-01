@@ -11,7 +11,7 @@ This package publishes from `main` through GitHub Actions.
 
 Workflow placement:
 
-- [`.github/workflows/ci.yml`](./.github/workflows/ci.yml) should exist on both `dev` and `main`
+- [`.github/workflows/pr-quality.yml`](./.github/workflows/pr-quality.yml) should exist on both `dev` and `main`
 - [`.github/workflows/release.yml`](./.github/workflows/release.yml) must exist on `main`
 - this release guide should also exist on `main`
 
@@ -62,7 +62,7 @@ Normal development:
 
 Release infrastructure:
 
-- keep [`.github/workflows/ci.yml`](./.github/workflows/ci.yml) in `dev` and `main`
+- keep [`.github/workflows/pr-quality.yml`](./.github/workflows/pr-quality.yml) in `dev` and `main`
 - keep [`.github/workflows/release.yml`](./.github/workflows/release.yml) in `dev` so it is reviewed there, but it must be merged into `main` before automated releases can work
 - keep [RELEASING.md](./RELEASING.md) in `dev` and `main`
 
