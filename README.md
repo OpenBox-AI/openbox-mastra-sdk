@@ -32,6 +32,13 @@ export OPENBOX_URL="https://your-openbox-core.example"
 export OPENBOX_API_KEY="obx_live_your_key"
 ```
 
+Agent identity variables are required when your OpenBox Core deployment enforces DID request signing:
+
+```bash
+export OPENBOX_AGENT_DID="did:aip:your-agent-did"
+export OPENBOX_AGENT_PRIVATE_KEY="base64_ed25519_private_key"
+```
+
 Optional but commonly used:
 
 ```bash
@@ -43,10 +50,7 @@ export OPENBOX_DEBUG="false"
 
 ```ts
 import { Mastra } from "@mastra/core/mastra";
-import {
-  getOpenBoxRuntime,
-  withOpenBox
-} from "@openbox-ai/openbox-mastra-sdk";
+import { getOpenBoxRuntime, withOpenBox } from "@openbox-ai/openbox-mastra-sdk";
 
 const mastra = new Mastra({
   agents: {
@@ -62,7 +66,9 @@ const mastra = new Mastra({
 
 const governedMastra = await withOpenBox(mastra, {
   apiKey: process.env.OPENBOX_API_KEY,
-  apiUrl: process.env.OPENBOX_URL
+  apiUrl: process.env.OPENBOX_URL,
+  agentDID: process.env.OPENBOX_AGENT_DID,
+  agentPrivateKey: process.env.OPENBOX_AGENT_PRIVATE_KEY
 });
 
 process.on("SIGTERM", async () => {
@@ -129,21 +135,23 @@ Important production behavior:
 
 Most applications only need a small part of the config surface:
 
-| Option | Default | Use it to |
-| --- | --- | --- |
-| `apiUrl` | required | point the SDK at OpenBox Core |
-| `apiKey` | required | authenticate governance and approval calls |
-| `validate` | `true` | fail fast on invalid credentials or insecure URL setup |
-| `onApiError` | `"fail_open"` | decide whether OpenBox outages should halt execution |
-| `hitlEnabled` | `true` | enable approval suspension or polling flows |
-| `httpCapture` | `true` | attach text HTTP bodies and headers to governance-relevant telemetry |
-| `instrumentDatabases` | `true` | capture supported database activity |
-| `instrumentFileIo` | `false` | enable file operation telemetry when required |
-| `sendStartEvent` | `true` | emit `WorkflowStarted` |
-| `sendActivityStartEvent` | `true` | emit `ActivityStarted` |
-| `skipActivityTypes` | `["send_governance_event"]` | suppress selected activity types entirely |
-| `skipSignals` | empty | suppress selected signal names |
-| `maxEvaluatePayloadBytes` | `256000` | cap payload size before compact fallback logic applies |
+| Option                    | Default                     | Use it to                                                            |
+| ------------------------- | --------------------------- | -------------------------------------------------------------------- |
+| `apiUrl`                  | required                    | point the SDK at OpenBox Core                                        |
+| `apiKey`                  | required                    | authenticate governance and approval calls                           |
+| `agentDID`                | optional                    | sign governance requests with the registered agent DID               |
+| `agentPrivateKey`         | optional                    | Ed25519 private key for the registered agent DID                     |
+| `validate`                | `true`                      | fail fast on invalid credentials or insecure URL setup               |
+| `onApiError`              | `"fail_open"`               | decide whether OpenBox outages should halt execution                 |
+| `hitlEnabled`             | `true`                      | enable approval suspension or polling flows                          |
+| `httpCapture`             | `true`                      | attach text HTTP bodies and headers to governance-relevant telemetry |
+| `instrumentDatabases`     | `true`                      | capture supported database activity                                  |
+| `instrumentFileIo`        | `false`                     | enable file operation telemetry when required                        |
+| `sendStartEvent`          | `true`                      | emit `WorkflowStarted`                                               |
+| `sendActivityStartEvent`  | `true`                      | emit `ActivityStarted`                                               |
+| `skipActivityTypes`       | `["send_governance_event"]` | suppress selected activity types entirely                            |
+| `skipSignals`             | empty                       | suppress selected signal names                                       |
+| `maxEvaluatePayloadBytes` | `256000`                    | cap payload size before compact fallback logic applies               |
 
 See [docs/configuration.md](./docs/configuration.md) for the complete surface.
 
@@ -151,6 +159,7 @@ See [docs/configuration.md](./docs/configuration.md) for the complete surface.
 
 - Keep `validate` enabled outside tests and local mocks.
 - Use HTTPS for all non-localhost OpenBox endpoints.
+- Store `OPENBOX_AGENT_PRIVATE_KEY` as a secret and do not reuse it across agents.
 - Decide explicitly between `fail_open` and `fail_closed` before deployment.
 - Treat hook-triggered telemetry as internal operational data unless your policy intentionally governs it.
 - Keep `instrumentFileIo` disabled until you have a concrete file-governance requirement.
@@ -180,6 +189,7 @@ Top-level exports include:
 - `parseOpenBoxConfig()` and `initializeOpenBox()`
 - `setupOpenBoxOpenTelemetry()` and `traced()`
 - `OpenBoxSpanProcessor`
+- `buildSignedIdentityHeaders()` for advanced DID signing integrations
 - verdict, guardrail, workflow event, and error types
 
 See [docs/api-reference.md](./docs/api-reference.md) for the full reference.

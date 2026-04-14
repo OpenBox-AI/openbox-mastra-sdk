@@ -34,10 +34,18 @@ export OPENBOX_URL="https://your-openbox-core.example"
 export OPENBOX_API_KEY="obx_live_your_key"
 ```
 
+When OpenBox enforces DID request signing, also set the one-time credentials returned during agent registration:
+
+```bash
+export OPENBOX_AGENT_DID="did:aip:your-agent-did"
+export OPENBOX_AGENT_PRIVATE_KEY="base64_ed25519_private_key"
+```
+
 Validation enforced by the SDK:
 
 - `OPENBOX_API_KEY` must match `obx_live_*` or `obx_test_*`
 - `OPENBOX_URL` must use HTTPS unless the host is `localhost`, `127.0.0.1`, or `::1`
+- `OPENBOX_AGENT_DID` and `OPENBOX_AGENT_PRIVATE_KEY` must be configured together when either is present
 
 If either required value is missing, the SDK throws an `OpenBoxConfigError` during startup.
 
@@ -55,7 +63,9 @@ const mastra = new Mastra({
 
 await withOpenBox(mastra, {
   apiKey: process.env.OPENBOX_API_KEY,
-  apiUrl: process.env.OPENBOX_URL
+  apiUrl: process.env.OPENBOX_URL,
+  agentDID: process.env.OPENBOX_AGENT_DID,
+  agentPrivateKey: process.env.OPENBOX_AGENT_PRIVATE_KEY
 });
 ```
 
@@ -110,8 +120,9 @@ Before declaring the integration healthy:
 
 1. Confirm the application can reach `OPENBOX_URL`.
 2. Confirm startup validation succeeds, or `validate: false` is intentionally set.
-3. Trigger a governed tool or workflow and verify events appear in OpenBox.
-4. If you are intentionally consuming a local SDK checkout instead of npm, make sure the consuming service is running the rebuilt package output.
+3. If DID enforcement is enabled, confirm the agent runtime has `OPENBOX_AGENT_DID` and `OPENBOX_AGENT_PRIVATE_KEY`.
+4. Trigger a governed tool or workflow and verify events appear in OpenBox.
+5. If you are intentionally consuming a local SDK checkout instead of npm, make sure the consuming service is running the rebuilt package output.
 
 ## Next Step
 

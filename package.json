@@ -54,6 +54,11 @@
       "import": "./dist/governance/index.js",
       "default": "./dist/governance/index.js"
     },
+    "./identity": {
+      "types": "./dist/identity/index.d.ts",
+      "import": "./dist/identity/index.js",
+      "default": "./dist/identity/index.js"
+    },
     "./mastra": {
       "types": "./dist/mastra/index.d.ts",
       "import": "./dist/mastra/index.js",

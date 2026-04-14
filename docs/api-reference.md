@@ -9,10 +9,7 @@ It is an integration-focused reference, not a generated type reference. Use it t
 Most applications should import from the package root:
 
 ```ts
-import {
-  getOpenBoxRuntime,
-  withOpenBox
-} from "@openbox-ai/openbox-mastra-sdk";
+import { getOpenBoxRuntime, withOpenBox } from "@openbox-ai/openbox-mastra-sdk";
 ```
 
 Use subpath imports only when you want to make module ownership explicit:
@@ -59,6 +56,7 @@ Key fields:
 
 - `apiKey`
 - `apiUrl`
+- `agentIdentity`
 - `evaluateMaxRetries`
 - `evaluateRetryBaseDelayMs`
 - `fetch`
@@ -95,9 +93,16 @@ import {
 
 User-supplied config surface. See [configuration.md](./configuration.md) for the complete option table.
 
+Identity-related fields:
+
+- `agentDID`
+- `agentPrivateKey`
+
 ### `interface OpenBoxConfig`
 
 Normalized runtime config with defaults applied and iterable fields converted to `Set<string>`.
+
+Includes `agentIdentity` when `agentDID` and `agentPrivateKey` are configured.
 
 ### `parseOpenBoxConfig(input?, env?)`
 
@@ -127,6 +132,20 @@ Use it when:
 Access or override the global config singleton.
 
 Use sparingly. Prefer explicit runtime injection where practical.
+
+## Identity Module
+
+Import path:
+
+```ts
+import {
+  buildSignedIdentityHeaders,
+  validateAgentDID,
+  validateEd25519PrivateKey
+} from "@openbox-ai/openbox-mastra-sdk/identity";
+```
+
+Use this module only for advanced manual integrations. `withOpenBox()` and `OpenBoxClient` handle request signing automatically when `agentDID` and `agentPrivateKey` are configured.
 
 ## Mastra Module
 

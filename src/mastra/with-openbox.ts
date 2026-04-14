@@ -7,7 +7,10 @@ import {
   type OpenBoxConfig,
   type OpenBoxConfigInput
 } from "../config/index.js";
-import { setupOpenBoxOpenTelemetry, type OpenBoxTelemetryController } from "../otel/index.js";
+import {
+  setupOpenBoxOpenTelemetry,
+  type OpenBoxTelemetryController
+} from "../otel/index.js";
 import { OpenBoxSpanProcessor } from "../span/index.js";
 import { OpenBoxConfigError } from "../types/index.js";
 import { wrapAgent } from "./wrap-agent.js";
@@ -16,7 +19,9 @@ import { wrapWorkflow } from "./wrap-workflow.js";
 
 const OPENBOX_RUNTIME = Symbol.for("openbox.mastra.runtime");
 const OPENBOX_WITH_OPENBOX = Symbol.for("openbox.mastra.withOpenBox");
-const OPENBOX_AGENT_LOCAL_PATCH = Symbol.for("openbox.mastra.withOpenBox.agentLocal");
+const OPENBOX_AGENT_LOCAL_PATCH = Symbol.for(
+  "openbox.mastra.withOpenBox.agentLocal"
+);
 const OPENBOX_MASTRA_PATCH = Symbol.for("openbox.mastra.withOpenBox.mastra");
 
 type GovernableMastra = Mastra;
@@ -25,8 +30,12 @@ type WorkflowRecord = Record<string, unknown>;
 
 interface AgentWithLocalRegistries extends Record<PropertyKey, unknown> {
   __setTools?: ((tools: ToolRecord) => void) | undefined;
-  listTools?: ((...args: unknown[]) => ToolRecord | Promise<ToolRecord>) | undefined;
-  listWorkflows?: ((...args: unknown[]) => WorkflowRecord | Promise<WorkflowRecord>) | undefined;
+  listTools?:
+    | ((...args: unknown[]) => ToolRecord | Promise<ToolRecord>)
+    | undefined;
+  listWorkflows?:
+    | ((...args: unknown[]) => WorkflowRecord | Promise<WorkflowRecord>)
+    | undefined;
 }
 
 export interface WithOpenBoxOptions extends OpenBoxConfigInput {
@@ -91,7 +100,9 @@ export function getOpenBoxRuntime(target: unknown): OpenBoxRuntime | undefined {
   return undefined;
 }
 
-async function createRuntime(options: WithOpenBoxOptions): Promise<OpenBoxRuntime> {
+async function createRuntime(
+  options: WithOpenBoxOptions
+): Promise<OpenBoxRuntime> {
   const config = parseOpenBoxConfig(options);
   const client =
     options.client ??
@@ -103,7 +114,9 @@ async function createRuntime(options: WithOpenBoxOptions): Promise<OpenBoxRuntim
 
   setOpenBoxConfig(config);
 
-  const ignoredUrls = [...new Set([config.apiUrl, ...(options.ignoredUrls ?? [])])];
+  const ignoredUrls = [
+    ...new Set([config.apiUrl, ...(options.ignoredUrls ?? [])])
+  ];
   const spanProcessor =
     options.spanProcessor ??
     new OpenBoxSpanProcessor({
@@ -169,7 +182,10 @@ function patchMastra(mastra: GovernableMastra, runtime: OpenBoxRuntime): void {
   const originalAddWorkflow = mastra.addWorkflow.bind(mastra);
   const originalAddAgent = mastra.addAgent.bind(mastra);
 
-  mastra.addTool = ((tool: Parameters<typeof originalAddTool>[0], key?: string) => {
+  mastra.addTool = ((
+    tool: Parameters<typeof originalAddTool>[0],
+    key?: string
+  ) => {
     originalAddTool(wrapTool(tool, runtime), key);
   }) as GovernableMastra["addTool"];
 
@@ -194,7 +210,10 @@ function patchMastra(mastra: GovernableMastra, runtime: OpenBoxRuntime): void {
   defineHiddenProperty(baseMastra, OPENBOX_MASTRA_PATCH, true);
 }
 
-function wrapTopLevelRegistries(mastra: GovernableMastra, runtime: OpenBoxRuntime): void {
+function wrapTopLevelRegistries(
+  mastra: GovernableMastra,
+  runtime: OpenBoxRuntime
+): void {
   wrapToolRecord(mastra.listTools(), runtime);
   wrapWorkflowRecord(mastra.listWorkflows(), runtime);
 
@@ -212,7 +231,9 @@ async function hydrateAgentLocalRegistries(
   const agents = mastra.listAgents();
 
   await Promise.all(
-    Object.values(agents).map(agent => hydrateAgentLocalRegistriesForAgent(agent, runtime))
+    Object.values(agents).map((agent) =>
+      hydrateAgentLocalRegistriesForAgent(agent, runtime)
+    )
   );
 }
 
@@ -257,7 +278,9 @@ function patchAgent<TAgent>(agent: TAgent, runtime: OpenBoxRuntime): TAgent {
       const result = originalListTools(...args);
 
       if (isPromise(result)) {
-        return result.then(tools => applyAgentToolRecord(baseAgent, tools, runtime));
+        return result.then((tools) =>
+          applyAgentToolRecord(baseAgent, tools, runtime)
+        );
       }
 
       return applyAgentToolRecord(baseAgent, result, runtime);
@@ -269,7 +292,9 @@ function patchAgent<TAgent>(agent: TAgent, runtime: OpenBoxRuntime): TAgent {
       const result = originalListWorkflows(...args);
 
       if (isPromise(result)) {
-        return result.then(workflows => wrapWorkflowRecord(workflows, runtime));
+        return result.then((workflows) =>
+          wrapWorkflowRecord(workflows, runtime)
+        );
       }
 
       return wrapWorkflowRecord(result, runtime);
@@ -323,10 +348,7 @@ function wrapWorkflowRecord<TRecord extends WorkflowRecord | undefined>(
   return workflows;
 }
 
-function attachRuntime(
-  target: object,
-  runtime: OpenBoxRuntime
-): void {
+function attachRuntime(target: object, runtime: OpenBoxRuntime): void {
   defineHiddenProperty(target, OPENBOX_RUNTIME, runtime);
 
   const nestedMastra = (target as { mastra?: unknown }).mastra;
@@ -372,6 +394,7 @@ function buildClientOptions(
 ): ConstructorParameters<typeof OpenBoxClient>[0] {
   return {
     ...(customFetch ? { fetch: customFetch } : {}),
+    ...(config.agentIdentity ? { agentIdentity: config.agentIdentity } : {}),
     apiKey: config.apiKey,
     apiUrl: config.apiUrl,
     evaluateMaxRetries: config.evaluateMaxRetries,

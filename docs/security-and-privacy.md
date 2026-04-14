@@ -36,6 +36,25 @@ Use `validate: false` only for:
 - mock servers
 - deliberately offline local development
 
+## Agent DID Signing
+
+When `OPENBOX_AGENT_DID` and `OPENBOX_AGENT_PRIVATE_KEY` are configured, the SDK signs OpenBox API requests with the agent DID identity returned during OpenBox agent registration.
+
+The SDK sends:
+
+- the registered agent DID
+- an ISO timestamp
+- a nonce
+- a SHA-256 body hash
+- an Ed25519 signature over the canonical request
+
+Production handling:
+
+- store `OPENBOX_AGENT_PRIVATE_KEY` in the agent runtime secret store
+- do not commit the private key to source control
+- do not reuse one agent private key for another agent
+- rotate by creating or rotating the OpenBox agent identity through the platform
+
 ## Capture Boundary
 
 The SDK can capture request and response bodies for HTTP telemetry, but it does so inside its own runtime rather than exposing that data as ordinary OTel span attributes.
@@ -50,11 +69,11 @@ This reduces accidental leakage through generic tracing exporters.
 
 ## Default Capture Posture
 
-| Setting | Default | Why |
-| --- | --- | --- |
-| `httpCapture` | `true` | useful governance and incident context |
-| `instrumentDatabases` | `true` | low-friction visibility into data access |
-| `instrumentFileIo` | `false` | file telemetry can be noisy and sensitive |
+| Setting               | Default | Why                                       |
+| --------------------- | ------- | ----------------------------------------- |
+| `httpCapture`         | `true`  | useful governance and incident context    |
+| `instrumentDatabases` | `true`  | low-friction visibility into data access  |
+| `instrumentFileIo`    | `false` | file telemetry can be noisy and sensitive |
 
 If your environment is highly sensitive:
 

@@ -2,6 +2,11 @@ import { z } from "zod";
 
 import { OpenBoxClient, type OpenBoxApiErrorPolicy } from "../client/index.js";
 import {
+  type OpenBoxAgentIdentity,
+  validateAgentDID,
+  validateEd25519PrivateKey
+} from "../identity/aip-signing.js";
+import {
   OpenBoxAuthError,
   OpenBoxConfigError,
   OpenBoxInsecureURLError
@@ -12,6 +17,8 @@ export const API_KEY_PATTERN = /^obx_(live|test)_[a-zA-Z0-9_]+$/;
 export interface OpenBoxConfigInput {
   apiKey?: string | undefined;
   apiUrl?: string | undefined;
+  agentDID?: string | undefined;
+  agentPrivateKey?: string | undefined;
   evaluateMaxRetries?: number | undefined;
   evaluateRetryBaseDelayMs?: number | undefined;
   governanceTimeout?: number | undefined;
@@ -33,6 +40,7 @@ export interface OpenBoxConfigInput {
 export interface OpenBoxConfig {
   apiKey: string;
   apiUrl: string;
+  agentIdentity: OpenBoxAgentIdentity | undefined;
   evaluateMaxRetries: number;
   evaluateRetryBaseDelayMs: number;
   governanceTimeout: number;
@@ -56,6 +64,12 @@ const OPENBOX_CONFIG_SCHEMA = z.object({
     message: "Invalid API key format. Expected 'obx_live_*' or 'obx_test_*'."
   }),
   apiUrl: z.string().min(1),
+  agentIdentity: z
+    .object({
+      did: z.string(),
+      privateKey: z.string()
+    })
+    .optional(),
   evaluateMaxRetries: z.number().int().nonnegative().default(2),
   evaluateRetryBaseDelayMs: z.number().int().nonnegative().default(150),
   governanceTimeout: z.number().nonnegative().default(30),
@@ -67,7 +81,9 @@ const OPENBOX_CONFIG_SCHEMA = z.object({
   onApiError: z.enum(["fail_open", "fail_closed"]).default("fail_open"),
   sendActivityStartEvent: z.boolean().default(true),
   sendStartEvent: z.boolean().default(true),
-  skipActivityTypes: z.set(z.string()).default(new Set(["send_governance_event"])),
+  skipActivityTypes: z
+    .set(z.string())
+    .default(new Set(["send_governance_event"])),
   skipHitlActivityTypes: z
     .set(z.string())
     .default(new Set(["send_governance_event"])),
@@ -101,6 +117,9 @@ export function parseOpenBoxConfig(
 ): OpenBoxConfig {
   const apiUrl = input.apiUrl ?? env.OPENBOX_URL;
   const apiKey = input.apiKey ?? env.OPENBOX_API_KEY;
+  const agentDID = input.agentDID ?? env.OPENBOX_AGENT_DID;
+  const agentPrivateKey =
+    input.agentPrivateKey ?? env.OPENBOX_AGENT_PRIVATE_KEY;
 
   if (!apiUrl || !apiKey) {
     throw new OpenBoxConfigError(
@@ -115,10 +134,12 @@ export function parseOpenBoxConfig(
   }
 
   validateUrlSecurity(apiUrl);
+  const agentIdentity = parseAgentIdentity(agentDID, agentPrivateKey);
 
   const parsed = OPENBOX_CONFIG_SCHEMA.parse({
     apiKey,
     apiUrl: apiUrl.replace(/\/+$/, ""),
+    ...(agentIdentity ? { agentIdentity } : {}),
     evaluateMaxRetries:
       input.evaluateMaxRetries ??
       parseInteger(env.OPENBOX_EVALUATE_MAX_RETRIES, 2),
@@ -126,14 +147,18 @@ export function parseOpenBoxConfig(
       input.evaluateRetryBaseDelayMs ??
       parseInteger(env.OPENBOX_EVALUATE_RETRY_BASE_DELAY_MS, 150),
     governanceTimeout:
-      input.governanceTimeout ?? parseNumber(env.OPENBOX_GOVERNANCE_TIMEOUT, 30),
-    hitlEnabled: input.hitlEnabled ?? parseBoolean(env.OPENBOX_HITL_ENABLED, true),
-    httpCapture: input.httpCapture ?? parseBoolean(env.OPENBOX_HTTP_CAPTURE, true),
+      input.governanceTimeout ??
+      parseNumber(env.OPENBOX_GOVERNANCE_TIMEOUT, 30),
+    hitlEnabled:
+      input.hitlEnabled ?? parseBoolean(env.OPENBOX_HITL_ENABLED, true),
+    httpCapture:
+      input.httpCapture ?? parseBoolean(env.OPENBOX_HTTP_CAPTURE, true),
     instrumentDatabases:
       input.instrumentDatabases ??
       parseBoolean(env.OPENBOX_INSTRUMENT_DATABASES, true),
     instrumentFileIo:
-      input.instrumentFileIo ?? parseBoolean(env.OPENBOX_INSTRUMENT_FILE_IO, false),
+      input.instrumentFileIo ??
+      parseBoolean(env.OPENBOX_INSTRUMENT_FILE_IO, false),
     maxEvaluatePayloadBytes:
       input.maxEvaluatePayloadBytes ??
       parseInteger(env.OPENBOX_MAX_EVALUATE_PAYLOAD_BYTES, 256_000),
@@ -150,7 +175,9 @@ export function parseOpenBoxConfig(
       parseCsvSet(env.OPENBOX_SKIP_ACTIVITY_TYPES, ["send_governance_event"]),
     skipHitlActivityTypes:
       iterableToSet(input.skipHitlActivityTypes) ??
-      parseCsvSet(env.OPENBOX_SKIP_HITL_ACTIVITY_TYPES, ["send_governance_event"]),
+      parseCsvSet(env.OPENBOX_SKIP_HITL_ACTIVITY_TYPES, [
+        "send_governance_event"
+      ]),
     skipSignals:
       iterableToSet(input.skipSignals) ?? parseCsvSet(env.OPENBOX_SKIP_SIGNALS),
     skipWorkflowTypes:
@@ -159,7 +186,10 @@ export function parseOpenBoxConfig(
     validate: input.validate ?? parseBoolean(env.OPENBOX_VALIDATE, true)
   });
 
-  return parsed;
+  return {
+    ...parsed,
+    agentIdentity: parsed.agentIdentity
+  };
 }
 
 export async function initializeOpenBox(
@@ -169,6 +199,7 @@ export async function initializeOpenBox(
 
   if (config.validate) {
     const client = new OpenBoxClient({
+      ...(config.agentIdentity ? { agentIdentity: config.agentIdentity } : {}),
       apiKey: config.apiKey,
       apiUrl: config.apiUrl,
       timeoutSeconds: config.governanceTimeout
@@ -182,6 +213,35 @@ export async function initializeOpenBox(
   return config;
 }
 
+function parseAgentIdentity(
+  did: string | undefined,
+  privateKey: string | undefined
+): OpenBoxAgentIdentity | undefined {
+  if (!did && !privateKey) {
+    return undefined;
+  }
+
+  if (!did || !privateKey) {
+    throw new OpenBoxConfigError(
+      "Both OPENBOX_AGENT_DID and OPENBOX_AGENT_PRIVATE_KEY are required when agent DID identity is configured."
+    );
+  }
+
+  if (!validateAgentDID(did)) {
+    throw new OpenBoxConfigError(
+      "Invalid agent DID format. Expected did:aip:<uuid>."
+    );
+  }
+
+  if (!validateEd25519PrivateKey(privateKey)) {
+    throw new OpenBoxConfigError(
+      "Invalid agent private key. Expected base64-encoded 32-byte Ed25519 private key."
+    );
+  }
+
+  return { did, privateKey };
+}
+
 export function getOpenBoxConfig(): OpenBoxConfig | undefined {
   return globalConfig;
 }
@@ -190,7 +250,10 @@ export function setOpenBoxConfig(config: OpenBoxConfig): void {
   globalConfig = config;
 }
 
-function parseBoolean(value: string | undefined, defaultValue: boolean): boolean {
+function parseBoolean(
+  value: string | undefined,
+  defaultValue: boolean
+): boolean {
   if (value == null) {
     return defaultValue;
   }
@@ -219,7 +282,7 @@ function parseCsvSet(
   return new Set(
     value
       .split(",")
-      .map(item => item.trim())
+      .map((item) => item.trim())
       .filter(Boolean)
   );
 }

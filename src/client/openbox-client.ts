@@ -4,12 +4,17 @@ import {
   OpenBoxAuthError,
   OpenBoxNetworkError
 } from "../types/index.js";
+import {
+  type OpenBoxAgentIdentity,
+  buildSignedIdentityHeaders
+} from "../identity/aip-signing.js";
 
 export type OpenBoxApiErrorPolicy = "fail_open" | "fail_closed";
 
 export interface OpenBoxClientOptions {
   apiKey: string;
   apiUrl: string;
+  agentIdentity?: OpenBoxAgentIdentity | undefined;
   evaluateMaxRetries?: number | undefined;
   evaluateRetryBaseDelayMs?: number | undefined;
   fetch?: typeof fetch;
@@ -37,6 +42,7 @@ const USER_AGENT = "OpenBox-SDK/1.0";
 export class OpenBoxClient {
   public readonly apiKey: string;
   public readonly apiUrl: string;
+  public readonly agentIdentity: OpenBoxAgentIdentity | undefined;
   public readonly evaluateMaxRetries: number;
   public readonly evaluateRetryBaseDelayMs: number;
   public readonly onApiError: OpenBoxApiErrorPolicy;
@@ -48,6 +54,7 @@ export class OpenBoxClient {
   public constructor({
     apiKey,
     apiUrl,
+    agentIdentity,
     evaluateMaxRetries = 0,
     evaluateRetryBaseDelayMs = 150,
     fetch: customFetch,
@@ -56,8 +63,12 @@ export class OpenBoxClient {
   }: OpenBoxClientOptions) {
     this.apiKey = apiKey;
     this.apiUrl = apiUrl.replace(/\/+$/, "");
+    this.agentIdentity = agentIdentity;
     this.evaluateMaxRetries = Math.max(0, Math.floor(evaluateMaxRetries));
-    this.evaluateRetryBaseDelayMs = Math.max(0, Math.floor(evaluateRetryBaseDelayMs));
+    this.evaluateRetryBaseDelayMs = Math.max(
+      0,
+      Math.floor(evaluateRetryBaseDelayMs)
+    );
     this.onApiError = onApiError;
     this.timeoutSeconds = timeoutSeconds;
     this.#fetch = customFetch ?? fetch;
@@ -70,9 +81,7 @@ export class OpenBoxClient {
         this.#buildUrl("/api/v1/auth/validate"),
         {
           headers: {
-            Authorization: `Bearer ${this.apiKey}`,
-            "Content-Type": "application/json",
-            "User-Agent": USER_AGENT
+            ...this.#buildHeaders("GET", "/api/v1/auth/validate")
           },
           method: "GET",
           signal: AbortSignal.timeout(this.timeoutSeconds * 1000)
@@ -93,7 +102,10 @@ export class OpenBoxClient {
         `Cannot reach OpenBox Core at ${this.apiUrl}: HTTP ${response.status}`
       );
     } catch (error) {
-      if (error instanceof OpenBoxAuthError || error instanceof OpenBoxNetworkError) {
+      if (
+        error instanceof OpenBoxAuthError ||
+        error instanceof OpenBoxNetworkError
+      ) {
         throw error;
       }
 
@@ -125,19 +137,20 @@ export class OpenBoxClient {
         });
       }
 
+      const body = JSON.stringify({
+        activity_id: payload.activityId,
+        run_id: payload.runId,
+        workflow_id: payload.workflowId
+      });
       const response = await this.#fetch(
         this.#buildUrl("/api/v1/governance/approval"),
         {
-          body: JSON.stringify({
-            activity_id: payload.activityId,
-            run_id: payload.runId,
-            workflow_id: payload.workflowId
-          }),
-          headers: {
-            Authorization: `Bearer ${this.apiKey}`,
-            "Content-Type": "application/json",
-            "User-Agent": USER_AGENT
-          },
+          body,
+          headers: this.#buildHeaders(
+            "POST",
+            "/api/v1/governance/approval",
+            body
+          ),
           method: "POST",
           signal: AbortSignal.timeout(this.timeoutSeconds * 1000)
         }
@@ -186,6 +199,26 @@ export class OpenBoxClient {
     return `${this.apiUrl}${pathname}`;
   }
 
+  #buildHeaders(
+    method: string,
+    pathname: string,
+    body?: string | undefined
+  ): Record<string, string> {
+    return {
+      Authorization: `Bearer ${this.apiKey}`,
+      "Content-Type": "application/json",
+      "User-Agent": USER_AGENT,
+      ...(this.agentIdentity
+        ? buildSignedIdentityHeaders({
+            body,
+            identity: this.agentIdentity,
+            method,
+            pathname
+          })
+        : {})
+    };
+  }
+
   async #evaluateWithRetry(
     payload: Record<string, unknown>
   ): Promise<GovernanceVerdictResponse> {
@@ -207,8 +240,7 @@ export class OpenBoxClient {
         if (this.#debugEnabled) {
           console.warn("[openbox-sdk] evaluate.retry", {
             attempt: attempt + 1,
-            error:
-              error instanceof Error ? error.message : String(error),
+            error: error instanceof Error ? error.message : String(error),
             wait_ms: waitMs
           });
         }
@@ -226,18 +258,22 @@ export class OpenBoxClient {
     payload: Record<string, unknown>
   ): Promise<GovernanceVerdictResponse> {
     if (this.#debugEnabled) {
-      console.info("[openbox-sdk] evaluate.request", summarizeEvaluatePayload(payload));
+      console.info(
+        "[openbox-sdk] evaluate.request",
+        summarizeEvaluatePayload(payload)
+      );
     }
 
+    const body = JSON.stringify(payload);
     const response = await this.#fetch(
       this.#buildUrl("/api/v1/governance/evaluate"),
       {
-        body: JSON.stringify(payload),
-        headers: {
-          Authorization: `Bearer ${this.apiKey}`,
-          "Content-Type": "application/json",
-          "User-Agent": USER_AGENT
-        },
+        body,
+        headers: this.#buildHeaders(
+          "POST",
+          "/api/v1/governance/evaluate",
+          body
+        ),
         method: "POST",
         signal: AbortSignal.timeout(this.timeoutSeconds * 1000)
       }
@@ -254,9 +290,7 @@ export class OpenBoxClient {
         });
       }
 
-      throw new GovernanceAPIError(
-        `HTTP ${response.status}: ${body}`
-      );
+      throw new GovernanceAPIError(`HTTP ${response.status}: ${body}`);
     }
 
     const parsed = (await response.json()) as Parameters<
@@ -365,8 +399,12 @@ function normalizeEvaluatePayload(
 ): Record<string, unknown> {
   const normalized: Record<string, unknown> = { ...payload };
   const eventType =
-    typeof normalized.event_type === "string" ? normalized.event_type : undefined;
-  const legacyHookSpan = extractLegacyHookSpanFromTrigger(normalized.hook_trigger);
+    typeof normalized.event_type === "string"
+      ? normalized.event_type
+      : undefined;
+  const legacyHookSpan = extractLegacyHookSpanFromTrigger(
+    normalized.hook_trigger
+  );
   const normalizedHookTrigger = normalizeHookTrigger(normalized.hook_trigger);
 
   if (normalizedHookTrigger !== undefined) {
@@ -505,7 +543,7 @@ function normalizeSpansField(
 
   if (Array.isArray(value)) {
     return value.filter(
-      span => span !== null && typeof span === "object"
+      (span) => span !== null && typeof span === "object"
     ) as Record<string, unknown>[];
   }
 
@@ -516,9 +554,7 @@ function normalizeSpansField(
   return [];
 }
 
-function summarizeSpans(
-  spans: unknown
-): {
+function summarizeSpans(spans: unknown): {
   detectedSpanCount: number;
   hasSpans: boolean;
   latestSpanStage: string | undefined;
@@ -549,13 +585,14 @@ function summarizeSpans(
     detectedSpanCount: spanList.length,
     hasSpans: spanList.length > 0,
     latestSpanStage,
-    syntheticModelUsageSpan: spanList.some(span => {
+    syntheticModelUsageSpan: spanList.some((span) => {
       if (!span || typeof span !== "object") {
         return false;
       }
 
       return (
-        (span as Record<string, unknown>).name === "openbox.synthetic.model_usage"
+        (span as Record<string, unknown>).name ===
+        "openbox.synthetic.model_usage"
       );
     })
   };
@@ -586,7 +623,7 @@ function isRetryableEvaluateError(error: unknown): boolean {
 }
 
 function delay(ms: number): Promise<void> {
-  return new Promise(resolve => {
+  return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
 }

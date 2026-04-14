@@ -8,11 +8,11 @@ This SDK supports three integration patterns:
 
 ## Choose The Right Pattern
 
-| Pattern | Use it when |
-| --- | --- |
+| Pattern         | Use it when                                                         |
+| --------------- | ------------------------------------------------------------------- |
 | `withOpenBox()` | you want one production runtime to govern the whole Mastra instance |
-| manual wrappers | you need explicit startup order or selective adoption |
-| telemetry-only | you want OpenBox span capture without full Mastra wrapping |
+| manual wrappers | you need explicit startup order or selective adoption               |
+| telemetry-only  | you want OpenBox span capture without full Mastra wrapping          |
 
 ## `withOpenBox()`
 
@@ -23,7 +23,9 @@ import { withOpenBox } from "@openbox-ai/openbox-mastra-sdk";
 
 const governedMastra = await withOpenBox(mastra, {
   apiKey: process.env.OPENBOX_API_KEY,
-  apiUrl: process.env.OPENBOX_URL
+  apiUrl: process.env.OPENBOX_URL,
+  agentDID: process.env.OPENBOX_AGENT_DID,
+  agentPrivateKey: process.env.OPENBOX_AGENT_PRIVATE_KEY
 });
 ```
 
@@ -51,10 +53,15 @@ Calling `withOpenBox()` again on the same Mastra instance reuses the existing ru
 Example:
 
 ```ts
-await withOpenBox({ mastra }, {
-  apiKey: process.env.OPENBOX_API_KEY,
-  apiUrl: process.env.OPENBOX_URL
-});
+await withOpenBox(
+  { mastra },
+  {
+    apiKey: process.env.OPENBOX_API_KEY,
+    apiUrl: process.env.OPENBOX_URL,
+    agentDID: process.env.OPENBOX_AGENT_DID,
+    agentPrivateKey: process.env.OPENBOX_AGENT_PRIVATE_KEY
+  }
+);
 ```
 
 ## Manual Wrapping
@@ -74,10 +81,13 @@ import {
 
 const config = parseOpenBoxConfig({
   apiKey: process.env.OPENBOX_API_KEY,
-  apiUrl: process.env.OPENBOX_URL
+  apiUrl: process.env.OPENBOX_URL,
+  agentDID: process.env.OPENBOX_AGENT_DID,
+  agentPrivateKey: process.env.OPENBOX_AGENT_PRIVATE_KEY
 });
 
 const client = new OpenBoxClient({
+  ...(config.agentIdentity ? { agentIdentity: config.agentIdentity } : {}),
   apiKey: config.apiKey,
   apiUrl: config.apiUrl,
   evaluateMaxRetries: config.evaluateMaxRetries,
@@ -139,6 +149,13 @@ import {
 } from "@openbox-ai/openbox-mastra-sdk";
 
 const client = new OpenBoxClient({
+  agentIdentity:
+    process.env.OPENBOX_AGENT_DID && process.env.OPENBOX_AGENT_PRIVATE_KEY
+      ? {
+          did: process.env.OPENBOX_AGENT_DID,
+          privateKey: process.env.OPENBOX_AGENT_PRIVATE_KEY
+        }
+      : undefined,
   apiKey: process.env.OPENBOX_API_KEY!,
   apiUrl: process.env.OPENBOX_URL!
 });

@@ -76,7 +76,9 @@ describe("parseOpenBoxConfig", () => {
     expect(config.sendActivityStartEvent).toBe(true);
     expect(config.skipWorkflowTypes).toEqual(new Set());
     expect(config.skipSignals).toEqual(new Set());
-    expect(config.skipActivityTypes).toEqual(new Set(["send_governance_event"]));
+    expect(config.skipActivityTypes).toEqual(
+      new Set(["send_governance_event"])
+    );
     expect(config.skipHitlActivityTypes).toEqual(
       new Set(["send_governance_event"])
     );
@@ -93,6 +95,8 @@ describe("parseOpenBoxConfig", () => {
       {},
       {
         OPENBOX_API_KEY: "obx_test_env_key",
+        OPENBOX_AGENT_DID: "did:aip:123e4567-e89b-12d3-a456-426614174000",
+        OPENBOX_AGENT_PRIVATE_KEY: Buffer.alloc(32).toString("base64"),
         OPENBOX_EVALUATE_MAX_RETRIES: "4",
         OPENBOX_EVALUATE_RETRY_BASE_DELAY_MS: "25",
         OPENBOX_GOVERNANCE_POLICY: "fail_closed",
@@ -114,6 +118,10 @@ describe("parseOpenBoxConfig", () => {
 
     expect(config.apiUrl).toBe("https://api.openbox.ai");
     expect(config.apiKey).toBe("obx_test_env_key");
+    expect(config.agentIdentity).toEqual({
+      did: "did:aip:123e4567-e89b-12d3-a456-426614174000",
+      privateKey: Buffer.alloc(32).toString("base64")
+    });
     expect(config.evaluateMaxRetries).toBe(4);
     expect(config.evaluateRetryBaseDelayMs).toBe(25);
     expect(config.governanceTimeout).toBe(45.5);
@@ -142,6 +150,16 @@ describe("parseOpenBoxConfig", () => {
 
   it("raises when required config is missing", () => {
     expect(() => parseOpenBoxConfig({})).toThrow(OpenBoxConfigError);
+  });
+
+  it("requires DID and private key to be configured together", () => {
+    expect(() =>
+      parseOpenBoxConfig({
+        agentDID: "did:aip:123e4567-e89b-12d3-a456-426614174000",
+        apiKey: "obx_live_valid_key",
+        apiUrl: "https://api.openbox.ai"
+      })
+    ).toThrow(OpenBoxConfigError);
   });
 });
 
