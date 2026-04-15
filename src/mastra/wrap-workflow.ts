@@ -13,6 +13,7 @@ import {
 } from "../governance/activity-runtime.js";
 import {
   getOpenBoxExecutionContext,
+  mergeOpenBoxEventMetadata,
   runWithOpenBoxExecutionContext
 } from "../governance/context.js";
 import type { GovernanceVerdictResponse } from "../types/index.js";
@@ -24,6 +25,7 @@ import {
   Verdict,
   WorkflowEventType
 } from "../types/index.js";
+import { resolveOpenBoxActivityMetadata } from "./event-metadata.js";
 import type { WrapToolOptions } from "./wrap-tool.js";
 
 const OPENBOX_WRAPPED_WORKFLOW = Symbol.for("openbox.mastra.wrapWorkflow");
@@ -101,6 +103,7 @@ function wrapStep(step: WorkflowStep, options: WrapToolOptions): void {
         });
       },
       input: params.inputData,
+      metadata: resolveOpenBoxActivityMetadata(step, params),
       runtimeContext: {
         workflow: {
           runId: params.runId,
@@ -499,10 +502,14 @@ async function evaluateWorkflowEvent(
     return null;
   }
 
+  const executionContext = getOpenBoxExecutionContext();
+  const metadata = mergeOpenBoxEventMetadata(undefined, executionContext?.metadata);
+
   try {
     return await context.options.client.evaluate({
       source: "workflow-telemetry",
       timestamp: new Date().toISOString(),
+      ...(metadata ? { metadata } : {}),
       ...payload
     });
   } catch (error) {

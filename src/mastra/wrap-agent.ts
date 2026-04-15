@@ -11,7 +11,11 @@ import {
   normalizeSpansForGovernance,
   serializeValue
 } from "../governance/activity-runtime.js";
-import { runWithOpenBoxExecutionContext } from "../governance/context.js";
+import {
+  getOpenBoxExecutionContext,
+  mergeOpenBoxEventMetadata,
+  runWithOpenBoxExecutionContext
+} from "../governance/context.js";
 import type { GovernanceVerdictResponse } from "../types/index.js";
 import {
   ApprovalExpiredError,
@@ -2099,9 +2103,14 @@ async function evaluateAgentEvent(
     }
 
     try {
+      const metadata = mergeOpenBoxEventMetadata(
+        undefined,
+        getOpenBoxExecutionContext()?.metadata
+      );
       const result = await options.client.evaluate({
         source: "workflow-telemetry",
         timestamp: new Date().toISOString(),
+        ...(metadata ? { metadata } : {}),
         ...candidate.payload
       });
 

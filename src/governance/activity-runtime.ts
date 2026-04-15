@@ -19,6 +19,7 @@ import {
 } from "../types/index.js";
 import {
   getOpenBoxExecutionContext,
+  mergeOpenBoxEventMetadata,
   runWithOpenBoxExecutionContext
 } from "./context.js";
 import {
@@ -56,6 +57,7 @@ export interface GovernedActivityOptions<TInput, TOutput> {
   dependencies: ActivityRuntimeDependencies;
   execute: (input: TInput) => Promise<TOutput>;
   input: TInput;
+  metadata?: Record<string, unknown> | undefined;
   runtimeContext: ToolExecutionContextLike;
   type: string;
 }
@@ -64,10 +66,15 @@ export async function executeGovernedActivity<TInput, TOutput>({
   dependencies,
   execute,
   input,
+  metadata: configuredMetadata,
   runtimeContext,
   type
 }: GovernedActivityOptions<TInput, TOutput>): Promise<TOutput | undefined> {
   const descriptor = resolveActivityDescriptor(type, runtimeContext);
+  const eventMetadata = mergeOpenBoxEventMetadata(
+    getOpenBoxExecutionContext()?.metadata,
+    configuredMetadata
+  );
   const startedInputForEvent = appendGoalToActivityInput(
     serializeActivityInputForStartEvent(input),
     descriptor.goal
@@ -104,12 +111,13 @@ export async function executeGovernedActivity<TInput, TOutput>({
         activity_id: descriptor.activityId,
         activity_input: startedInputForEvent,
         activity_type: descriptor.activityType,
-        attempt: descriptor.attempt,
-        event_type: WorkflowEventType.ACTIVITY_STARTED,
-        ...(descriptor.goal ? { goal: descriptor.goal } : {}),
-        run_id: descriptor.runId,
-        task_queue: descriptor.taskQueue,
-        workflow_id: descriptor.workflowId,
+      attempt: descriptor.attempt,
+      event_type: WorkflowEventType.ACTIVITY_STARTED,
+      ...(descriptor.goal ? { goal: descriptor.goal } : {}),
+      ...(eventMetadata ? { metadata: eventMetadata } : {}),
+      run_id: descriptor.runId,
+      task_queue: descriptor.taskQueue,
+      workflow_id: descriptor.workflowId,
         workflow_type: descriptor.workflowType
       })
     : null;
@@ -176,6 +184,7 @@ export async function executeGovernedActivity<TInput, TOutput>({
       runId: descriptor.runId,
       source: "tool",
       taskQueue: descriptor.taskQueue,
+      ...(eventMetadata ? { metadata: eventMetadata } : {}),
       workflowId: descriptor.workflowId,
       workflowType: descriptor.workflowType
     },
@@ -280,6 +289,7 @@ export async function executeGovernedActivity<TInput, TOutput>({
               error,
               event_type: WorkflowEventType.ACTIVITY_COMPLETED,
               ...(descriptor.goal ? { goal: descriptor.goal } : {}),
+              ...(eventMetadata ? { metadata: eventMetadata } : {}),
               run_id: descriptor.runId,
               span_count: 0,
               start_time: activityStartMs,
