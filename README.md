@@ -32,6 +32,13 @@ export OPENBOX_URL="https://your-openbox-core.example"
 export OPENBOX_API_KEY="obx_live_your_key"
 ```
 
+For agents that require DID signing, OpenBox also returns a DID and private key during agent registration or identity rotation. Set both values together:
+
+```bash
+export OPENBOX_AGENT_DID="did:aip:your-agent-did"
+export OPENBOX_AGENT_PRIVATE_KEY="base64_raw_ed25519_seed"
+```
+
 Optional but commonly used:
 
 ```bash
@@ -133,6 +140,8 @@ Most applications only need a small part of the config surface:
 | --- | --- | --- |
 | `apiUrl` | required | point the SDK at OpenBox Core |
 | `apiKey` | required | authenticate governance and approval calls |
+| `agentDid` | unset | identify the agent for DID-signed OpenBox requests |
+| `agentPrivateKey` | unset | sign OpenBox requests for agents with signing required |
 | `validate` | `true` | fail fast on invalid credentials or insecure URL setup |
 | `onApiError` | `"fail_open"` | decide whether OpenBox outages should halt execution |
 | `hitlEnabled` | `true` | enable approval suspension or polling flows |
@@ -151,6 +160,7 @@ See [docs/configuration.md](./docs/configuration.md) for the complete surface.
 
 - Keep `validate` enabled outside tests and local mocks.
 - Use HTTPS for all non-localhost OpenBox endpoints.
+- Store `OPENBOX_AGENT_PRIVATE_KEY` as a secret and never share it between agents.
 - Decide explicitly between `fail_open` and `fail_closed` before deployment.
 - Treat hook-triggered telemetry as internal operational data unless your policy intentionally governs it.
 - Keep `instrumentFileIo` disabled until you have a concrete file-governance requirement.
