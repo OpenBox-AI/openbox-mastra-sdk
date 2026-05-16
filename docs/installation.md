@@ -34,10 +34,18 @@ export OPENBOX_URL="https://your-openbox-core.example"
 export OPENBOX_API_KEY="obx_live_your_key"
 ```
 
+If the OpenBox agent requires DID signing, also set the identity values returned by OpenBox during agent registration or rotation:
+
+```bash
+export OPENBOX_AGENT_DID="did:aip:your-agent-did"
+export OPENBOX_AGENT_PRIVATE_KEY="base64_raw_ed25519_seed"
+```
+
 Validation enforced by the SDK:
 
 - `OPENBOX_API_KEY` must match `obx_live_*` or `obx_test_*`
 - `OPENBOX_URL` must use HTTPS unless the host is `localhost`, `127.0.0.1`, or `::1`
+- `OPENBOX_AGENT_DID` and `OPENBOX_AGENT_PRIVATE_KEY` must be provided together when either is set
 
 If either required value is missing, the SDK throws an `OpenBoxConfigError` during startup.
 

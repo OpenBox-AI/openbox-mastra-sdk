@@ -16,7 +16,21 @@ Checks:
 2. Verify `OPENBOX_API_KEY` is set.
 3. Verify the API key matches `obx_live_*` or `obx_test_*`.
 4. Verify non-localhost URLs use HTTPS.
-5. If using a mock server, set `validate: false`.
+5. If the agent uses DID signing, verify both `OPENBOX_AGENT_DID` and `OPENBOX_AGENT_PRIVATE_KEY` are set.
+6. If using a mock server, set `validate: false`.
+
+## OpenBox Returns `401 invalid token or agent identity`
+
+Checks:
+
+1. Verify the API key belongs to the same agent as `OPENBOX_AGENT_DID`.
+2. Verify `OPENBOX_AGENT_DID` uses `did:aip:<uuid>`.
+3. Verify `OPENBOX_AGENT_PRIVATE_KEY` is the base64 raw Ed25519 seed returned by OpenBox, not a PEM file or public key.
+4. Verify the private key was not rotated in OpenBox without updating the runtime secret.
+5. Verify the host clock is synchronized; OpenBox rejects stale or future timestamps.
+6. Verify no proxy mutates the JSON body after the SDK signs it.
+
+If only one DID environment variable is set, the SDK fails startup with `OpenBoxConfigError` rather than sending unsigned requests.
 
 ## No Events Show Up In OpenBox
 

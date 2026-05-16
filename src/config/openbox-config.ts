@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { OpenBoxClient, type OpenBoxApiErrorPolicy } from "../client/index.js";
+import { validateAgentIdentityConfig } from "../identity/index.js";
 import {
   OpenBoxAuthError,
   OpenBoxConfigError,
@@ -10,6 +11,8 @@ import {
 export const API_KEY_PATTERN = /^obx_(live|test)_[a-zA-Z0-9_]+$/;
 
 export interface OpenBoxConfigInput {
+  agentDid?: string | undefined;
+  agentPrivateKey?: string | undefined;
   apiKey?: string | undefined;
   apiUrl?: string | undefined;
   evaluateMaxRetries?: number | undefined;
@@ -31,6 +34,8 @@ export interface OpenBoxConfigInput {
 }
 
 export interface OpenBoxConfig {
+  agentDid: string | undefined;
+  agentPrivateKey: string | undefined;
   apiKey: string;
   apiUrl: string;
   evaluateMaxRetries: number;
@@ -52,6 +57,8 @@ export interface OpenBoxConfig {
 }
 
 const OPENBOX_CONFIG_SCHEMA = z.object({
+  agentDid: z.string().optional(),
+  agentPrivateKey: z.string().optional(),
   apiKey: z.string().regex(API_KEY_PATTERN, {
     message: "Invalid API key format. Expected 'obx_live_*' or 'obx_test_*'."
   }),
@@ -101,6 +108,10 @@ export function parseOpenBoxConfig(
 ): OpenBoxConfig {
   const apiUrl = input.apiUrl ?? env.OPENBOX_URL;
   const apiKey = input.apiKey ?? env.OPENBOX_API_KEY;
+  const agentIdentity = parseAgentIdentityConfig(
+    input.agentDid ?? env.OPENBOX_AGENT_DID,
+    input.agentPrivateKey ?? env.OPENBOX_AGENT_PRIVATE_KEY
+  );
 
   if (!apiUrl || !apiKey) {
     throw new OpenBoxConfigError(
@@ -117,6 +128,8 @@ export function parseOpenBoxConfig(
   validateUrlSecurity(apiUrl);
 
   const parsed = OPENBOX_CONFIG_SCHEMA.parse({
+    agentDid: agentIdentity?.did,
+    agentPrivateKey: agentIdentity?.privateKey,
     apiKey,
     apiUrl: apiUrl.replace(/\/+$/, ""),
     evaluateMaxRetries:
@@ -159,7 +172,11 @@ export function parseOpenBoxConfig(
     validate: input.validate ?? parseBoolean(env.OPENBOX_VALIDATE, true)
   });
 
-  return parsed;
+  return {
+    ...parsed,
+    agentDid: agentIdentity?.did,
+    agentPrivateKey: agentIdentity?.privateKey
+  };
 }
 
 export async function initializeOpenBox(
@@ -169,6 +186,8 @@ export async function initializeOpenBox(
 
   if (config.validate) {
     const client = new OpenBoxClient({
+      agentDid: config.agentDid,
+      agentPrivateKey: config.agentPrivateKey,
       apiKey: config.apiKey,
       apiUrl: config.apiUrl,
       timeoutSeconds: config.governanceTimeout
@@ -188,6 +207,34 @@ export function getOpenBoxConfig(): OpenBoxConfig | undefined {
 
 export function setOpenBoxConfig(config: OpenBoxConfig): void {
   globalConfig = config;
+}
+
+function parseAgentIdentityConfig(
+  agentDidValue: string | undefined,
+  agentPrivateKeyValue: string | undefined
+): { did: string; privateKey: string } | undefined {
+  const agentDid = normalizeOptionalString(agentDidValue);
+  const agentPrivateKey = normalizeOptionalString(agentPrivateKeyValue);
+
+  if (!agentDid && !agentPrivateKey) {
+    return undefined;
+  }
+
+  if (!agentDid || !agentPrivateKey) {
+    throw new OpenBoxConfigError(
+      "Both OPENBOX_AGENT_DID and OPENBOX_AGENT_PRIVATE_KEY are required when configuring OpenBox agent identity."
+    );
+  }
+
+  return validateAgentIdentityConfig({
+    did: agentDid,
+    privateKey: agentPrivateKey
+  });
+}
+
+function normalizeOptionalString(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
 }
 
 function parseBoolean(value: string | undefined, defaultValue: boolean): boolean {

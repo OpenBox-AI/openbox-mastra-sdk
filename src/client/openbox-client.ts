@@ -2,12 +2,20 @@ import {
   GovernanceAPIError,
   GovernanceVerdictResponse,
   OpenBoxAuthError,
+  OpenBoxConfigError,
   OpenBoxNetworkError
 } from "../types/index.js";
+import {
+  createAgentIdentityHeaders,
+  type AgentIdentityConfig,
+  validateAgentIdentityConfig
+} from "../identity/index.js";
 
 export type OpenBoxApiErrorPolicy = "fail_open" | "fail_closed";
 
 export interface OpenBoxClientOptions {
+  agentDid?: string | undefined;
+  agentPrivateKey?: string | undefined;
   apiKey: string;
   apiUrl: string;
   evaluateMaxRetries?: number | undefined;
@@ -35,6 +43,8 @@ export interface ApprovalPollResponse {
 const USER_AGENT = "OpenBox-SDK/1.0";
 
 export class OpenBoxClient {
+  public readonly agentDid: string | undefined;
+  public readonly agentPrivateKey: string | undefined;
   public readonly apiKey: string;
   public readonly apiUrl: string;
   public readonly evaluateMaxRetries: number;
@@ -44,8 +54,11 @@ export class OpenBoxClient {
 
   readonly #fetch: typeof fetch;
   readonly #debugEnabled: boolean;
+  readonly #agentIdentity: AgentIdentityConfig | undefined;
 
   public constructor({
+    agentDid,
+    agentPrivateKey,
     apiKey,
     apiUrl,
     evaluateMaxRetries = 0,
@@ -54,6 +67,12 @@ export class OpenBoxClient {
     onApiError = "fail_open",
     timeoutSeconds = 30
   }: OpenBoxClientOptions) {
+    const agentIdentity = parseOptionalAgentIdentityConfig(
+      agentDid,
+      agentPrivateKey
+    );
+    this.agentDid = agentIdentity?.did;
+    this.agentPrivateKey = agentIdentity?.privateKey;
     this.apiKey = apiKey;
     this.apiUrl = apiUrl.replace(/\/+$/, "");
     this.evaluateMaxRetries = Math.max(0, Math.floor(evaluateMaxRetries));
@@ -62,6 +81,7 @@ export class OpenBoxClient {
     this.timeoutSeconds = timeoutSeconds;
     this.#fetch = customFetch ?? fetch;
     this.#debugEnabled = isOpenBoxDebugEnabled();
+    this.#agentIdentity = agentIdentity;
   }
 
   public async validateApiKey(): Promise<void> {
@@ -69,11 +89,11 @@ export class OpenBoxClient {
       const response = await this.#fetch(
         this.#buildUrl("/api/v1/auth/validate"),
         {
-          headers: {
-            Authorization: `Bearer ${this.apiKey}`,
-            "Content-Type": "application/json",
-            "User-Agent": USER_AGENT
-          },
+          headers: this.#buildJsonHeaders({
+            body: "",
+            method: "GET",
+            pathname: "/api/v1/auth/validate"
+          }),
           method: "GET",
           signal: AbortSignal.timeout(this.timeoutSeconds * 1000)
         }
@@ -125,19 +145,20 @@ export class OpenBoxClient {
         });
       }
 
+      const body = JSON.stringify({
+        activity_id: payload.activityId,
+        run_id: payload.runId,
+        workflow_id: payload.workflowId
+      });
       const response = await this.#fetch(
         this.#buildUrl("/api/v1/governance/approval"),
         {
-          body: JSON.stringify({
-            activity_id: payload.activityId,
-            run_id: payload.runId,
-            workflow_id: payload.workflowId
+          body,
+          headers: this.#buildJsonHeaders({
+            body,
+            method: "POST",
+            pathname: "/api/v1/governance/approval"
           }),
-          headers: {
-            Authorization: `Bearer ${this.apiKey}`,
-            "Content-Type": "application/json",
-            "User-Agent": USER_AGENT
-          },
           method: "POST",
           signal: AbortSignal.timeout(this.timeoutSeconds * 1000)
         }
@@ -186,6 +207,37 @@ export class OpenBoxClient {
     return `${this.apiUrl}${pathname}`;
   }
 
+  #buildJsonHeaders({
+    body,
+    method,
+    pathname
+  }: {
+    body: string;
+    method: string;
+    pathname: string;
+  }): Record<string, string> {
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${this.apiKey}`,
+      "Content-Type": "application/json",
+      "User-Agent": USER_AGENT
+    };
+
+    if (!this.#agentIdentity) {
+      return headers;
+    }
+
+    return {
+      ...headers,
+      ...createAgentIdentityHeaders({
+        body,
+        did: this.#agentIdentity.did,
+        method,
+        pathname,
+        privateKey: this.#agentIdentity.privateKey
+      })
+    };
+  }
+
   async #evaluateWithRetry(
     payload: Record<string, unknown>
   ): Promise<GovernanceVerdictResponse> {
@@ -229,15 +281,16 @@ export class OpenBoxClient {
       console.info("[openbox-sdk] evaluate.request", summarizeEvaluatePayload(payload));
     }
 
+    const body = JSON.stringify(payload);
     const response = await this.#fetch(
       this.#buildUrl("/api/v1/governance/evaluate"),
       {
-        body: JSON.stringify(payload),
-        headers: {
-          Authorization: `Bearer ${this.apiKey}`,
-          "Content-Type": "application/json",
-          "User-Agent": USER_AGENT
-        },
+        body,
+        headers: this.#buildJsonHeaders({
+          body,
+          method: "POST",
+          pathname: "/api/v1/governance/evaluate"
+        }),
         method: "POST",
         signal: AbortSignal.timeout(this.timeoutSeconds * 1000)
       }
@@ -319,6 +372,34 @@ export class OpenBoxClient {
 function isOpenBoxDebugEnabled(): boolean {
   const value = process.env.OPENBOX_DEBUG?.trim().toLowerCase();
   return value === "1" || value === "true" || value === "yes";
+}
+
+function parseOptionalAgentIdentityConfig(
+  agentDidValue: string | undefined,
+  agentPrivateKeyValue: string | undefined
+): AgentIdentityConfig | undefined {
+  const agentDid = normalizeOptionalString(agentDidValue);
+  const agentPrivateKey = normalizeOptionalString(agentPrivateKeyValue);
+
+  if (!agentDid && !agentPrivateKey) {
+    return undefined;
+  }
+
+  if (!agentDid || !agentPrivateKey) {
+    throw new OpenBoxConfigError(
+      "Both agentDid and agentPrivateKey are required when configuring OpenBox agent identity."
+    );
+  }
+
+  return validateAgentIdentityConfig({
+    did: agentDid,
+    privateKey: agentPrivateKey
+  });
+}
+
+function normalizeOptionalString(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
 }
 
 function summarizeEvaluatePayload(
