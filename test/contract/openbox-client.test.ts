@@ -1,7 +1,10 @@
+import { createHash, generateKeyPairSync, verify } from "node:crypto";
+
 import { HttpResponse, delay, http } from "msw";
 import { setupServer } from "msw/node";
 
 import {
+  buildAgentIdentityCanonicalRequest,
   GovernanceAPIError,
   GovernanceVerdictResponse,
   OpenBoxAuthError,
@@ -11,6 +14,7 @@ import {
 } from "../../src/index.js";
 
 const server = setupServer();
+const ED25519_PKCS8_SEED_PREFIX = "302e020100300506032b657004220420";
 
 beforeAll(() => {
   server.listen({ onUnhandledRequest: "error" });
@@ -23,6 +27,67 @@ afterEach(() => {
 afterAll(() => {
   server.close();
 });
+
+function createTestIdentity(): {
+  agentDid: string;
+  agentPrivateKey: string;
+  publicKey: ReturnType<typeof generateKeyPairSync>["publicKey"];
+} {
+  const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+  const privateKeyDer = privateKey.export({ format: "der", type: "pkcs8" });
+  const seed = privateKeyDer.subarray(
+    Buffer.from(ED25519_PKCS8_SEED_PREFIX, "hex").length
+  );
+
+  return {
+    agentDid: "did:aip:550e8400-e29b-41d4-a716-446655440000",
+    agentPrivateKey: seed.toString("base64"),
+    publicKey
+  };
+}
+
+function expectValidAgentIdentityHeaders({
+  body,
+  method,
+  pathname,
+  publicKey,
+  request
+}: {
+  body: string;
+  method: string;
+  pathname: string;
+  publicKey: ReturnType<typeof generateKeyPairSync>["publicKey"];
+  request: Request;
+}): void {
+  const did = request.headers.get("x-openbox-agent-did");
+  const timestamp = request.headers.get("x-openbox-agent-timestamp");
+  const nonce = request.headers.get("x-openbox-agent-nonce");
+  const bodySHA256 = request.headers.get("x-openbox-body-sha256");
+  const signature = request.headers.get("x-openbox-agent-signature");
+
+  expect(did).toBe("did:aip:550e8400-e29b-41d4-a716-446655440000");
+  expect(timestamp).toEqual(expect.any(String));
+  expect(nonce).toEqual(expect.any(String));
+  expect(bodySHA256).toBe(createHash("sha256").update(body).digest("hex"));
+  expect(signature).toEqual(expect.any(String));
+
+  const canonical = buildAgentIdentityCanonicalRequest({
+    bodySHA256: bodySHA256 ?? "",
+    method,
+    nonce: nonce ?? "",
+    pathname,
+    timestamp: timestamp ?? ""
+  });
+
+  expect(
+    verify(
+      null,
+      Buffer.from(canonical),
+      publicKey,
+      Buffer.from(signature ?? "", "base64")
+    )
+  ).toBe(true);
+}
 
 describe("OpenBoxClient.validateApiKey", () => {
   it("calls the auth endpoint with required headers", async () => {
@@ -49,6 +114,36 @@ describe("OpenBoxClient.validateApiKey", () => {
     expect(observedAuthHeader).toBe("Bearer obx_live_valid_key");
     expect(observedContentType).toBe("application/json");
     expect(observedUserAgent).toBe("OpenBox-SDK/1.0");
+  });
+
+  it("signs auth validation requests when DID credentials are configured", async () => {
+    const identity = createTestIdentity();
+    let observedRequest: Request | undefined;
+
+    server.use(
+      http.get("https://api.openbox.ai/api/v1/auth/validate", ({ request }) => {
+        observedRequest = request;
+
+        return HttpResponse.json({ ok: true }, { status: 200 });
+      })
+    );
+
+    const client = new OpenBoxClient({
+      agentDid: identity.agentDid,
+      agentPrivateKey: identity.agentPrivateKey,
+      apiKey: "obx_live_valid_key",
+      apiUrl: "https://api.openbox.ai/"
+    });
+
+    await expect(client.validateApiKey()).resolves.toBeUndefined();
+    expect(observedRequest).toBeDefined();
+    expectValidAgentIdentityHeaders({
+      body: "",
+      method: "GET",
+      pathname: "/api/v1/auth/validate",
+      publicKey: identity.publicKey,
+      request: observedRequest!
+    });
   });
 
   it.each([401, 403])(
@@ -129,6 +224,45 @@ describe("OpenBoxClient.evaluate", () => {
     expect(observedBody).toEqual({
       event_type: "WorkflowStarted",
       workflow_id: "wf-123"
+    });
+  });
+
+  it("signs evaluate requests over the exact JSON body sent", async () => {
+    const identity = createTestIdentity();
+    let observedBody = "";
+    let observedRequest: Request | undefined;
+
+    server.use(
+      http.post(
+        "https://api.openbox.ai/api/v1/governance/evaluate",
+        async ({ request }) => {
+          observedRequest = request;
+          observedBody = await request.text();
+
+          return HttpResponse.json({ verdict: "allow" });
+        }
+      )
+    );
+
+    const client = new OpenBoxClient({
+      agentDid: identity.agentDid,
+      agentPrivateKey: identity.agentPrivateKey,
+      apiKey: "obx_test_eval_key",
+      apiUrl: "https://api.openbox.ai/"
+    });
+
+    await client.evaluate({
+      event_type: "WorkflowStarted",
+      workflow_id: "wf-123"
+    });
+
+    expect(observedRequest).toBeDefined();
+    expectValidAgentIdentityHeaders({
+      body: observedBody,
+      method: "POST",
+      pathname: "/api/v1/governance/evaluate",
+      publicKey: identity.publicKey,
+      request: observedRequest!
     });
   });
 
@@ -626,6 +760,49 @@ describe("OpenBoxClient.pollApproval", () => {
     });
     expect(observedContentType).toContain("application/json");
     expect(response).toEqual({ reason: "Approved by admin", verdict: "allow" });
+  });
+
+  it("signs approval polling requests when DID credentials are configured", async () => {
+    const identity = createTestIdentity();
+    let observedBody = "";
+    let observedRequest: Request | undefined;
+
+    server.use(
+      http.post(
+        "https://api.openbox.ai/api/v1/governance/approval",
+        async ({ request }) => {
+          observedRequest = request;
+          observedBody = await request.text();
+
+          return HttpResponse.json({
+            reason: "Approved by admin",
+            verdict: "allow"
+          });
+        }
+      )
+    );
+
+    const client = new OpenBoxClient({
+      agentDid: identity.agentDid,
+      agentPrivateKey: identity.agentPrivateKey,
+      apiKey: "obx_test_approval_key",
+      apiUrl: "https://api.openbox.ai"
+    });
+
+    await client.pollApproval({
+      activityId: "act-789",
+      runId: "run-456",
+      workflowId: "wf-123"
+    });
+
+    expect(observedRequest).toBeDefined();
+    expectValidAgentIdentityHeaders({
+      body: observedBody,
+      method: "POST",
+      pathname: "/api/v1/governance/approval",
+      publicKey: identity.publicKey,
+      request: observedRequest!
+    });
   });
 
   it.each([
