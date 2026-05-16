@@ -372,6 +372,8 @@ function buildClientOptions(
 ): ConstructorParameters<typeof OpenBoxClient>[0] {
   return {
     ...(customFetch ? { fetch: customFetch } : {}),
+    agentDid: config.agentDid,
+    agentPrivateKey: config.agentPrivateKey,
     apiKey: config.apiKey,
     apiUrl: config.apiUrl,
     evaluateMaxRetries: config.evaluateMaxRetries,
