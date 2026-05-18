@@ -20,6 +20,8 @@ The SDK parses configuration through `parseOpenBoxConfig()` and `withOpenBox()`.
 | --- | --- | --- | --- |
 | `apiUrl` | `string` | required | point the SDK at OpenBox Core |
 | `apiKey` | `string` | required | authenticate evaluate and approval calls |
+| `agentDid` | `string` | unset | identify the agent for DID-signed OpenBox requests |
+| `agentPrivateKey` | `string` | unset | sign OpenBox requests for agents with signing required |
 | `evaluateMaxRetries` | `number` | `2` | retry transient evaluate failures |
 | `evaluateRetryBaseDelayMs` | `number` | `150` | control exponential retry backoff |
 | `governanceTimeout` | `number` | `30` | set request timeout in seconds |
@@ -45,6 +47,8 @@ These environment variables are read during config parsing:
 | --- | --- | --- |
 | `OPENBOX_URL` | OpenBox Core base URL | required |
 | `OPENBOX_API_KEY` | OpenBox API key | required |
+| `OPENBOX_AGENT_DID` | DID assigned to this OpenBox agent | unset |
+| `OPENBOX_AGENT_PRIVATE_KEY` | base64 raw Ed25519 seed returned by OpenBox during registration or rotation | unset |
 | `OPENBOX_EVALUATE_MAX_RETRIES` | evaluate retry count | `2` |
 | `OPENBOX_EVALUATE_RETRY_BASE_DELAY_MS` | evaluate retry base delay in milliseconds | `150` |
 | `OPENBOX_GOVERNANCE_TIMEOUT` | OpenBox API timeout in seconds | `30` |
@@ -83,6 +87,30 @@ Example:
 ```bash
 export OPENBOX_SKIP_ACTIVITY_TYPES="send_governance_event, healthCheck"
 ```
+
+## Agent DID Identity
+
+OpenBox can require cryptographic agent identity on agent-facing Core endpoints. When enabled for an agent, the SDK signs requests to:
+
+- `/api/v1/auth/validate`
+- `/api/v1/governance/evaluate`
+- `/api/v1/governance/approval`
+
+Set both identity values together:
+
+```bash
+export OPENBOX_AGENT_DID="did:aip:550e8400-e29b-41d4-a716-446655440000"
+export OPENBOX_AGENT_PRIVATE_KEY="base64_raw_ed25519_seed"
+```
+
+Parsing rules:
+
+- `OPENBOX_AGENT_DID` must use the `did:aip:<uuid>` format.
+- `OPENBOX_AGENT_PRIVATE_KEY` must be the base64 raw 32-byte Ed25519 seed returned by OpenBox.
+- setting only one of the two values fails config parsing.
+- the SDK never logs the private key.
+
+The private key is returned only when an agent identity is provisioned or rotated. Store it as a secret and rotate it from OpenBox if it is exposed.
 
 ## Activity Type Matching
 
@@ -195,6 +223,8 @@ import { withOpenBox } from "@openbox-ai/openbox-mastra-sdk";
 
 await withOpenBox(mastra, {
   apiKey: process.env.OPENBOX_API_KEY,
+  agentDid: process.env.OPENBOX_AGENT_DID,
+  agentPrivateKey: process.env.OPENBOX_AGENT_PRIVATE_KEY,
   apiUrl: process.env.OPENBOX_URL,
   evaluateMaxRetries: 2,
   evaluateRetryBaseDelayMs: 150,

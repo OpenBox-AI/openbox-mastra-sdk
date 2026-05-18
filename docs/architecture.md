@@ -67,6 +67,7 @@ Operational implication:
 Responsibilities:
 
 - validate the API key
+- sign agent requests with DID identity headers when configured
 - send evaluate requests
 - poll approval status
 - apply retry and timeout policy

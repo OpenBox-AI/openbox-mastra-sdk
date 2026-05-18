@@ -85,6 +85,8 @@ describe("parseOpenBoxConfig", () => {
     expect(config.instrumentFileIo).toBe(false);
     expect(config.maxEvaluatePayloadBytes).toBe(256_000);
     expect(config.httpCapture).toBe(true);
+    expect(config.agentDid).toBeUndefined();
+    expect(config.agentPrivateKey).toBeUndefined();
     expect(config.validate).toBe(true);
   });
 
@@ -93,6 +95,9 @@ describe("parseOpenBoxConfig", () => {
       {},
       {
         OPENBOX_API_KEY: "obx_test_env_key",
+        OPENBOX_AGENT_DID: "did:aip:550e8400-e29b-41d4-a716-446655440000",
+        OPENBOX_AGENT_PRIVATE_KEY:
+          "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
         OPENBOX_EVALUATE_MAX_RETRIES: "4",
         OPENBOX_EVALUATE_RETRY_BASE_DELAY_MS: "25",
         OPENBOX_GOVERNANCE_POLICY: "fail_closed",
@@ -129,6 +134,37 @@ describe("parseOpenBoxConfig", () => {
     expect(config.instrumentFileIo).toBe(true);
     expect(config.maxEvaluatePayloadBytes).toBe(1024);
     expect(config.httpCapture).toBe(false);
+    expect(config.agentDid).toBe(
+      "did:aip:550e8400-e29b-41d4-a716-446655440000"
+    );
+    expect(config.agentPrivateKey).toBe(
+      "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+    );
+  });
+
+  it("raises when only one DID identity environment variable is present", () => {
+    expect(() =>
+      parseOpenBoxConfig(
+        {},
+        {
+          OPENBOX_AGENT_DID: "did:aip:550e8400-e29b-41d4-a716-446655440000",
+          OPENBOX_API_KEY: "obx_test_env_key",
+          OPENBOX_URL: "https://api.openbox.ai"
+        }
+      )
+    ).toThrow(OpenBoxConfigError);
+
+    expect(() =>
+      parseOpenBoxConfig(
+        {},
+        {
+          OPENBOX_AGENT_PRIVATE_KEY:
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+          OPENBOX_API_KEY: "obx_test_env_key",
+          OPENBOX_URL: "https://api.openbox.ai"
+        }
+      )
+    ).toThrow(OpenBoxConfigError);
   });
 
   it("raises on invalid API key format", () => {

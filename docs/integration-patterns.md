@@ -78,6 +78,8 @@ const config = parseOpenBoxConfig({
 });
 
 const client = new OpenBoxClient({
+  agentDid: config.agentDid,
+  agentPrivateKey: config.agentPrivateKey,
   apiKey: config.apiKey,
   apiUrl: config.apiUrl,
   evaluateMaxRetries: config.evaluateMaxRetries,
@@ -139,6 +141,8 @@ import {
 } from "@openbox-ai/openbox-mastra-sdk";
 
 const client = new OpenBoxClient({
+  agentDid: process.env.OPENBOX_AGENT_DID,
+  agentPrivateKey: process.env.OPENBOX_AGENT_PRIVATE_KEY,
   apiKey: process.env.OPENBOX_API_KEY!,
   apiUrl: process.env.OPENBOX_URL!
 });

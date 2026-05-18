@@ -1,6 +1,6 @@
 # OpenBox Mastra SDK Documentation
 
-This directory contains the production documentation for `@openbox-ai/openbox-mastra-sdk`.
+This directory contains the production documentation for `@openbox-ai/openbox-mastra-sdk`, the published npm package for Mastra governance and telemetry.
 
 The SDK has three responsibilities:
 
@@ -21,6 +21,8 @@ If you are integrating the SDK into a new service, read in this order:
 7. [security-and-privacy.md](./security-and-privacy.md)
 8. [troubleshooting.md](./troubleshooting.md)
 9. [api-reference.md](./api-reference.md)
+
+These documents assume the standard installation path is the published npm package. Local path consumption is only relevant when you are developing the SDK itself or testing an unpublished checkout.
 
 ## Document Map
 
