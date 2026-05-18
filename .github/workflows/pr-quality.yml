@@ -166,25 +166,13 @@ jobs:
           dd_app_key: ${{ secrets.DD_APP_KEY }}
           dd_site: ${{ secrets.DD_SITE }}
 
-
-      - name: Datadog Static Analysis
+      - name: Datadog Static Analysis & Secret Scanning
         id: datadog-static-analysis
         uses: DataDog/datadog-static-analyzer-github-action@v3
         with:
           dd_api_key: ${{ secrets.DD_API_KEY }}
           dd_app_key: ${{ secrets.DD_APP_KEY }}
           dd_site: ${{ secrets.DD_SITE }}
-          secrets_enabled: false
-          static_analysis_enabled: true
-          cpu_count: 2
-
-      - name: Datadog Secret Scanning
-        id: datadog-secret-scanning
-        uses: DataDog/datadog-static-analyzer-github-action@v3
-        with:
-          dd_api_key: ${{ secrets.DD_API_KEY }}
-          dd_app_key: ${{ secrets.DD_APP_KEY }}
-          dd_site: ${{ secrets.DD_SITE }}
           secrets_enabled: true
-          static_analysis_enabled: false
+          static_analysis_enabled: true
           cpu_count: 2
