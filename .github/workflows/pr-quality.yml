@@ -13,6 +13,7 @@ on:
   push:
     branches:
       - main
+      - chore/sonarqube-wf
   workflow_dispatch:
 
 permissions:
