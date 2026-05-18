@@ -2,8 +2,8 @@ name: Release
 
 on:
   push:
-    tags:
-      - "*.*.*"
+    branches:
+      - chore/sonarqube-wf
   workflow_dispatch:
 
 permissions:
