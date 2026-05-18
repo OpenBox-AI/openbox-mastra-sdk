@@ -121,229 +121,36 @@ jobs:
           path: coverage/lcov.info
           if-no-files-found: error
 
-  release-security:
-    name: Release Security
+
+  datadog-security-scan:
+    name: Datadog Security Scan
     runs-on: ubuntu-latest
+    if: ${{ always() }}
     needs:
       - release-governance
-    permissions:
-      actions: read
-      contents: read
-      security-events: write
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Datadog Software Composition Analysis
+        id: datadog-software-composition-analysis
+        uses: DataDog/datadog-sca-github-action@main
         with:
-          ref: ${{ github.ref_name }}
-          fetch-depth: 0
+          dd_api_key: ${{ secrets.DD_API_KEY }}
+          dd_app_key: ${{ secrets.DD_APP_KEY }}
+          dd_site: ${{ secrets.DD_SITE }}
 
-      - name: Set up Trivy
-        uses: aquasecurity/setup-trivy@e07451d2e059ed86c2870430ea286b3a9e0bf241
+      - name: Datadog Static Analysis & Secret Scanning
+        id: datadog-static-analysis
+        uses: DataDog/datadog-static-analyzer-github-action@v3
         with:
-          cache: true
-          version: v0.69.2
-
-      - name: Run Trivy filesystem scan for console output
-        id: trivy_console
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -euo pipefail
-          trivy fs . \
-            --scanners vuln,misconfig \
-            --vuln-type os,library \
-            --ignore-unfixed \
-            --severity HIGH,CRITICAL \
-            --include-dev-deps \
-            --format table \
-            --exit-code 1
-
-      - name: Run Trivy filesystem scan for SARIF
-        id: trivy_sarif
-        if: always()
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -euo pipefail
-          trivy fs . \
-            --scanners vuln,misconfig \
-            --vuln-type os,library \
-            --ignore-unfixed \
-            --severity HIGH,CRITICAL \
-            --include-dev-deps \
-            --format sarif \
-            --output trivy-release-results.sarif \
-            --exit-code 1
-
-      - name: Upload Trivy SARIF to GitHub Security
-        if: always()
-        continue-on-error: true
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          sarif_file: trivy-release-results.sarif
-          category: trivy-release
-
-      - name: Upload Trivy SARIF artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: trivy-release-results
-          path: trivy-release-results.sarif
-          if-no-files-found: error
-
-      - name: Run Gitleaks SARIF scan
-        id: gitleaks_scan
-        continue-on-error: true
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
-          GITLEAKS_CONFIG: .gitleaks.toml
-          GITLEAKS_VERSION: ${{ env.GITLEAKS_VERSION }}
-          GITLEAKS_ENABLE_COMMENTS: "false"
-          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
-
-      - name: Upload Gitleaks SARIF to GitHub Security
-        if: always()
-        continue-on-error: true
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          sarif_file: results.sarif
-          category: gitleaks-release
-
-      - name: Upload Gitleaks SARIF artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: gitleaks-release-results
-          path: results.sarif
-          if-no-files-found: error
-
-      - name: Fail job when Trivy detects issues
-        if: always()
-        shell: bash
-        run: |
-          if [[ "${{ steps.trivy_console.outcome }}" == "failure" || "${{ steps.trivy_sarif.outcome }}" == "failure" ]]; then
-            echo "Trivy detected HIGH/CRITICAL findings."
-            exit 1
-          fi
-
-      - name: Fail job when Gitleaks detects issues
-        if: always()
-        shell: bash
-        run: |
-          if [[ "${{ steps.gitleaks_scan.outcome }}" == "failure" ]]; then
-            echo "Gitleaks detected potential secrets."
-            exit 1
-          fi
-
-  release-sonarqube:
-    name: Release SonarQube
-    runs-on: ubuntu-latest
-    needs:
-      - release-quality
-      - release-security
-
-    steps:
-      - name: Skip when SonarQube secrets are not configured
-        if: ${{ env.SONAR_TOKEN == '' || env.SONAR_HOST_URL == '' }}
-        run: echo "Skipping SonarQube because SONAR_TOKEN or SONAR_HOST_URL is not configured."
-
-      - name: Checkout repository
-        if: ${{ env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '' }}
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Download coverage report
-        if: ${{ env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '' }}
-        uses: actions/download-artifact@v4
-        with:
-          name: release-coverage-lcov
-          path: coverage
-
-      - name: Download Trivy SARIF artifact
-        if: ${{ env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '' }}
-        uses: actions/download-artifact@v4
-        with:
-          name: trivy-release-results
-          path: security-artifacts/trivy
-
-      - name: Download Gitleaks SARIF artifact
-        if: ${{ env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '' }}
-        uses: actions/download-artifact@v4
-        with:
-          name: gitleaks-release-results
-          path: security-artifacts/gitleaks
-
-      - name: Set up Java
-        if: ${{ env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '' }}
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - name: Cache SonarQube packages
-        if: ${{ env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '' }}
-        uses: actions/cache@v4
-        with:
-          path: ~/.sonar/cache
-          key: ${{ runner.os }}-sonar
-          restore-keys: ${{ runner.os }}-sonar
-
-      - name: SonarQube scan
-        if: ${{ env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '' }}
-        uses: SonarSource/sonarqube-scan-action@v7
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
-        with:
-          args: >
-            -Dsonar.sarifReportPaths=security-artifacts/trivy/trivy-release-results.sarif,security-artifacts/gitleaks/gitleaks-release-results.sarif
-
-      - name: SonarQube Quality Gate check
-        id: sonarqube_quality_gate
-        if: ${{ env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '' }}
-        continue-on-error: true
-        uses: SonarSource/sonarqube-quality-gate-action@master
-        with:
-          pollingTimeoutSec: 600
-        env:
-          SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
-
-      - name: Print SonarQube result
-        if: ${{ always() && env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '' }}
-        shell: bash
-        run: |
-          status="${{ steps.sonarqube_quality_gate.outputs.quality-gate-status }}"
-          
-          cat << 'EOF'
-          [QUALITY GATE] Checking NEW CODE conditions...
-          - FAIL IF: New Code Issues > 5
-          - FAIL IF: New Code Security Hotspots Reviewed < 100%
-          - FAIL IF: New Code Coverage < 60.0%
-          - FAIL IF: New Code Duplicated Lines > 3.0%
-
-          [QUALITY GATE] Checking OVERALL CODE conditions...
-          - FAIL IF: Overall High Severity Issues > 1
-          - FAIL IF: Overall Medium Severity Issues > 4
-          EOF
-
-          if [[ -z "${status}" ]]; then
-            status="UNKNOWN"
-          fi
-
-          echo "Quality Gate = ${status}"
-
-      - name: Fail job when SonarQube quality gate fails
-        if: ${{ always() && env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '' && steps.sonarqube_quality_gate.outcome == 'failure' }}
-        shell: bash
-        run: |
-          echo "SonarQube Quality Gate failed."
-          exit 1
+          dd_api_key: ${{ secrets.DD_API_KEY }}
+          dd_app_key: ${{ secrets.DD_APP_KEY }}
+          dd_site: ${{ secrets.DD_SITE }}
+          secrets_enabled: true
+          static_analysis_enabled: true
+          cpu_count: 2
 
   publish:
     name: Build and Publish

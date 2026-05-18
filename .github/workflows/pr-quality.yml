@@ -13,6 +13,12 @@ on:
   push:
     branches:
       - main
+      - dev
+      - 'fix/**'
+      - 'feat/**'
+      - 'hotfix/**'
+      - 'release/**'
+      - 'docs/**'
   workflow_dispatch:
 
 permissions:
@@ -140,96 +146,32 @@ jobs:
       - name: Run build
         run: npm run build
 
-  sonarqube:
-    name: SonarQube
+  datadog-security-scan:
+    name: Datadog Security Scan
     runs-on: ubuntu-latest
-    if: ${{ always() && needs.test.result != 'cancelled' }}
+    if: ${{ always() }}
     needs:
       - test
-
     steps:
-      - name: Skip when SonarQube secrets are not configured
-        if: ${{ env.SONAR_TOKEN == '' || env.SONAR_HOST_URL == '' }}
-        run: echo "Skipping SonarQube because SONAR_TOKEN or SONAR_HOST_URL is not configured."
 
-      - name: Checkout repository
-        if: ${{ env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '' }}
-        uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Datadog Software Composition Analysis
+        id: datadog-software-composition-analysis
+        uses: DataDog/datadog-sca-github-action@main
         with:
-          fetch-depth: 0
+          dd_api_key: ${{ secrets.DD_API_KEY }}
+          dd_app_key: ${{ secrets.DD_APP_KEY }}
+          dd_site: ${{ secrets.DD_SITE }}
 
-      - name: Download coverage report
-        if: ${{ env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '' && needs.test.outputs.coverage_available == 'true' }}
-        uses: actions/download-artifact@v4
+      - name: Datadog Static Analysis & Secret Scanning
+        id: datadog-static-analysis
+        uses: DataDog/datadog-static-analyzer-github-action@v3
         with:
-          name: coverage-lcov
-          path: coverage
-
-      - name: Skip coverage download when report is unavailable
-        if: ${{ env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '' && needs.test.outputs.coverage_available != 'true' }}
-        run: echo "Skipping coverage download because coverage/lcov.info was not produced."
-
-      - name: Set up Java
-        if: ${{ env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '' }}
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - name: Cache SonarQube packages
-        if: ${{ env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '' }}
-        uses: actions/cache@v4
-        with:
-          path: ~/.sonar/cache
-          key: ${{ runner.os }}-sonar
-          restore-keys: ${{ runner.os }}-sonar
-
-      - name: SonarQube scan
-        if: ${{ env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '' }}
-        uses: SonarSource/sonarqube-scan-action@v7
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
-          
-      - name: SonarQube Quality Gate check
-        id: sonarqube_quality_gate
-        if: ${{ env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '' }}
-        continue-on-error: true
-        uses: SonarSource/sonarqube-quality-gate-action@master
-        with:
-          pollingTimeoutSec: 600
-        env:
-          SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
-
-      - name: Print SonarQube result
-        if: ${{ always() && env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '' }}
-        shell: bash
-        run: |
-          status="${{ steps.sonarqube_quality_gate.outputs.quality-gate-status }}"
-          
-          cat << 'EOF'
-          [QUALITY GATE] Checking NEW CODE conditions...
-          - FAIL IF: New Code Issues > 5
-          - FAIL IF: New Code Security Hotspots Reviewed < 100%
-          - FAIL IF: New Code Coverage < 60.0%
-          - FAIL IF: New Code Duplicated Lines > 3.0%
-
-          [QUALITY GATE] Checking OVERALL CODE conditions...
-          - FAIL IF: Overall High Severity Issues > 1
-          - FAIL IF: Overall Medium Severity Issues > 4
-          EOF
-
-          if [[ -z "${status}" ]]; then
-            status="UNKNOWN"
-          fi
-
-          echo "Quality Gate = ${status}"
-
-      - name: Fail job when SonarQube quality gate fails
-        if: ${{ always() && env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '' && steps.sonarqube_quality_gate.outcome == 'failure' }}
-        shell: bash
-        run: |
-          echo "SonarQube Quality Gate failed."
-          exit 1
+          dd_api_key: ${{ secrets.DD_API_KEY }}
+          dd_app_key: ${{ secrets.DD_APP_KEY }}
+          dd_site: ${{ secrets.DD_SITE }}
+          secrets_enabled: true
+          static_analysis_enabled: true
+          cpu_count: 2
