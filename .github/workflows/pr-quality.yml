@@ -149,11 +149,39 @@ jobs:
 
   datadog-security-scan:
     name: Datadog Security Scan
+    runs-on: ubuntu-latest
     if: ${{ always() }}
-    needs: 
+    needs:
       - test
       - build
-    uses: OpenBox-AI/common-pipeline/.github/workflows/datadog-security.yml@main
-    secrets:
-      DD_API_KEY: ${{ secrets.DD_API_KEY }}
-      DD_APP_KEY: ${{ secrets.DD_APP_KEY }}
+    steps:
+      - name: Datadog Software Composition Analysis
+        id: datadog-software-composition-analysis
+        uses: DataDog/datadog-sca-github-action@main
+        with:
+          dd_api_key: ${{ secrets.DD_API_KEY }}
+          dd_app_key: ${{ secrets.DD_APP_KEY }}
+          dd_site: ${{ secrets.DD_SITE }}
+
+
+      - name: Datadog Static Analysis
+        id: datadog-static-analysis
+        uses: DataDog/datadog-static-analyzer-github-action@v3
+        with:
+          dd_api_key: ${{ secrets.DD_API_KEY }}
+          dd_app_key: ${{ secrets.DD_APP_KEY }}
+          dd_site: ${{ secrets.DD_SITE }}
+          secrets_enabled: false
+          static_analysis_enabled: true
+          cpu_count: 2
+
+      - name: Datadog Secret Scanning
+        id: datadog-secret-scanning
+        uses: DataDog/datadog-static-analyzer-github-action@v3
+        with:
+          dd_api_key: ${{ secrets.DD_API_KEY }}
+          dd_app_key: ${{ secrets.DD_APP_KEY }}
+          dd_site: ${{ secrets.DD_SITE }}
+          secrets_enabled: true
+          static_analysis_enabled: false
+          cpu_count: 2
