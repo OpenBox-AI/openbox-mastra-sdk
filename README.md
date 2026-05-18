@@ -19,6 +19,8 @@ Use it when you need to:
 
 ## Installation
 
+The SDK is published on npm as `@openbox-ai/openbox-mastra-sdk`.
+
 ```bash
 npm install @openbox-ai/openbox-mastra-sdk @mastra/core
 ```
@@ -28,6 +30,13 @@ Required environment variables:
 ```bash
 export OPENBOX_URL="https://your-openbox-core.example"
 export OPENBOX_API_KEY="obx_live_your_key"
+```
+
+For agents that require DID signing, OpenBox also returns a DID and private key during agent registration or identity rotation. Set both values together:
+
+```bash
+export OPENBOX_AGENT_DID="did:aip:your-agent-did"
+export OPENBOX_AGENT_PRIVATE_KEY="base64_raw_ed25519_seed"
 ```
 
 Optional but commonly used:
@@ -77,6 +86,31 @@ process.on("SIGTERM", async () => {
 5. wraps existing Mastra tools, workflows, and agents
 6. patches future `addTool()`, `addWorkflow()`, and `addAgent()` calls
 
+## Reference Demo
+
+For a runnable reference application, use the Mastra coding-agent POC:
+
+- GitHub: https://github.com/OpenBox-AI/poc-mastra-coding-agent/tree/dev
+
+The POC installs `@openbox-ai/openbox-mastra-sdk` from npm. You do not need a sibling checkout of this repository to run it.
+
+## Bundled Example
+
+If you want to validate the SDK locally before wiring a real OpenBox environment, this repository also includes a bundled quickstart example:
+
+```bash
+npm run example:quickstart
+```
+
+This example runs against a local mock OpenBox server and demonstrates:
+
+- a governed workflow
+- a suspended approval and resume path
+- a governed tool execution
+- a wrapped summary agent
+
+Use the npm package for real integrations. Clone this repository only when you want to run the bundled example or work on the SDK itself.
+
 ## Runtime Model
 
 The SDK emits three categories of OpenBox payloads:
@@ -106,6 +140,8 @@ Most applications only need a small part of the config surface:
 | --- | --- | --- |
 | `apiUrl` | required | point the SDK at OpenBox Core |
 | `apiKey` | required | authenticate governance and approval calls |
+| `agentDid` | unset | identify the agent for DID-signed OpenBox requests |
+| `agentPrivateKey` | unset | sign OpenBox requests for agents with signing required |
 | `validate` | `true` | fail fast on invalid credentials or insecure URL setup |
 | `onApiError` | `"fail_open"` | decide whether OpenBox outages should halt execution |
 | `hitlEnabled` | `true` | enable approval suspension or polling flows |
@@ -124,6 +160,7 @@ See [docs/configuration.md](./docs/configuration.md) for the complete surface.
 
 - Keep `validate` enabled outside tests and local mocks.
 - Use HTTPS for all non-localhost OpenBox endpoints.
+- Store `OPENBOX_AGENT_PRIVATE_KEY` as a secret and never share it between agents.
 - Decide explicitly between `fail_open` and `fail_closed` before deployment.
 - Treat hook-triggered telemetry as internal operational data unless your policy intentionally governs it.
 - Keep `instrumentFileIo` disabled until you have a concrete file-governance requirement.

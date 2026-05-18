@@ -19,6 +19,7 @@ Use subpath imports only when you want to make module ownership explicit:
 
 - `@openbox-ai/openbox-mastra-sdk/client`
 - `@openbox-ai/openbox-mastra-sdk/config`
+- `@openbox-ai/openbox-mastra-sdk/identity`
 - `@openbox-ai/openbox-mastra-sdk/mastra`
 - `@openbox-ai/openbox-mastra-sdk/otel`
 - `@openbox-ai/openbox-mastra-sdk/span`
@@ -32,6 +33,7 @@ The root module re-exports:
 
 - client
 - config
+- identity helpers
 - mastra integration
 - telemetry
 - span processing
@@ -57,6 +59,8 @@ Controls how API failures are treated.
 
 Key fields:
 
+- `agentDid`
+- `agentPrivateKey`
 - `apiKey`
 - `apiUrl`
 - `evaluateMaxRetries`
@@ -110,6 +114,7 @@ Performs:
 
 - required field checks
 - API key format validation
+- DID identity validation when `agentDid` or `agentPrivateKey` is configured
 - URL security validation
 - default filling
 
@@ -127,6 +132,22 @@ Use it when:
 Access or override the global config singleton.
 
 Use sparingly. Prefer explicit runtime injection where practical.
+
+## Identity Module
+
+Import path:
+
+```ts
+import {
+  buildAgentIdentityCanonicalRequest,
+  createAgentIdentityHeaders,
+  validateAgentIdentityConfig
+} from "@openbox-ai/openbox-mastra-sdk/identity";
+```
+
+These helpers implement the OpenBox agent DID signing contract used internally by `OpenBoxClient`.
+
+Most applications should configure `OPENBOX_AGENT_DID` and `OPENBOX_AGENT_PRIVATE_KEY` and let the client sign requests automatically. Use these helpers only for diagnostics or advanced manual client wiring.
 
 ## Mastra Module
 
