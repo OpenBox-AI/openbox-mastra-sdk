@@ -126,9 +126,12 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ always() }}
     needs:
-      - test
-      - build
+      - release-governance
     steps:
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
       - name: Datadog Software Composition Analysis
         id: datadog-software-composition-analysis
         uses: DataDog/datadog-sca-github-action@main
