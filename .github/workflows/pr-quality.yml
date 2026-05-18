@@ -149,7 +149,8 @@ jobs:
   datadog-security-scan:
     name: Datadog Security Scan
     runs-on: ubuntu-latest
-    if: ${{ always() }}
+    # check if workflow is trigger by push
+    if: ${{ always() && github.event_name == 'push' }}
     needs:
       - test
     steps:
