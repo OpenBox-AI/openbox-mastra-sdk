@@ -192,14 +192,22 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
+
+      - name: bypass Cloudflare
+        run: |
+          mkdir -p $HOME/bin
+          echo '#!/bin/bash' > $HOME/bin/curl
+          echo '/usr/bin/curl -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" "$@"' >> $HOME/bin/curl
+          chmod +x $HOME/bin/curl
+          echo "$HOME/bin" >> $GITHUB_PATH
           
       - name: SonarQube Quality Gate check
         id: sonarqube_quality_gate
         if: ${{ env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '' }}
         continue-on-error: true
-        uses: SonarSource/sonarqube-quality-gate-action@v1
-        with:
-          pollingTimeoutSec: 600
+        uses: SonarSource/sonarqube-quality-gate-action@v4
+        # with:
+        #   pollingTimeoutSec: 600
         env:
           SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
