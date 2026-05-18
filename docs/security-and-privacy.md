@@ -36,6 +36,25 @@ Use `validate: false` only for:
 - mock servers
 - deliberately offline local development
 
+## Agent DID Signing
+
+OpenBox may require each agent request to carry a DID signature. For those agents, configure:
+
+- `OPENBOX_AGENT_DID`
+- `OPENBOX_AGENT_PRIVATE_KEY`
+
+The private key is the base64 raw 32-byte Ed25519 seed returned by OpenBox when the agent identity is provisioned or rotated. It identifies one agent and must not be reused by other agents.
+
+The SDK signs the request method, URL path, timestamp, nonce, and SHA-256 of the exact request body sent to OpenBox Core. OpenBox Core rejects stale timestamps, nonce replays, body hash mismatches, and invalid signatures.
+
+Operational guidance:
+
+- store the private key only in your secret manager or runtime environment
+- never commit it to source control
+- rotate the identity from OpenBox if the key is exposed
+- keep process clocks synchronized so timestamp freshness checks pass
+- configure both DID values together; partial identity config fails during startup
+
 ## Capture Boundary
 
 The SDK can capture request and response bodies for HTTP telemetry, but it does so inside its own runtime rather than exposing that data as ordinary OTel span attributes.
@@ -172,3 +191,4 @@ Recommendation:
 5. Enable file I/O capture only if you need it.
 6. Review policy so hook-triggered telemetry is not mistaken for a second user action.
 7. Use OpenBox guardrails and retention controls for sensitive prompts or outputs.
+8. Treat `OPENBOX_AGENT_PRIVATE_KEY` as a per-agent production secret.

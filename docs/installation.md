@@ -13,9 +13,19 @@ The package currently targets:
 
 ## Install The Package
 
+The standard production path is the published npm package:
+
 ```bash
 npm install @openbox-ai/openbox-mastra-sdk @mastra/core
 ```
+
+Clone the repository only if you want to run the bundled quickstart example or work on the SDK itself.
+
+If you want a fuller runnable demo application, use the Mastra coding-agent POC:
+
+- `https://github.com/OpenBox-AI/poc-mastra-coding-agent/tree/dev`
+
+That demo installs `@openbox-ai/openbox-mastra-sdk` from npm. You do not need a sibling checkout of this repository to run it.
 
 ## Required Environment Variables
 
@@ -24,10 +34,18 @@ export OPENBOX_URL="https://your-openbox-core.example"
 export OPENBOX_API_KEY="obx_live_your_key"
 ```
 
+If the OpenBox agent requires DID signing, also set the identity values returned by OpenBox during agent registration or rotation:
+
+```bash
+export OPENBOX_AGENT_DID="did:aip:your-agent-did"
+export OPENBOX_AGENT_PRIVATE_KEY="base64_raw_ed25519_seed"
+```
+
 Validation enforced by the SDK:
 
 - `OPENBOX_API_KEY` must match `obx_live_*` or `obx_test_*`
 - `OPENBOX_URL` must use HTTPS unless the host is `localhost`, `127.0.0.1`, or `::1`
+- `OPENBOX_AGENT_DID` and `OPENBOX_AGENT_PRIVATE_KEY` must be provided together when either is set
 
 If either required value is missing, the SDK throws an `OpenBoxConfigError` during startup.
 
@@ -101,7 +119,7 @@ Before declaring the integration healthy:
 1. Confirm the application can reach `OPENBOX_URL`.
 2. Confirm startup validation succeeds, or `validate: false` is intentionally set.
 3. Trigger a governed tool or workflow and verify events appear in OpenBox.
-4. If consuming the SDK from a local path, make sure the consuming service is running the rebuilt package output.
+4. If you are intentionally consuming a local SDK checkout instead of npm, make sure the consuming service is running the rebuilt package output.
 
 ## Next Step
 

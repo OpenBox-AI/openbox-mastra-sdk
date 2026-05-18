@@ -8,6 +8,8 @@ import {
   OpenBoxClient,
   OpenBoxSpanProcessor,
   parseOpenBoxConfig,
+  runWithOpenBoxEventMetadata,
+  withOpenBoxActivityMetadata,
   wrapWorkflow
 } from "../../src/index.js";
 import { startOpenBoxServer } from "../helpers/openbox-server.js";
@@ -111,6 +113,121 @@ describe("wrapWorkflow", () => {
       event_type: "WorkflowCompleted",
       workflow_output: {
         result: "HELLO"
+      }
+    });
+  });
+
+  it("attaches inherited and step-level metadata to governed workflow events", async () => {
+    const server = await startOpenBoxServer({
+      evaluate() {
+        return { verdict: "allow" };
+      }
+    });
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_workflow",
+      apiUrl: server.url,
+      validate: false
+    });
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+    const step = withOpenBoxActivityMetadata(
+      createStep({
+        execute: async ({ inputData }) => ({
+          result: inputData.value.toUpperCase()
+        }),
+        id: "metadata-step",
+        inputSchema: z.object({
+          value: z.string()
+        }),
+        outputSchema: z.object({
+          result: z.string()
+        })
+      }),
+      {
+        peer_request: {
+          direction: "outbound",
+          target: {
+            agent_id: "summarizer-agent-01"
+          }
+        }
+      }
+    );
+    const workflow = wrapWorkflow(
+      createWorkflow({
+        id: "metadata-workflow",
+        inputSchema: z.object({
+          value: z.string()
+        }),
+        outputSchema: z.object({
+          result: z.string()
+        })
+      })
+        .then(step)
+        .commit(),
+      {
+        client,
+        config,
+        spanProcessor: new OpenBoxSpanProcessor()
+      }
+    );
+    const mastra = new Mastra({
+      storage: new InMemoryStore(),
+      workflows: {
+        metadata: workflow
+      }
+    });
+    const run = await mastra.getWorkflow("metadata").createRun();
+    await runWithOpenBoxEventMetadata(
+      {
+        peer_request: {
+          direction: "inbound",
+          source: {
+            agent_id: "gateway-agent-01"
+          }
+        }
+      },
+      async () =>
+        run.start({
+          inputData: {
+            value: "hello"
+          }
+        })
+    );
+
+    await server.close();
+
+    const events = server.requests
+      .filter(request => request.pathname === "/api/v1/governance/evaluate")
+      .map(request => request.body);
+    const [workflowStarted, stepStarted] = events;
+
+    expect(workflowStarted).toMatchObject({
+      event_type: "WorkflowStarted",
+      metadata: {
+        peer_request: {
+          direction: "inbound",
+          source: {
+            agent_id: "gateway-agent-01"
+          }
+        }
+      }
+    });
+    expect(stepStarted).toMatchObject({
+      event_type: "ActivityStarted",
+      metadata: {
+        peer_request: {
+          direction: "outbound",
+          source: {
+            agent_id: "gateway-agent-01"
+          },
+          target: {
+            agent_id: "summarizer-agent-01"
+          }
+        }
       }
     });
   });
