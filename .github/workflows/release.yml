@@ -111,15 +111,15 @@ jobs:
       - name: Run CI validation
         run: npm run ci:check
 
-      - name: Verify package tarball
-        run: npm run pack:check
-
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
         with:
           name: release-coverage-lcov
           path: coverage/lcov.info
           if-no-files-found: error
+
+      - name: Verify package tarball
+        run: npm run pack:check
 
   release-security:
     name: Release Security
