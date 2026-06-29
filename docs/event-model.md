@@ -162,15 +162,15 @@ Supported hook span families:
 
 ## Agent LLM Span Semantics
 
-Agent-only LLM calls do not create standalone `agentLlmCompletion` business activities.
+Each LLM HTTP call made from agent context produces a per-call activity pair
+mirroring the LangGraph adapter wire shape:
 
-Current behavior:
+- `ActivityStarted` with `activity_type: "llm_call"`, a fresh UUID `activity_id`, and `spans: [<started>, <completed>]` (`span_count: 2`)
+- `ActivityCompleted` with `activity_id: "<uuid>-c"`, `activity_type: "llm_call"`, and `activity_output` carrying a serialized model response
 
-- started and completed LLM spans are routed into the agent telemetry path
-- they are surfaced on `SignalReceived` with `signal_name: "agent_output"`
-- they may also contribute to `WorkflowCompleted` telemetry payloads
-
-This keeps the activity list focused on business operations while preserving model telemetry.
+`WorkflowCompleted` no longer carries a synthetic LLM rollup span. Token usage
+and model identity remain on the workflow event for top-level reporting; the
+authoritative per-call evidence lives on the `llm_call` activities.
 
 ## Typical Event Sequences
 

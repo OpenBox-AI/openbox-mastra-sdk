@@ -277,13 +277,11 @@ export async function executeGovernedActivity<TInput, TOutput>({
               serializeActivityInputForCompletedEvent(inputForExecution),
               descriptor.goal
             );
-            const completedActivityTypePayload =
-              dependencies.config.hitlEnabled ? {} : { activity_type: descriptor.activityType };
             const completedVerdict = await evaluateActivityEvent(dependencies, {
               activity_id: descriptor.activityId,
               activity_input: completedInputForEvent,
               activity_output: serializeValue(output),
-              ...completedActivityTypePayload,
+              activity_type: descriptor.activityType,
               attempt: descriptor.attempt,
               duration_ms: durationMs,
               end_time: activityEndMs,
