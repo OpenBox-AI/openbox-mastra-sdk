@@ -11,6 +11,7 @@ import {
   normalizeSpansForGovernance,
   serializeValue
 } from "../governance/activity-runtime.js";
+import { resolveOpenBoxMultiAgentSessionId } from "../config/index.js";
 import { runWithOpenBoxExecutionContext } from "../governance/context.js";
 import type { GovernanceVerdictResponse } from "../types/index.js";
 import {
@@ -2078,9 +2079,9 @@ async function evaluateAgentEvent(
   minimalPayload?: Record<string, unknown> & { event_type: WorkflowEventType }
 ): Promise<GovernanceVerdictResponse | null> {
   const candidates = buildCandidatePayloads(
-    payload,
-    fallbackPayload,
-    minimalPayload
+    withMultiAgentSessionId(options, payload),
+    fallbackPayload ? withMultiAgentSessionId(options, fallbackPayload) : undefined,
+    minimalPayload ? withMultiAgentSessionId(options, minimalPayload) : undefined
   ).filter((candidate, index, all) => {
     const isLast = index === all.length - 1;
     return !isPayloadOverBudget(
@@ -2145,6 +2146,54 @@ async function evaluateAgentEvent(
   }
 
   return null;
+}
+
+function withMultiAgentSessionId<T extends Record<string, unknown> & {
+  event_type: WorkflowEventType;
+}>(
+  options: WrapToolOptions,
+  payload: T
+): T {
+  if (getPayloadString(payload, "multi_agent_session_id")) {
+    return payload;
+  }
+
+  const runId = getPayloadString(payload, "run_id");
+  const workflowId = getPayloadString(payload, "workflow_id");
+  const workflowType = getPayloadString(payload, "workflow_type");
+
+  if (!runId || !workflowId || !workflowType) {
+    return payload;
+  }
+
+  const multiAgentSessionId = resolveOpenBoxMultiAgentSessionId(
+    options.config,
+    {
+      runId,
+      workflowId,
+      workflowType
+    }
+  );
+
+  if (!multiAgentSessionId) {
+    return payload;
+  }
+
+  return {
+    ...payload,
+    multi_agent_session_id: multiAgentSessionId
+  };
+}
+
+function getPayloadString(
+  payload: Record<string, unknown>,
+  field: string
+): string | undefined {
+  const value = payload[field];
+
+  return typeof value === "string" && value.trim().length > 0
+    ? value
+    : undefined;
 }
 
 function isBadRequestSchemaError(error: unknown): boolean {

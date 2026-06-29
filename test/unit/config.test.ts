@@ -9,6 +9,7 @@ import {
   getOpenBoxConfig,
   initializeOpenBox,
   parseOpenBoxConfig,
+  resolveOpenBoxMultiAgentSessionId,
   validateApiKeyFormat,
   validateUrlSecurity
 } from "../../src/index.js";
@@ -85,6 +86,10 @@ describe("parseOpenBoxConfig", () => {
     expect(config.instrumentFileIo).toBe(false);
     expect(config.maxEvaluatePayloadBytes).toBe(256_000);
     expect(config.httpCapture).toBe(true);
+    expect(config.multiAgent).toEqual({
+      enabled: false,
+      multiAgentSessionId: undefined
+    });
     expect(config.agentDid).toBeUndefined();
     expect(config.agentPrivateKey).toBeUndefined();
     expect(config.validate).toBe(true);
@@ -107,6 +112,8 @@ describe("parseOpenBoxConfig", () => {
         OPENBOX_INSTRUMENT_DATABASES: "false",
         OPENBOX_INSTRUMENT_FILE_IO: "true",
         OPENBOX_MAX_EVALUATE_PAYLOAD_BYTES: "1024",
+        OPENBOX_MULTI_AGENT_ENABLED: "true",
+        OPENBOX_MULTI_AGENT_SESSION_ID: "mas:env-run",
         OPENBOX_SEND_ACTIVITY_START_EVENT: "false",
         OPENBOX_SEND_START_EVENT: "false",
         OPENBOX_SKIP_ACTIVITY_TYPES: "toolA,toolB",
@@ -134,6 +141,10 @@ describe("parseOpenBoxConfig", () => {
     expect(config.instrumentFileIo).toBe(true);
     expect(config.maxEvaluatePayloadBytes).toBe(1024);
     expect(config.httpCapture).toBe(false);
+    expect(config.multiAgent).toEqual({
+      enabled: true,
+      multiAgentSessionId: "mas:env-run"
+    });
     expect(config.agentDid).toBe(
       "did:aip:550e8400-e29b-41d4-a716-446655440000"
     );
@@ -178,6 +189,45 @@ describe("parseOpenBoxConfig", () => {
 
   it("raises when required config is missing", () => {
     expect(() => parseOpenBoxConfig({})).toThrow(OpenBoxConfigError);
+  });
+
+  it("resolves the OpenBox multi-agent session id from the Mastra run id", () => {
+    const apiKey = ["obx", "live", "abc123"].join("_");
+    const config = parseOpenBoxConfig({
+      apiKey,
+      apiUrl: "https://api.openbox.ai",
+      multiAgent: {
+        enabled: true
+      }
+    });
+
+    expect(
+      resolveOpenBoxMultiAgentSessionId(config, {
+        runId: "child-run",
+        workflowId: "weather-agent",
+        workflowType: "weather-agent"
+      })
+    ).toBe("mas:child-run");
+  });
+
+  it("allows a custom OpenBox multi-agent session id resolver", () => {
+    const apiKey = ["obx", "live", "abc123"].join("_");
+    const config = parseOpenBoxConfig({
+      apiKey,
+      apiUrl: "https://api.openbox.ai",
+      multiAgent: {
+        enabled: true,
+        multiAgentSessionId: ({ workflowId }) => `mas:${workflowId}`
+      }
+    });
+
+    expect(
+      resolveOpenBoxMultiAgentSessionId(config, {
+        runId: "child-run",
+        workflowId: "weather-agent",
+        workflowType: "weather-agent"
+      })
+    ).toBe("mas:weather-agent");
   });
 });
 
