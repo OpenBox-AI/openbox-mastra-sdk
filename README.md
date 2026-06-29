@@ -128,7 +128,7 @@ It also captures operational spans for:
 
 Important production behavior:
 
-- agent-only LLM activity is represented as telemetry spans, not as standalone business activities
+- each agent-context LLM HTTP call emits a per-call `ActivityStarted{activity_type: "llm_call"}` + `ActivityCompleted{activity_type: "llm_call"}` pair, mirroring the LangGraph adapter wire shape
 - agent prompts are emitted as `SignalReceived(user_input)`, not as tool activities
 - the SDK ignores its own OpenBox API URL during telemetry setup to avoid feedback loops
 

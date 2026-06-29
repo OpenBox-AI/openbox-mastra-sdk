@@ -198,6 +198,15 @@ let activeFileRestore: (() => void) | undefined;
 let activeHookGovernanceRuntime: HookGovernanceRuntime | undefined;
 let activeUnregister: (() => void) | undefined;
 
+// Per-LLM-call buffer for the agent-context emission path. Keyed by the HTTP
+// hook span_id generated in patchedFetch. We buffer the started hook span when
+// an LLM URL is observed in agent context, then emit an ActivityStarted +
+// ActivityCompleted pair from the completed stage carrying both spans.
+const llmCallBuffer = new Map<
+  string,
+  { activityId: string; startedSpan: Record<string, unknown> }
+>();
+
 export function setupOpenBoxOpenTelemetry({
   captureHttpBodies = true,
   dbLibraries,
@@ -851,109 +860,160 @@ function patchFetch(
       requestBody,
       url
     });
-
-    await evaluateHookGovernance(hookGovernance, {
-      activeSpan,
-      hookTrigger: {
-        method: request.method,
-        request_body: requestBody,
-        request_headers: requestHeaders,
-        stage: "started",
-        type: "http_request",
-        url
-      },
-      span: createHookSpan({
-        attributes: {
-          "http.method": request.method,
-          "http.url": url
-        },
-        endTimeNs: startTimeNs,
-        hookType: "http_request",
-        httpMethod: request.method,
-        httpUrl: url,
-        kind: "CLIENT",
-        name: `HTTP ${request.method}`,
-        parentSpanId: spanContext.spanId,
-        requestBody,
-        requestHeaders,
-        semanticType: startedSemanticType,
-        spanId: hookSpanId,
-        stage: "started",
-        startTimeNs: startTimeNs,
-        traceId: spanContext.traceId
-      }),
-      stage: "started",
-      traceId: spanContext.traceId
-    });
-
-    const response = await originalFetch(request);
-    const responseHeaders = headersToRecord(response.headers);
-    const responseBody = normalizeHookBodyForTelemetry(
-      await captureResponseBody(response)
-    );
-
-    spanProcessor.storeTraceBody(spanContext.traceId, {
-      method: request.method,
-      requestBody,
-      requestHeaders,
-      responseBody,
-      responseHeaders,
-      url
-    });
-    const endTimeNs = Date.now() * 1_000_000;
-    const completedHookTrigger = {
-      method: request.method,
-      request_body: requestBody,
-      request_headers: requestHeaders,
-      response_body: responseBody,
-      response_headers: responseHeaders,
-      status_code: response.status,
-      type: "http_request",
-      url
-    } as const;
-    const completedSemanticType = resolveHttpSemanticType({
-      method: request.method,
-      requestBody,
-      responseBody,
-      url
-    });
-    const completedHookSpanBase = {
+    const startedHookSpan = createHookSpan({
       attributes: {
         "http.method": request.method,
-        "http.status_code": response.status,
         "http.url": url
       },
-      endTimeNs,
-      hookType: "http_request" as const,
+      endTimeNs: startTimeNs,
+      hookType: "http_request",
       httpMethod: request.method,
-      httpStatusCode: response.status,
       httpUrl: url,
-      kind: "CLIENT" as const,
+      kind: "CLIENT",
       name: `HTTP ${request.method}`,
       parentSpanId: spanContext.spanId,
       requestBody,
       requestHeaders,
-      responseBody,
-      responseHeaders,
-      semanticType: completedSemanticType,
+      semanticType: startedSemanticType,
       spanId: hookSpanId,
-      startTimeNs,
-      traceId: spanContext.traceId
-    };
-
-    await evaluateHookGovernance(hookGovernance, {
-      activeSpan,
-      hookTrigger: {
-        ...completedHookTrigger,
-        stage: "completed",
-      },
-      span: createHookSpan({
-        ...completedHookSpanBase,
-        stage: "completed",
-      }),
-      stage: "completed",
+      stage: "started",
+      startTimeNs: startTimeNs,
       traceId: spanContext.traceId
     });
+
+    const isAgentContextLlmCall = isAgentContextLlmHttpCall(
+      url,
+      request.method
+    );
+    if (isAgentContextLlmCall) {
+      // Defer emission until the completed stage so we can ship both spans
+      // and the response body in a single per-call ActivityStarted +
+      // ActivityCompleted pair (mirrors the LangGraph adapter wire shape).
+      llmCallBuffer.set(hookSpanId, {
+        activityId: randomUUID(),
+        startedSpan: ensureStartedHookSpan(startedHookSpan)
+      });
+    } else {
+      await evaluateHookGovernance(hookGovernance, {
+        activeSpan,
+        hookTrigger: {
+          method: request.method,
+          request_body: requestBody,
+          request_headers: requestHeaders,
+          stage: "started",
+          type: "http_request",
+          url
+        },
+        span: startedHookSpan,
+        stage: "started",
+        traceId: spanContext.traceId
+      });
+    }
+
+    let response: Response;
+    try {
+      response = await originalFetch(request);
+    } catch (fetchError) {
+      // Clean up the per-call buffer so a thrown fetch (network error, abort,
+      // etc.) does not leak entries. The corresponding ActivityCompleted is
+      // skipped; the agent-level error path handles user-visible reporting.
+      llmCallBuffer.delete(hookSpanId);
+      throw fetchError;
+    }
+
+    // The post-fetch path runs response decoding, payload assembly, and either
+    // the per-call emit or the generic governance evaluate. A throw anywhere
+    // in this block (e.g., aborted response stream, JSON parse on attribute
+    // object, governance API error converted to halt) must NOT leak the
+    // buffered started span. The finally cleans the entry unconditionally.
+    try {
+      const responseHeaders = headersToRecord(response.headers);
+      const responseBody = normalizeHookBodyForTelemetry(
+        await captureResponseBody(response)
+      );
+
+      spanProcessor.storeTraceBody(spanContext.traceId, {
+        method: request.method,
+        requestBody,
+        requestHeaders,
+        responseBody,
+        responseHeaders,
+        url
+      });
+      const endTimeNs = Date.now() * 1_000_000;
+      const completedHookTrigger = {
+        method: request.method,
+        request_body: requestBody,
+        request_headers: requestHeaders,
+        response_body: responseBody,
+        response_headers: responseHeaders,
+        status_code: response.status,
+        type: "http_request",
+        url
+      } as const;
+      const completedSemanticType = resolveHttpSemanticType({
+        method: request.method,
+        requestBody,
+        responseBody,
+        url
+      });
+      const completedHookSpanBase = {
+        attributes: {
+          "http.method": request.method,
+          "http.status_code": response.status,
+          "http.url": url
+        },
+        endTimeNs,
+        hookType: "http_request" as const,
+        httpMethod: request.method,
+        httpStatusCode: response.status,
+        httpUrl: url,
+        kind: "CLIENT" as const,
+        name: `HTTP ${request.method}`,
+        parentSpanId: spanContext.spanId,
+        requestBody,
+        requestHeaders,
+        responseBody,
+        responseHeaders,
+        semanticType: completedSemanticType,
+        spanId: hookSpanId,
+        startTimeNs,
+        traceId: spanContext.traceId
+      };
+
+      const bufferedLlmCall = llmCallBuffer.get(hookSpanId);
+      if (bufferedLlmCall) {
+        await emitLlmCallActivityPair({
+          activityId: bufferedLlmCall.activityId,
+          completedHookSpan: ensureCompletedHookSpan(
+            createHookSpan({
+              ...completedHookSpanBase,
+              stage: "completed"
+            })
+          ),
+          completedHookTrigger,
+          hookGovernance,
+          startedHookSpan: bufferedLlmCall.startedSpan,
+          traceId: spanContext.traceId
+        });
+      } else {
+        await evaluateHookGovernance(hookGovernance, {
+          activeSpan,
+          hookTrigger: {
+            ...completedHookTrigger,
+            stage: "completed",
+          },
+          span: createHookSpan({
+            ...completedHookSpanBase,
+            stage: "completed",
+          }),
+          stage: "completed",
+          traceId: spanContext.traceId
+        });
+      }
+    } finally {
+      llmCallBuffer.delete(hookSpanId);
+    }
 
     return response;
   };
@@ -1406,20 +1466,6 @@ async function evaluateHookGovernance(
       ? ensureStartedHookSpan(hookSpan)
       : ensureCompletedHookSpan(hookSpan);
 
-  // Agent runs already export LLM spans through wrapAgent signal/workflow
-  // telemetry. Emitting hook governance requests here would fabricate a
-  // synthetic parent activity (`agentLlmCompletion`) that OpenBox renders as a
-  // standalone activity row. Queue the hook span for the agent_output signal
-  // instead of evaluating it as a governance activity.
-  if (activityContext.syntheticAgentActivity) {
-    hookGovernance.spanProcessor.appendAgentSignalHookSpan(
-      activityContext.workflowId,
-      activityContext.runId,
-      hookSpanForPayload
-    );
-    return;
-  }
-
   const priorAbortReason = hookGovernance.spanProcessor.getActivityAbort(
     activityContext.workflowId,
     activityContext.activityId
@@ -1504,24 +1550,6 @@ async function evaluateHookGovernance(
     payload.activity_input = activityContext.activityInput;
   }
 
-  if (activityContext.activityType === "agentLlmCompletion") {
-    const derivedActivityPayload = deriveAgentHookActivityPayload(
-      input.hookTrigger,
-      input.stage
-    );
-
-    if (
-      payload.activity_input === undefined &&
-      derivedActivityPayload.activityInput !== undefined
-    ) {
-      payload.activity_input = derivedActivityPayload.activityInput;
-    }
-
-    if (derivedActivityPayload.activityOutput !== undefined) {
-      payload.activity_output = derivedActivityPayload.activityOutput;
-    }
-  }
-
   if (activityContext.goal) {
     payload.activity_input = appendGoalToHookActivityInput(
       payload.activity_input,
@@ -1586,17 +1614,186 @@ async function evaluateHookGovernance(
   throw new GovernanceHaltError(`Governance blocked: ${reason}`);
 }
 
+// Detects an agent-context LLM HTTP call: there must be an active execution
+// context with source=agent (no concrete activityId), the request must be
+// POST (LLM completion endpoints are POST; gating excludes GET /v1/models
+// and similar non-completion calls), and the URL host must match a known LLM
+// provider. Tool-context calls (executionContext.activityId present) are
+// excluded so the existing inline hook_trigger path keeps owning them.
+function isAgentContextLlmHttpCall(url: string, method: string): boolean {
+  if (method.toUpperCase() !== "POST") {
+    return false;
+  }
+  const executionContext = getOpenBoxExecutionContext();
+  if (!executionContext || executionContext.source !== "agent") {
+    return false;
+  }
+  if (executionContext.activityId) {
+    return false;
+  }
+  if (
+    !executionContext.workflowId ||
+    !executionContext.workflowType ||
+    !executionContext.runId
+  ) {
+    return false;
+  }
+  return inferProviderFromUrl(url) !== undefined;
+}
+
+// Emits the per-LLM-call activity events mirroring the tool-path wire shape
+// that openbox-core renders correctly (verified against the getWeather session
+// dump): one creation event, two hook_trigger updates (one span per stage,
+// matching the existing hook_request pattern), and one completion. Inline
+// spans on a creation event do not persist server-side; spans must arrive via
+// hook_trigger updates linked by activity_id. Fails open: every evaluate call
+// is wrapped, and the outer try/catch defends against payload-build throws.
+async function emitLlmCallActivityPair(input: {
+  activityId: string;
+  completedHookSpan: Record<string, unknown>;
+  completedHookTrigger: Record<string, unknown>;
+  hookGovernance: HookGovernanceRuntime | undefined;
+  startedHookSpan: Record<string, unknown>;
+  traceId: string;
+}): Promise<void> {
+  // Outer try/catch enforces the FAIL-OPEN contract: this function is awaited
+  // from patchedFetch, so any synchronous throw from payload-building helpers
+  // (JSON.stringify on cycles, unexpected attribute shapes) would propagate to
+  // the agent's fetch call. Swallow everything; emission is telemetric.
+  try {
+    const { hookGovernance } = input;
+    if (!hookGovernance) {
+      return;
+    }
+
+    const executionContext = getOpenBoxExecutionContext();
+    if (
+      !executionContext ||
+      !executionContext.workflowId ||
+      !executionContext.workflowType ||
+      !executionContext.runId
+    ) {
+      return;
+    }
+
+    const workflowId = executionContext.workflowId;
+    const workflowType = executionContext.workflowType;
+    const runId = executionContext.runId;
+    const taskQueue = executionContext.taskQueue ?? "mastra";
+    const attempt =
+      typeof executionContext.attempt === "number" ? executionContext.attempt : 1;
+    const goal = executionContext.goal;
+    const modelUsage = extractModelUsageFromHookSpan(input.completedHookSpan);
+    const telemetryModelId = toTelemetryModelId(modelUsage.modelId);
+    const derived = deriveAgentHookActivityPayload(
+      input.completedHookTrigger,
+      "completed"
+    );
+    const activityInputBase = derived.activityInput;
+    const activityInputWithGoal =
+      goal !== undefined
+        ? appendGoalToHookActivityInput(activityInputBase, goal)
+        : activityInputBase;
+
+    const baseFields: Record<string, unknown> = {
+      activity_id: input.activityId,
+      activity_type: "llm_call",
+      attempt,
+      run_id: runId,
+      source: "workflow-telemetry",
+      task_queue: taskQueue,
+      workflow_id: workflowId,
+      workflow_type: workflowType,
+      ...(goal ? { goal } : {}),
+      ...(modelUsage.modelId ? { model_id: modelUsage.modelId } : {}),
+      ...(telemetryModelId ? { model: telemetryModelId } : {}),
+      ...(modelUsage.provider
+        ? { model_provider: modelUsage.provider, provider: modelUsage.provider }
+        : {}),
+      ...(typeof modelUsage.inputTokens === "number"
+        ? { input_tokens: modelUsage.inputTokens }
+        : {}),
+      ...(typeof modelUsage.outputTokens === "number"
+        ? { output_tokens: modelUsage.outputTokens }
+        : {}),
+      ...(typeof modelUsage.totalTokens === "number"
+        ? { total_tokens: modelUsage.totalTokens }
+        : {})
+    };
+
+    // Event 1 — creation ActivityStarted (no spans, no hook_trigger). Pins
+    // the activity_id + activity_type "llm_call" so subsequent hook updates
+    // attach spans to this row.
+    const initialStartedPayload: Record<string, unknown> = {
+      ...baseFields,
+      event_type: WorkflowEventType.ACTIVITY_STARTED,
+      span_count: 0,
+      timestamp: new Date().toISOString()
+    };
+    if (activityInputWithGoal !== undefined) {
+      initialStartedPayload.activity_input = activityInputWithGoal;
+    }
+
+    // Event 2 — hook_trigger update for the started stage span.
+    const startedHookUpdate: Record<string, unknown> = {
+      ...baseFields,
+      event_type: WorkflowEventType.ACTIVITY_STARTED,
+      hook_trigger: true,
+      span_count: 1,
+      spans: [input.startedHookSpan],
+      timestamp: new Date().toISOString()
+    };
+
+    // Event 3 — hook_trigger update for the completed stage span (carries
+    // response body, status code, server-computed semantic_type: llm_completion).
+    const completedHookUpdate: Record<string, unknown> = {
+      ...baseFields,
+      event_type: WorkflowEventType.ACTIVITY_STARTED,
+      hook_trigger: true,
+      span_count: 1,
+      spans: [input.completedHookSpan],
+      timestamp: new Date().toISOString()
+    };
+
+    // Event 4 — ActivityCompleted finalizes the per-call row with the model
+    // response summary. Uses the <uuid>-c suffix matching LangGraph parity.
+    const completedPayload: Record<string, unknown> = {
+      ...baseFields,
+      activity_id: `${input.activityId}-c`,
+      event_type: WorkflowEventType.ACTIVITY_COMPLETED,
+      span_count: 0,
+      timestamp: new Date().toISOString()
+    };
+    if (activityInputWithGoal !== undefined) {
+      completedPayload.activity_input = activityInputWithGoal;
+    }
+    if (derived.activityOutput !== undefined) {
+      completedPayload.activity_output = derived.activityOutput;
+    }
+
+    const events: Array<Record<string, unknown>> = [
+      initialStartedPayload,
+      startedHookUpdate,
+      completedHookUpdate,
+      completedPayload
+    ];
+
+    for (const payload of events) {
+      try {
+        await hookGovernance.client.evaluate(payload);
+      } catch {
+        // fail-open: per-event evaluate errors must not propagate to the fetch caller
+      }
+    }
+  } catch {
+    // fail-open: payload-build throws must not propagate to the fetch caller
+  }
+}
+
 function resolveHookActivityType(
-  parentActivityType: string | undefined,
+  _parentActivityType: string | undefined,
   hookType: string
 ): string {
-  if (
-    typeof parentActivityType === "string" &&
-    parentActivityType.toLowerCase() === "agentllmcompletion"
-  ) {
-    return parentActivityType;
-  }
-
   return hookType;
 }
 
@@ -2890,7 +3087,6 @@ function resolveActivityContext(
   attempt?: number;
   goal?: string;
   runId: string;
-  syntheticAgentActivity?: boolean;
   taskQueue: string;
   workflowId: string;
   workflowType: string;
@@ -2926,27 +3122,6 @@ function resolveActivityContext(
           }
         : {}),
       runId: executionContext.runId,
-      taskQueue: executionContext.taskQueue ?? "mastra",
-      workflowId: executionContext.workflowId,
-      workflowType: executionContext.workflowType,
-      ...(typeof executionContext.attempt === "number"
-        ? { attempt: executionContext.attempt }
-        : {})
-    };
-  }
-
-  if (
-    executionContext?.source === "agent" &&
-    executionContext.workflowId &&
-    executionContext.workflowType &&
-    executionContext.runId
-  ) {
-    return {
-      activityId: `${executionContext.workflowId}::agent-llm::${executionContext.runId}`,
-      activityType: "agentLlmCompletion",
-      ...(executionContext.goal ? { goal: executionContext.goal } : {}),
-      runId: executionContext.runId,
-      syntheticAgentActivity: true,
       taskQueue: executionContext.taskQueue ?? "mastra",
       workflowId: executionContext.workflowId,
       workflowType: executionContext.workflowType,

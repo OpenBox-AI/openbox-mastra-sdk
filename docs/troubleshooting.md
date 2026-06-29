@@ -123,19 +123,20 @@ Recommended interpretation:
 - tools and non-tool steps are business activities
 - `http_request` hook payloads are internal operational telemetry
 
-## Agent LLM Spans Are Missing
+## Agent LLM Activities Are Missing
 
 Checks:
 
-1. Make sure `skipSignals` does not include `agent_output`.
-2. Confirm the agent is wrapped with `withOpenBox()` or `wrapAgent()`.
-3. Enable `OPENBOX_DEBUG=true` and verify `SignalReceived` with `signal_name: "agent_output"`.
+1. Confirm the agent is wrapped with `withOpenBox()` or `wrapAgent()`.
+2. Enable `OPENBOX_DEBUG=true` and verify per-call `ActivityStarted{activity_type: "llm_call"}` + `ActivityCompleted{activity_type: "llm_call"}` payloads.
+3. Confirm the LLM URL host matches `inferProviderFromUrl` (OpenAI, Anthropic, Google) — non-matching hosts will not emit `llm_call` activities.
 4. If consuming the SDK locally, rebuild `dist/` and restart the app.
 
 Important behavior:
 
-- agent-only LLM completions are emitted as spans on `agent_output`
-- they are not intended to appear as standalone `agentLlmCompletion` activities
+- each agent-context LLM HTTP call produces a per-call `llm_call` `ActivityStarted` + `ActivityCompleted` pair
+- the `ActivityStarted` carries the started + completed HTTP spans inline (`span_count: 2`)
+- the `ActivityCompleted` activity_id uses a `-c` suffix and reports the model response in `activity_output`
 
 ## Started Or Completed Spans Are Missing
 
@@ -144,9 +145,9 @@ Checks:
 1. Confirm telemetry is installed only once and not being replaced unintentionally.
 2. Confirm the relevant instrumentation is enabled.
 3. Confirm the operation is not excluded by ignored URLs or file skip patterns.
-4. Confirm you are looking at the correct parent activity or signal in OpenBox.
+4. Confirm you are looking at the correct parent activity in OpenBox.
 
-For agent LLM activity, inspect `SignalReceived(agent_output)`.
+For agent LLM activity, inspect the per-call `ActivityStarted{activity_type: "llm_call"}` events.
 
 ## OpenBox API Failures Cause Unexpected Continuation Or Stoppage
 

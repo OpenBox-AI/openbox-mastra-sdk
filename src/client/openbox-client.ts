@@ -427,15 +427,6 @@ function summarizeEvaluatePayload(
       typeof payload.span_count === "number"
         ? payload.span_count
         : spanSummary.detectedSpanCount,
-    synthetic_model_usage_span: spanSummary.syntheticModelUsageSpan,
-    workflow_model_id:
-      typeof payload.model_id === "string" ? payload.model_id : undefined,
-    workflow_model_provider:
-      typeof payload.model_provider === "string"
-        ? payload.model_provider
-        : typeof payload.provider === "string"
-          ? payload.provider
-          : undefined,
     workflow_id: payload.workflow_id,
     workflow_type: payload.workflow_type
   };
@@ -603,14 +594,12 @@ function summarizeSpans(
   detectedSpanCount: number;
   hasSpans: boolean;
   latestSpanStage: string | undefined;
-  syntheticModelUsageSpan: boolean;
 } {
   if (!Array.isArray(spans)) {
     return {
       detectedSpanCount: 0,
       hasSpans: false,
-      latestSpanStage: undefined,
-      syntheticModelUsageSpan: false
+      latestSpanStage: undefined
     };
   }
 
@@ -629,16 +618,7 @@ function summarizeSpans(
   return {
     detectedSpanCount: spanList.length,
     hasSpans: spanList.length > 0,
-    latestSpanStage,
-    syntheticModelUsageSpan: spanList.some(span => {
-      if (!span || typeof span !== "object") {
-        return false;
-      }
-
-      return (
-        (span as Record<string, unknown>).name === "openbox.synthetic.model_usage"
-      );
-    })
+    latestSpanStage
   };
 }
 

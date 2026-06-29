@@ -173,7 +173,9 @@ describe("wrapTool", () => {
       status: "completed",
       workflow_id: "wf-123"
     });
-    expect((completedEvent as Record<string, unknown>).activity_type).toBeUndefined();
+    expect((completedEvent as Record<string, unknown>).activity_type).toBe(
+      "processPrompt"
+    );
     expect(completedEvent).toMatchObject({
       span_count: 0
     });

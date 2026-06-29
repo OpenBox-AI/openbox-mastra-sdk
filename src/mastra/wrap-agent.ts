@@ -719,12 +719,6 @@ function buildWorkflowCompletedCompactPayload(
     typeof startTimeMs === "number" ? Math.max(0, endTimeMs - startTimeMs) : undefined;
   const usage = extractUsageMetrics(output);
   const telemetryModelId = toTelemetryModelId(modelInfo.modelId);
-  const syntheticSpans = buildWorkflowTelemetrySpans(
-    [],
-    modelInfo,
-    usage,
-    endTimeMs
-  );
 
   const payload: Record<string, unknown> & {
     event_type: WorkflowEventType.WORKFLOW_COMPLETED;
@@ -749,14 +743,7 @@ function buildWorkflowCompletedCompactPayload(
     ...(telemetryModelId ? { model: telemetryModelId } : {}),
     ...(modelInfo.provider ? { model_provider: modelInfo.provider } : {}),
     ...(modelInfo.provider ? { provider: modelInfo.provider } : {}),
-    ...(syntheticSpans.length > 0
-      ? {
-          span_count: syntheticSpans.length,
-          spans: syntheticSpans
-        }
-      : {
-          span_count: 0
-        })
+    span_count: 0
   };
   const compactOutput = compactWorkflowOutput(workflowOutput);
 
@@ -825,12 +812,6 @@ function buildWorkflowCompletedTelemetryPayload(
     typeof startTimeMs === "number" ? Math.max(0, endTimeMs - startTimeMs) : undefined;
   const usage = extractUsageMetrics(output);
   const telemetryModelId = toTelemetryModelId(modelInfo.modelId);
-  const spans = buildWorkflowTelemetrySpans(
-    workflowSpans,
-    modelInfo,
-    usage,
-    endTimeMs
-  );
 
   return {
     ...basePayload,
@@ -850,8 +831,8 @@ function buildWorkflowCompletedTelemetryPayload(
     ...(telemetryModelId ? { model: telemetryModelId } : {}),
     ...(modelInfo.provider ? { model_provider: modelInfo.provider } : {}),
     ...(modelInfo.provider ? { provider: modelInfo.provider } : {}),
-    span_count: spans.length,
-    spans
+    span_count: workflowSpans.length,
+    spans: workflowSpans
   };
 }
 
@@ -1556,94 +1537,6 @@ function toTelemetryModelId(modelId: string | undefined): string | undefined {
   return sanitized.length > 0 ? sanitized : trimmed;
 }
 
-function buildWorkflowTelemetrySpans(
-  spans: Array<Record<string, unknown>>,
-  modelInfo: {
-    modelId?: string;
-    provider?: string;
-  },
-  usage: {
-    inputTokens?: number;
-    outputTokens?: number;
-    totalTokens?: number;
-  },
-  endTimeMs: number
-): Array<Record<string, unknown>> {
-  const inputTokens = usage.inputTokens ?? 0;
-  const outputTokens = usage.outputTokens ?? 0;
-
-  if (inputTokens <= 0 && outputTokens <= 0) {
-    return spans;
-  }
-
-  if (hasParseableModelUsageSpan(spans)) {
-    return spans;
-  }
-
-  const providerUrl = resolveProviderUrl(modelInfo, spans);
-
-  if (!providerUrl) {
-    return spans;
-  }
-  const modelId = resolveSyntheticModelId(modelInfo, spans);
-
-  const traceId = getTraceIdCandidate(spans);
-
-  return [
-    ...spans,
-    createSyntheticModelUsageSpan({
-      endTimeMs,
-      inputTokens,
-      modelId,
-      outputTokens,
-      providerUrl,
-      ...(modelInfo.provider ? { provider: modelInfo.provider } : {}),
-      ...(traceId ? { traceId } : {})
-    })
-  ];
-}
-
-function hasParseableModelUsageSpan(
-  spans: Array<Record<string, unknown>>
-): boolean {
-  return spans.some(span => {
-    const attributes =
-      span.attributes && typeof span.attributes === "object"
-        ? (span.attributes as Record<string, unknown>)
-        : {};
-    const rawUrl = attributes["http.url"] ?? attributes["url.full"];
-    const url = typeof rawUrl === "string" ? rawUrl : undefined;
-
-    if (!url || !isLlmProviderUrl(url)) {
-      return false;
-    }
-
-    const responseBody = getStringField(span, "response_body", "responseBody");
-
-    if (!responseBody) {
-      return false;
-    }
-
-    if (!hasUsageInBody(responseBody)) {
-      return false;
-    }
-
-    const modelFromResponse = extractModelIdFromBody(responseBody);
-
-    if (modelFromResponse) {
-      return true;
-    }
-
-    const requestBody = getStringField(span, "request_body", "requestBody");
-
-    if (!requestBody) {
-      return false;
-    }
-
-    return extractModelIdFromBody(requestBody) !== undefined;
-  });
-}
-
 function hasUsageInBody(body: string): boolean {
   try {
     const parsed = JSON.parse(body) as {
@@ -1679,187 +1572,6 @@ function extractModelIdFromBody(body: string): string | undefined {
   }
 }
 
-function createSyntheticModelUsageSpan({
-  endTimeMs,
-  inputTokens,
-  modelId,
-  outputTokens,
-  provider,
-  providerUrl,
-  traceId
-}: {
-  endTimeMs: number;
-  inputTokens: number;
-  modelId: string;
-  outputTokens: number;
-  provider?: string;
-  providerUrl: string;
-  traceId?: string;
-}): Record<string, unknown> {
-  const endTimeNs = Math.max(1, Math.floor(endTimeMs * 1_000_000));
-  const startTimeNs = Math.max(0, endTimeNs - 1);
-  const normalizedTraceId = normalizeHexId(traceId, 32);
-  const spanId = normalizeHexId(undefined, 16);
-  const telemetryModelId = toTelemetryModelId(modelId) ?? modelId;
-
-  return {
-    attributes: {
-      "http.method": "POST",
-      "http.url": providerUrl,
-      "openbox.synthetic": true
-    },
-    duration_ns: 1,
-    end_time: endTimeNs,
-    events: [],
-    kind: "CLIENT",
-    name: "openbox.synthetic.model_usage",
-    request_body: JSON.stringify({
-      model: telemetryModelId,
-      model_id: modelId,
-      ...(provider ? { model_provider: provider } : {}),
-      ...(provider ? { provider } : {})
-    }),
-    response_body: JSON.stringify({
-      model: telemetryModelId,
-      model_id: modelId,
-      ...(provider ? { model_provider: provider } : {}),
-      ...(provider ? { provider } : {}),
-      usage: {
-        completion_tokens: outputTokens,
-        input_tokens: inputTokens,
-        output_tokens: outputTokens,
-        prompt_tokens: inputTokens,
-        total_tokens: inputTokens + outputTokens
-      }
-    }),
-    semantic_type: "llm_completion",
-    span_id: spanId,
-    start_time: startTimeNs,
-    status: {
-      code: "OK"
-    },
-    trace_id: normalizedTraceId
-  };
-}
-
-function resolveProviderUrl(modelInfo: {
-  modelId?: string;
-  provider?: string;
-}, spans: Array<Record<string, unknown>>): string | undefined {
-  const provider = modelInfo.provider?.toLowerCase();
-  const modelId = modelInfo.modelId?.toLowerCase();
-
-  if (provider?.includes("openai")) {
-    return "https://api.openai.com/v1/responses";
-  }
-
-  if (provider?.includes("anthropic")) {
-    return "https://api.anthropic.com/v1/messages";
-  }
-
-  if (provider?.includes("google") || provider?.includes("gemini")) {
-    return "https://generativelanguage.googleapis.com/v1beta/models";
-  }
-
-  for (const span of spans) {
-    const attributes =
-      span.attributes && typeof span.attributes === "object"
-        ? (span.attributes as Record<string, unknown>)
-        : {};
-    const rawUrl = attributes["http.url"] ?? attributes["url.full"];
-    const url = typeof rawUrl === "string" ? rawUrl : undefined;
-
-    if (!url) {
-      continue;
-    }
-
-    if (url.includes("api.openai.com")) {
-      return "https://api.openai.com/v1/responses";
-    }
-
-    if (url.includes("api.anthropic.com")) {
-      return "https://api.anthropic.com/v1/messages";
-    }
-
-    if (url.includes("generativelanguage.googleapis.com")) {
-      return "https://generativelanguage.googleapis.com/v1beta/models";
-    }
-  }
-
-  if (!modelId) {
-    return undefined;
-  }
-
-  if (
-    modelId.startsWith("gpt-") ||
-    modelId.startsWith("o1") ||
-    modelId.startsWith("o3")
-  ) {
-    return "https://api.openai.com/v1/responses";
-  }
-
-  if (modelId.startsWith("claude-")) {
-    return "https://api.anthropic.com/v1/messages";
-  }
-
-  if (modelId.startsWith("gemini")) {
-    return "https://generativelanguage.googleapis.com/v1beta/models";
-  }
-
-  return undefined;
-}
-
-function resolveSyntheticModelId(
-  modelInfo: {
-    modelId?: string;
-  },
-  spans: Array<Record<string, unknown>>
-): string {
-  for (const span of spans) {
-    const responseBody = getStringField(span, "response_body", "responseBody");
-
-    if (responseBody) {
-      const modelFromResponse = extractModelIdFromBody(responseBody);
-
-      if (modelFromResponse) {
-        return modelFromResponse;
-      }
-    }
-
-    const requestBody = getStringField(span, "request_body", "requestBody");
-
-    if (!requestBody) {
-      continue;
-    }
-
-    const modelFromRequest = extractModelIdFromBody(requestBody);
-
-    if (modelFromRequest) {
-      return modelFromRequest;
-    }
-  }
-
-  if (modelInfo.modelId) {
-    return modelInfo.modelId;
-  }
-
-  return "unknown-model";
-}
-
-function getTraceIdCandidate(
-  spans: Array<Record<string, unknown>>
-): string | undefined {
-  for (const span of spans) {
-    const traceId = getStringField(span, "trace_id", "traceId");
-
-    if (traceId) {
-      return traceId;
-    }
-  }
-
-  return undefined;
-}
-
 function getStringField(
   record: Record<string, unknown>,
   snakeKey: string,
@@ -1878,14 +1590,6 @@ function getStringField(
   }
 
   return undefined;
-}
-
-function isLlmProviderUrl(url: string): boolean {
-  return (
-    url.includes("api.openai.com") ||
-    url.includes("api.anthropic.com") ||
-    url.includes("generativelanguage.googleapis.com")
-  );
 }
 
 function resolveWorkflowModelInfo(
@@ -1971,20 +1675,6 @@ function inferProviderFromUrl(url: string): string | undefined {
   }
 
   return undefined;
-}
-
-function normalizeHexId(
-  candidate: string | undefined,
-  width: number
-): string {
-  const source = (candidate ?? randomUUID().replaceAll("-", "")).toLowerCase();
-  const filtered = source.replace(/[^a-f0-9]/g, "");
-
-  if (filtered.length >= width) {
-    return filtered.slice(0, width);
-  }
-
-  return filtered.padEnd(width, "0");
 }
 
 async function sendAgentFailure(
@@ -2267,17 +1957,6 @@ function buildAgentOutputSignalSpans(
   workflowId: string,
   runId: string
 ): Array<Record<string, unknown>> {
-  const queuedHookSpans = options.spanProcessor.consumeAgentSignalHookSpans(
-    workflowId,
-    runId
-  );
-
-  if (queuedHookSpans.length > 0) {
-    return queuedHookSpans
-      .slice(-MAX_AGENT_OUTPUT_SIGNAL_SPANS)
-      .map(span => compactAgentSignalSpan(span));
-  }
-
   const workflowSpans = normalizeSpansForGovernance(
     options.spanProcessor.getBuffer(workflowId, runId)?.spans ?? []
   );
