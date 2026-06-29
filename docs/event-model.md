@@ -160,11 +160,13 @@ Supported hook span families:
 - `file_operation`
 - `function_call`
 
-## Agent-Context HTTP Span Semantics
+## HTTP Span Semantics (no blind spot)
 
-Every HTTP call made from agent context (any URL, any method, but not inside
-a wrapped tool) produces a per-call activity group so there are no blind
-spots in the session view. The classification is:
+Every HTTP call observed by the SDK's patched `fetch` produces a per-call
+activity group so there are no blind spots in the session view. The only
+exclusion is tool-context calls (HTTP made inside a wrapped tool's
+`executeGovernedActivity`) which keep the existing inline hook-update
+pattern attached to the tool's activity. Everything else gets classified:
 
 - POST to a known LLM provider host (OpenAI, Anthropic, Google) → `activity_type: "llm_call"`
 - Anything else (GET to LLM hosts, CopilotKit telemetry, runtime infra POSTs, etc.) → `activity_type: "http_call"`
@@ -183,6 +185,14 @@ list returns `span_count: 2` with both spans inline on the activity row.
 and model identity remain on the workflow event for top-level reporting; the
 authoritative per-call evidence lives on the `llm_call` / `http_call`
 activities.
+
+**Workflow context resolution.** When the call happens inside an OpenBox
+execution context (a wrapped agent run), the activity carries that context's
+`workflow_id` / `workflow_type` / `run_id`. When the call happens outside any
+execution context (e.g. CopilotKit Runtime middleware HTTP, infra POSTs),
+the activity uses runtime placeholders: `workflow_id: "runtime"`,
+`workflow_type: "runtime"`, `run_id: "runtime:<trace_id_prefix>"`. The
+trace-derived run_id keeps calls in the same OTel trace grouped together.
 
 Tool-context HTTP (inside a wrapped tool's `executeGovernedActivity`) keeps
 the existing inline hook update pattern: the tool's ActivityStarted is the

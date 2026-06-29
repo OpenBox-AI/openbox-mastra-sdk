@@ -504,6 +504,92 @@ describe("llm_call activity emission", () => {
     expect(httpActivities.length).toBeGreaterThan(0);
   });
 
+  it("captures HTTP outside any OpenBox execution context (runtime middleware) as http_call with runtime placeholders", async () => {
+    const { trace } = await import("@opentelemetry/api");
+
+    const server = await startOpenBoxServer({
+      evaluate() {
+        return { verdict: "allow" };
+      }
+    });
+
+    globalThis.fetch = (async (
+      input: Parameters<typeof fetch>[0],
+      init?: RequestInit
+    ): Promise<Response> => {
+      const request = new globalThis.Request(input, init);
+      if (request.url.startsWith("https://telemetry.example.com/")) {
+        return new globalThis.Response(JSON.stringify({ ok: true }), {
+          headers: { "content-type": "application/json" },
+          status: 200
+        });
+      }
+      return originalFetch(request);
+    }) as typeof fetch;
+
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_runtime_http",
+      apiUrl: server.url,
+      validate: false
+    });
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+    const spanProcessor = new OpenBoxSpanProcessor();
+    const telemetry = setupOpenBoxOpenTelemetry({
+      captureHttpBodies: true,
+      governanceClient: client,
+      instrumentDatabases: false,
+      instrumentFileIo: false,
+      spanProcessor
+    });
+
+    // No runWithOpenBoxExecutionContext wrap — simulates CopilotKit Runtime
+    // middleware firing HTTP outside any wrapped agent's execution context.
+    // The active OTel span is enough for patchedFetch to proceed.
+    const tracer = trace.getTracer("openbox.test.runtime-http");
+    await tracer.startActiveSpan("runtime.middleware", async span => {
+      await fetch("https://telemetry.example.com/ingest", {
+        body: JSON.stringify({ event: "ping" }),
+        headers: { "content-type": "application/json" },
+        method: "POST"
+      });
+      span.end();
+    });
+
+    await telemetry.shutdown();
+    await server.close();
+
+    const payloads = server.requests
+      .filter(req => req.pathname === "/api/v1/governance/evaluate")
+      .map(req => req.body);
+
+    const httpStarted = payloads.filter(
+      body =>
+        body.event_type === "ActivityStarted" &&
+        body.activity_type === "http_call"
+    );
+    const httpCompleted = payloads.filter(
+      body =>
+        body.event_type === "ActivityCompleted" &&
+        body.activity_type === "http_call"
+    );
+
+    expect(httpStarted).toHaveLength(3);
+    expect(httpCompleted).toHaveLength(1);
+
+    const initial = httpStarted.find(body => body.hook_trigger !== true);
+    expect(initial).toBeDefined();
+    expect(initial?.workflow_id).toBe("runtime");
+    expect(initial?.workflow_type).toBe("runtime");
+    expect(typeof initial?.run_id).toBe("string");
+    expect((initial?.run_id as string).startsWith("runtime:")).toBe(true);
+    expect(httpCompleted[0]?.activity_id).toBe(`${initial?.activity_id}-c`);
+  });
+
   it("preserves fail-open posture: openbox-server 500 on evaluate does not surface as fetch error", async () => {
     const { runWithOpenBoxExecutionContext } = await import(
       "../../src/governance/context.js"

@@ -1669,38 +1669,33 @@ async function evaluateHookGovernance(
   throw new GovernanceHaltError(`Governance blocked: ${reason}`);
 }
 
-// Classifies an agent-context HTTP call so patchedFetch knows whether to
-// buffer it for per-call activity emission and which activity_type to use.
-// Tool-context calls (executionContext.activityId present) are excluded so
-// the existing inline hook_trigger path keeps owning them.
+// Classifies a patched-fetch HTTP call so the buffer knows whether to emit
+// a per-call activity group and which activity_type to use. Implements the
+// "no blind spot" principle: any HTTP call patchedFetch sees (that has an
+// active OTel span and is not in ignoredUrls) gets a renderable activity row.
+//
+// Tool-context calls (executionContext.activityId present) are EXCLUDED so
+// the existing inline hook_trigger path keeps owning them — those calls
+// already attach as updates to the parent tool activity and re-emitting
+// here would double-count.
 //
 // Returns:
 //   - "llm_call" for POST to a known LLM provider host (api.openai.com,
 //     api.anthropic.com, generativelanguage.googleapis.com). LLM completion
 //     endpoints are POST; gating on POST excludes GET /v1/models and similar
-//     non-completion calls.
-//   - "http_call" for any other agent-context HTTP call (any method, any
-//     host). Implements the "no blind spot" principle: every HTTP call
-//     observable inside the agent run gets a renderable activity row.
-//   - undefined when there is no agent execution context, so the call falls
-//     through to the existing generic governance path (which silently
-//     returns when there is no activity to attach to).
+//     non-completion calls (those become "http_call").
+//   - "http_call" for everything else. Includes calls outside any OpenBox
+//     execution context (e.g. CopilotKit Runtime middleware HTTP, runtime
+//     infra POSTs). emitAgentHttpCallActivityGroup falls back to runtime
+//     placeholders for workflow_id/run_id when the context is absent.
+//   - undefined ONLY for tool-context calls (handled by the existing
+//     hook_trigger path).
 function resolveAgentHttpCallKind(
   url: string,
   method: string
 ): AgentHttpCallKind | undefined {
   const executionContext = getOpenBoxExecutionContext();
-  if (!executionContext || executionContext.source !== "agent") {
-    return undefined;
-  }
-  if (executionContext.activityId) {
-    return undefined;
-  }
-  if (
-    !executionContext.workflowId ||
-    !executionContext.workflowType ||
-    !executionContext.runId
-  ) {
+  if (executionContext?.activityId) {
     return undefined;
   }
   const isLlmProvider = inferProviderFromUrl(url) !== undefined;
@@ -1735,23 +1730,20 @@ async function emitAgentHttpCallActivityGroup(input: {
       return;
     }
 
+    // Fall back to runtime placeholders when there is no OpenBox execution
+    // context (e.g. CopilotKit Runtime middleware HTTP, infra POSTs that
+    // happen outside any wrapped agent run). The traceId provides a stable
+    // grouping per OTel trace so multiple calls in the same trace share a
+    // run_id. Workflow_id "runtime" is the canonical bucket for these.
     const executionContext = getOpenBoxExecutionContext();
-    if (
-      !executionContext ||
-      !executionContext.workflowId ||
-      !executionContext.workflowType ||
-      !executionContext.runId
-    ) {
-      return;
-    }
-
-    const workflowId = executionContext.workflowId;
-    const workflowType = executionContext.workflowType;
-    const runId = executionContext.runId;
-    const taskQueue = executionContext.taskQueue ?? "mastra";
+    const workflowId = executionContext?.workflowId ?? "runtime";
+    const workflowType = executionContext?.workflowType ?? "runtime";
+    const runId =
+      executionContext?.runId ?? `runtime:${input.traceId.slice(0, 16)}`;
+    const taskQueue = executionContext?.taskQueue ?? "mastra";
     const attempt =
-      typeof executionContext.attempt === "number" ? executionContext.attempt : 1;
-    const goal = executionContext.goal;
+      typeof executionContext?.attempt === "number" ? executionContext.attempt : 1;
+    const goal = executionContext?.goal;
     const modelUsage = extractModelUsageFromHookSpan(input.completedHookSpan);
     const telemetryModelId = toTelemetryModelId(modelUsage.modelId);
     const derived = deriveAgentHookActivityPayload(

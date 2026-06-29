@@ -28,11 +28,13 @@
 
 ### Added (follow-up: no blind spot)
 
-- Every HTTP call observed inside an agent run (any URL, any method, but not routed through a wrapped tool) now produces a per-call activity. The classifier is:
+- Every HTTP call observed by the SDK's patched `fetch` now produces a per-call activity row. The classifier is:
   - POST to a known LLM provider host (OpenAI / Anthropic / Google) → `activity_type: "llm_call"`
-  - Anything else (CopilotKit telemetry, runtime infra POSTs, `GET /v1/models`, etc.) → `activity_type: "http_call"`
+  - Anything else (CopilotKit Runtime middleware, runtime infra POSTs, `GET /v1/models`, etc.) → `activity_type: "http_call"`
   
-  Both shapes use the same 4-event group (creation + 2 hook_trigger updates + completion). Closes the previously-silent gap for non-LLM agent-context HTTP. Operators that want to suppress noise from specific hosts should pass them in the `ignoredUrls` config.
+  Both shapes use the same 4-event group (creation + 2 hook_trigger updates + completion). Tool-context calls (HTTP inside a wrapped tool's `executeGovernedActivity`) keep the existing inline hook-update pattern attached to the tool activity — only those are excluded from the per-call emission.
+  
+  Calls that happen outside any OpenBox execution context (e.g. CopilotKit Runtime middleware running between requests, infra POSTs at startup) are emitted with runtime placeholders: `workflow_id: "runtime"`, `workflow_type: "runtime"`, `run_id: "runtime:<trace_id_prefix>"`. The trace-derived run_id keeps calls in the same OTel trace grouped together. Operators that want to suppress noise from specific hosts should pass them in the `ignoredUrls` config.
 
 ### Why
 
