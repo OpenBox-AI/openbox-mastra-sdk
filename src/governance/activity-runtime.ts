@@ -4,7 +4,10 @@ import { trace } from "@opentelemetry/api";
 import type { ToolExecutionContext } from "@mastra/core/tools";
 
 import type { OpenBoxClient } from "../client/index.js";
-import type { OpenBoxConfig } from "../config/index.js";
+import {
+  resolveOpenBoxMultiAgentSessionId,
+  type OpenBoxConfig
+} from "../config/index.js";
 import type { OpenBoxSpanProcessor } from "../span/index.js";
 import {
   ApprovalExpiredError,
@@ -71,6 +74,14 @@ export async function executeGovernedActivity<TInput, TOutput>({
   type
 }: GovernedActivityOptions<TInput, TOutput>): Promise<TOutput | undefined> {
   const descriptor = resolveActivityDescriptor(type, runtimeContext);
+  const multiAgentSessionId = resolveOpenBoxMultiAgentSessionId(
+    dependencies.config,
+    {
+      runId: descriptor.runId,
+      workflowId: descriptor.workflowId,
+      workflowType: descriptor.workflowType
+    }
+  );
   const eventMetadata = mergeOpenBoxEventMetadata(
     getOpenBoxExecutionContext()?.metadata,
     configuredMetadata
@@ -100,6 +111,9 @@ export async function executeGovernedActivity<TInput, TOutput>({
       attempt: descriptor.attempt,
       ...(descriptor.goal ? { goal: descriptor.goal } : {}),
       ...(eventMetadata ? { metadata: eventMetadata } : {}),
+      ...(multiAgentSessionId
+        ? { multi_agent_session_id: multiAgentSessionId }
+        : {}),
       run_id: descriptor.runId,
       task_queue: descriptor.taskQueue,
       workflow_id: descriptor.workflowId,
@@ -754,7 +768,7 @@ async function evaluateActivityEvent(
   const body = {
     source: "workflow-telemetry",
     timestamp: rfc3339Now(),
-    ...payload
+    ...withMultiAgentSessionId(dependencies.config, payload)
   };
 
   try {
@@ -771,6 +785,51 @@ async function evaluateActivityEvent(
 
     return null;
   }
+}
+
+function withMultiAgentSessionId<T extends Record<string, unknown> & {
+  event_type: WorkflowEventType;
+}>(
+  config: OpenBoxConfig,
+  payload: T
+): T {
+  if (getPayloadString(payload, "multi_agent_session_id")) {
+    return payload;
+  }
+
+  const runId = getPayloadString(payload, "run_id");
+  const workflowId = getPayloadString(payload, "workflow_id");
+  const workflowType = getPayloadString(payload, "workflow_type");
+
+  if (!runId || !workflowId || !workflowType) {
+    return payload;
+  }
+
+  const multiAgentSessionId = resolveOpenBoxMultiAgentSessionId(config, {
+    runId,
+    workflowId,
+    workflowType
+  });
+
+  if (!multiAgentSessionId) {
+    return payload;
+  }
+
+  return {
+    ...payload,
+    multi_agent_session_id: multiAgentSessionId
+  };
+}
+
+function getPayloadString(
+  payload: Record<string, unknown>,
+  field: string
+): string | undefined {
+  const value = payload[field];
+
+  return typeof value === "string" && value.trim().length > 0
+    ? value
+    : undefined;
 }
 
 function applyStopVerdict(
