@@ -1003,8 +1003,7 @@ function patchFetch(
           completedHookTrigger,
           hookGovernance,
           kind: bufferedAgentCall.kind,
-          startedHookSpan: bufferedAgentCall.startedSpan,
-          traceId: spanContext.traceId
+          startedHookSpan: bufferedAgentCall.startedSpan
         });
       } else {
         await evaluateHookGovernance(hookGovernance, {
@@ -1625,9 +1624,11 @@ async function evaluateHookGovernance(
 }
 
 // Classifies a patched-fetch HTTP call so the buffer knows whether to emit
-// a per-call activity group and which activity_type to use. Implements the
-// "no blind spot" principle: any HTTP call patchedFetch sees (that has an
-// active OTel span and is not in ignoredUrls) gets a renderable activity row.
+// a per-call activity group and which activity_type to use. Scope is
+// deliberately narrow: only HTTP made from inside a wrapped agent run
+// (source=agent, full workflow context bound, not currently inside a tool)
+// becomes a renderable per-call activity row. Calls outside any OpenBox
+// execution context are left to the existing path (silent unless wrapped).
 //
 // Tool-context calls (executionContext.activityId present) are EXCLUDED so
 // the existing inline hook_trigger path keeps owning them — those calls
@@ -1639,18 +1640,26 @@ async function evaluateHookGovernance(
 //     api.anthropic.com, generativelanguage.googleapis.com). LLM completion
 //     endpoints are POST; gating on POST excludes GET /v1/models and similar
 //     non-completion calls (those become "http_call").
-//   - "http_call" for everything else. Includes calls outside any OpenBox
-//     execution context (e.g. CopilotKit Runtime middleware HTTP, runtime
-//     infra POSTs). emitAgentHttpCallActivityGroup falls back to runtime
-//     placeholders for workflow_id/run_id when the context is absent.
-//   - undefined ONLY for tool-context calls (handled by the existing
-//     hook_trigger path).
+//   - "http_call" for any other agent-context HTTP (e.g. agent code that
+//     fetches without going through a wrapped tool).
+//   - undefined for tool-context calls and for calls without a bound
+//     agent-source execution context (the existing inline / no-op paths
+//     keep owning those).
 function resolveAgentHttpCallKind(
   url: string,
   method: string
 ): AgentHttpCallKind | undefined {
   const executionContext = getOpenBoxExecutionContext();
-  if (executionContext?.activityId) {
+  if (
+    !executionContext ||
+    executionContext.source !== "agent" ||
+    !executionContext.workflowId ||
+    !executionContext.workflowType ||
+    !executionContext.runId
+  ) {
+    return undefined;
+  }
+  if (executionContext.activityId) {
     return undefined;
   }
   const isLlmProvider = inferProviderFromUrl(url) !== undefined;
@@ -1673,7 +1682,6 @@ async function emitAgentHttpCallActivityGroup(input: {
   hookGovernance: HookGovernanceRuntime | undefined;
   kind: AgentHttpCallKind;
   startedHookSpan: Record<string, unknown>;
-  traceId: string;
 }): Promise<void> {
   // Outer try/catch enforces the FAIL-OPEN contract: this function is awaited
   // from patchedFetch, so any synchronous throw from payload-building helpers
@@ -1685,20 +1693,26 @@ async function emitAgentHttpCallActivityGroup(input: {
       return;
     }
 
-    // Fall back to runtime placeholders when there is no OpenBox execution
-    // context (e.g. CopilotKit Runtime middleware HTTP, infra POSTs that
-    // happen outside any wrapped agent run). The traceId provides a stable
-    // grouping per OTel trace so multiple calls in the same trace share a
-    // run_id. Workflow_id "runtime" is the canonical bucket for these.
+    // Strict guard: emit only when we have a full agent-source execution
+    // context. Matches resolveAgentHttpCallKind's gating so we never buffer
+    // a call we'll then drop here. Keeps the SDK vendor-neutral: HTTP made
+    // outside any wrapped agent run is not synthesized into an activity.
     const executionContext = getOpenBoxExecutionContext();
-    const workflowId = executionContext?.workflowId ?? "runtime";
-    const workflowType = executionContext?.workflowType ?? "runtime";
-    const runId =
-      executionContext?.runId ?? `runtime:${input.traceId.slice(0, 16)}`;
-    const taskQueue = executionContext?.taskQueue ?? "mastra";
+    if (
+      !executionContext ||
+      !executionContext.workflowId ||
+      !executionContext.workflowType ||
+      !executionContext.runId
+    ) {
+      return;
+    }
+    const workflowId = executionContext.workflowId;
+    const workflowType = executionContext.workflowType;
+    const runId = executionContext.runId;
+    const taskQueue = executionContext.taskQueue ?? "mastra";
     const attempt =
-      typeof executionContext?.attempt === "number" ? executionContext.attempt : 1;
-    const goal = executionContext?.goal;
+      typeof executionContext.attempt === "number" ? executionContext.attempt : 1;
+    const goal = executionContext.goal;
     const modelUsage = extractModelUsageFromHookSpan(input.completedHookSpan);
     const telemetryModelId = toTelemetryModelId(modelUsage.modelId);
     const derived = deriveAgentHookActivityPayload(

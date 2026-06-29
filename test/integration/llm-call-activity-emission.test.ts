@@ -504,7 +504,7 @@ describe("llm_call activity emission", () => {
     expect(httpActivities.length).toBeGreaterThan(0);
   });
 
-  it("captures HTTP outside any OpenBox execution context (runtime middleware) as http_call with runtime placeholders", async () => {
+  it("does not emit http_call activities for HTTP outside any OpenBox execution context", async () => {
     const { trace } = await import("@opentelemetry/api");
 
     const server = await startOpenBoxServer({
@@ -528,7 +528,7 @@ describe("llm_call activity emission", () => {
     }) as typeof fetch;
 
     const config = parseOpenBoxConfig({
-      apiKey: "obx_test_runtime_http",
+      apiKey: "obx_test_no_context_http",
       apiUrl: server.url,
       validate: false
     });
@@ -547,11 +547,13 @@ describe("llm_call activity emission", () => {
       spanProcessor
     });
 
-    // No runWithOpenBoxExecutionContext wrap — simulates CopilotKit Runtime
-    // middleware firing HTTP outside any wrapped agent's execution context.
-    // The active OTel span is enough for patchedFetch to proceed.
-    const tracer = trace.getTracer("openbox.test.runtime-http");
-    await tracer.startActiveSpan("runtime.middleware", async span => {
+    // No runWithOpenBoxExecutionContext wrap — simulates middleware firing
+    // HTTP outside any wrapped agent's execution context. Active OTel span
+    // is present but there is no agent-source context to attribute it to,
+    // so the SDK stays silent (vendor-neutral: the SDK does not synthesize
+    // workflow attribution for HTTP that did not originate from an agent).
+    const tracer = trace.getTracer("openbox.test.no-context-http");
+    await tracer.startActiveSpan("middleware", async span => {
       await fetch("https://telemetry.example.com/ingest", {
         body: JSON.stringify({ event: "ping" }),
         headers: { "content-type": "application/json" },
@@ -567,27 +569,11 @@ describe("llm_call activity emission", () => {
       .filter(req => req.pathname === "/api/v1/governance/evaluate")
       .map(req => req.body);
 
-    const httpStarted = payloads.filter(
+    const httpActivities = payloads.filter(
       body =>
-        body.event_type === "ActivityStarted" &&
-        body.activity_type === "http_call"
+        body.activity_type === "http_call" || body.activity_type === "llm_call"
     );
-    const httpCompleted = payloads.filter(
-      body =>
-        body.event_type === "ActivityCompleted" &&
-        body.activity_type === "http_call"
-    );
-
-    expect(httpStarted).toHaveLength(3);
-    expect(httpCompleted).toHaveLength(1);
-
-    const initial = httpStarted.find(body => body.hook_trigger !== true);
-    expect(initial).toBeDefined();
-    expect(initial?.workflow_id).toBe("runtime");
-    expect(initial?.workflow_type).toBe("runtime");
-    expect(typeof initial?.run_id).toBe("string");
-    expect((initial?.run_id as string).startsWith("runtime:")).toBe(true);
-    expect(httpCompleted[0]?.activity_id).toBe(`${String(initial?.activity_id)}-c`);
+    expect(httpActivities).toHaveLength(0);
   });
 
   it("preserves fail-open posture: openbox-server 500 on evaluate does not surface as fetch error", async () => {

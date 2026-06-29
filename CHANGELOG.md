@@ -26,15 +26,15 @@
 
 - `ActivityCompleted` events emitted by `wrap-tool` now always carry `activity_type`. Previously stripped when `hitlEnabled` was true (the default), which caused the openbox-core UI to render completion rows with no name.
 
-### Added (follow-up: no blind spot)
+### Added (follow-up: agent-context HTTP coverage)
 
-- Every HTTP call observed by the SDK's patched `fetch` now produces a per-call activity row. The classifier is:
+- Generalises the per-call HTTP emission so every agent-context HTTP call (not just LLM POSTs) becomes a renderable activity row. The classifier is:
   - POST to a known LLM provider host (OpenAI / Anthropic / Google) → `activity_type: "llm_call"`
-  - Anything else (CopilotKit Runtime middleware, runtime infra POSTs, `GET /v1/models`, etc.) → `activity_type: "http_call"`
-  
-  Both shapes use the same 4-event group (creation + 2 hook_trigger updates + completion). Tool-context calls (HTTP inside a wrapped tool's `executeGovernedActivity`) keep the existing inline hook-update pattern attached to the tool activity — only those are excluded from the per-call emission.
-  
-  Calls that happen outside any OpenBox execution context (e.g. CopilotKit Runtime middleware running between requests, infra POSTs at startup) are emitted with runtime placeholders: `workflow_id: "runtime"`, `workflow_type: "runtime"`, `run_id: "runtime:<trace_id_prefix>"`. The trace-derived run_id keeps calls in the same OTel trace grouped together. Operators that want to suppress noise from specific hosts should pass them in the `ignoredUrls` config.
+  - Any other HTTP made inside an agent run (e.g. `GET /v1/models`, custom HTTP from agent code that bypasses a wrapped tool) → `activity_type: "http_call"`
+
+  Both shapes use the same 4-event group (creation + 2 hook_trigger updates + completion). Scope is deliberately narrow:
+  - Tool-context HTTP (inside a wrapped tool's `executeGovernedActivity`) keeps the existing inline hook-update pattern attached to the tool activity.
+  - HTTP that fires outside any OpenBox execution context (server middleware running between requests, infra POSTs at startup) is left silent — the SDK does not synthesise workflow attribution for calls that did not originate from an agent. Operators that want those captured should wrap their middleware with `runWithOpenBoxExecutionContext` or rely on the existing `ignoredUrls` config to manage noise.
 
 ### Why
 

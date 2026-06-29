@@ -160,18 +160,26 @@ Supported hook span families:
 - `file_operation`
 - `function_call`
 
-## HTTP Span Semantics (no blind spot)
+## HTTP Span Semantics
 
-Every HTTP call observed by the SDK's patched `fetch` produces a per-call
-activity group so there are no blind spots in the session view. The only
-exclusion is tool-context calls (HTTP made inside a wrapped tool's
-`executeGovernedActivity`) which keep the existing inline hook-update
-pattern attached to the tool's activity. Everything else gets classified:
+HTTP calls observed by the SDK's patched `fetch` fall into three buckets:
 
-- POST to a known LLM provider host (OpenAI, Anthropic, Google) → `activity_type: "llm_call"`
-- Anything else (GET to LLM hosts, CopilotKit telemetry, runtime infra POSTs, etc.) → `activity_type: "http_call"`
+1. **Tool-context HTTP** (HTTP made inside a wrapped tool's
+   `executeGovernedActivity`) keeps the existing inline hook-update pattern
+   attached to the tool's activity. The tool's `ActivityStarted` is the
+   parent and hook updates attach to it.
+2. **Agent-context HTTP outside a wrapped tool** produces a per-call
+   activity group classified by the URL:
+   - POST to a known LLM provider host (OpenAI, Anthropic, Google) → `activity_type: "llm_call"`
+   - Any other HTTP (e.g. `GET /v1/models`, custom HTTP from agent code that bypasses a wrapped tool) → `activity_type: "http_call"`
+3. **HTTP without an agent-source execution context** (server middleware
+   running between requests, infra POSTs at startup) is intentionally left
+   silent. The SDK does not synthesise workflow attribution for HTTP that
+   did not originate from an agent run. Wrap the surrounding code with
+   `runWithOpenBoxExecutionContext` if you want it captured.
 
-Both shapes emit the same 4-event group, mirroring the openbox-core tool path:
+Bucket 2 emits the same 4-event group as the tool path, mirroring the
+openbox-core wire shape:
 
 1. Creation `ActivityStarted` with a fresh UUID `activity_id` and `span_count: 0`
 2. `ActivityStarted{hook_trigger: true, hook_stage: "started"}` attaching the started HTTP hook span
@@ -185,19 +193,6 @@ list returns `span_count: 2` with both spans inline on the activity row.
 and model identity remain on the workflow event for top-level reporting; the
 authoritative per-call evidence lives on the `llm_call` / `http_call`
 activities.
-
-**Workflow context resolution.** When the call happens inside an OpenBox
-execution context (a wrapped agent run), the activity carries that context's
-`workflow_id` / `workflow_type` / `run_id`. When the call happens outside any
-execution context (e.g. CopilotKit Runtime middleware HTTP, infra POSTs),
-the activity uses runtime placeholders: `workflow_id: "runtime"`,
-`workflow_type: "runtime"`, `run_id: "runtime:<trace_id_prefix>"`. The
-trace-derived run_id keeps calls in the same OTel trace grouped together.
-
-Tool-context HTTP (inside a wrapped tool's `executeGovernedActivity`) keeps
-the existing inline hook update pattern: the tool's ActivityStarted is the
-parent and hook updates attach to it. Only HTTP not routed through a wrapped
-tool becomes an `llm_call` / `http_call` activity.
 
 ## Typical Event Sequences
 

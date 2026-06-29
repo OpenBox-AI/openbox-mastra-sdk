@@ -128,7 +128,7 @@ It also captures operational spans for:
 
 Important production behavior:
 
-- every HTTP call inside an agent run that is not routed through a wrapped tool emits a per-call activity row: POST to a known LLM host → `activity_type: "llm_call"`; anything else → `activity_type: "http_call"`. Closes the "blind spot" for agent-context HTTP outside tools (CopilotKit telemetry, infra POSTs, etc.).
+- every HTTP call inside an agent run that is not routed through a wrapped tool emits a per-call activity row: POST to a known LLM host → `activity_type: "llm_call"`; any other agent-context HTTP → `activity_type: "http_call"`. HTTP fired outside any wrapped agent run is intentionally left silent — wrap the surrounding code with `runWithOpenBoxExecutionContext` to capture it.
 - agent prompts are emitted as `SignalReceived(user_input)`, not as tool activities
 - the SDK ignores its own OpenBox API URL during telemetry setup to avoid feedback loops
 
