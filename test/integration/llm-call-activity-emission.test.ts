@@ -308,7 +308,7 @@ describe("llm_call activity emission", () => {
     expect(httpCompleted).toHaveLength(1);
     const initial = httpStarted.find(body => body.hook_trigger !== true);
     expect(initial?.activity_id).toBeDefined();
-    expect(httpCompleted[0]?.activity_id).toBe(`${initial?.activity_id}-c`);
+    expect(httpCompleted[0]?.activity_id).toBe(`${String(initial?.activity_id)}-c`);
   });
 
   it("assigns distinct activity_ids to parallel LLM HTTP calls without buffer collision", async () => {
@@ -587,7 +587,7 @@ describe("llm_call activity emission", () => {
     expect(initial?.workflow_type).toBe("runtime");
     expect(typeof initial?.run_id).toBe("string");
     expect((initial?.run_id as string).startsWith("runtime:")).toBe(true);
-    expect(httpCompleted[0]?.activity_id).toBe(`${initial?.activity_id}-c`);
+    expect(httpCompleted[0]?.activity_id).toBe(`${String(initial?.activity_id)}-c`);
   });
 
   it("preserves fail-open posture: openbox-server 500 on evaluate does not surface as fetch error", async () => {
