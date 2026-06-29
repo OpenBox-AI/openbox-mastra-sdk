@@ -160,17 +160,39 @@ Supported hook span families:
 - `file_operation`
 - `function_call`
 
-## Agent LLM Span Semantics
+## HTTP Span Semantics
 
-Each LLM HTTP call made from agent context produces a per-call activity pair
-mirroring the LangGraph adapter wire shape:
+HTTP calls observed by the SDK's patched `fetch` fall into three buckets:
 
-- `ActivityStarted` with `activity_type: "llm_call"`, a fresh UUID `activity_id`, and `spans: [<started>, <completed>]` (`span_count: 2`)
-- `ActivityCompleted` with `activity_id: "<uuid>-c"`, `activity_type: "llm_call"`, and `activity_output` carrying a serialized model response
+1. **Tool-context HTTP** (HTTP made inside a wrapped tool's
+   `executeGovernedActivity`) keeps the existing inline hook-update pattern
+   attached to the tool's activity. The tool's `ActivityStarted` is the
+   parent and hook updates attach to it.
+2. **Agent-context HTTP outside a wrapped tool** produces a per-call
+   activity group classified by the URL:
+   - POST to a known LLM provider host (OpenAI, Anthropic, Google) → `activity_type: "llm_call"`
+   - Any other HTTP (e.g. `GET /v1/models`, custom HTTP from agent code that bypasses a wrapped tool) → `activity_type: "http_call"`
+3. **HTTP without an agent-source execution context** (server middleware
+   running between requests, infra POSTs at startup) is intentionally left
+   silent. The SDK does not synthesise workflow attribution for HTTP that
+   did not originate from an agent run. Wrap the surrounding code with
+   `runWithOpenBoxExecutionContext` if you want it captured.
+
+Bucket 2 emits the same 4-event group as the tool path, mirroring the
+openbox-core wire shape:
+
+1. Creation `ActivityStarted` with a fresh UUID `activity_id` and `span_count: 0`
+2. `ActivityStarted{hook_trigger: true, hook_stage: "started"}` attaching the started HTTP hook span
+3. `ActivityStarted{hook_trigger: true, hook_stage: "completed"}` attaching the completed HTTP hook span (with response body, status; server computes `semantic_type: "llm_completion"` for LLM completion endpoints)
+4. `ActivityCompleted` with `activity_id: "<uuid>-c"` and the model response (for `llm_call`) on `activity_output`
+
+openbox-core aggregates the hook spans onto the creation event, so the events
+list returns `span_count: 2` with both spans inline on the activity row.
 
 `WorkflowCompleted` no longer carries a synthetic LLM rollup span. Token usage
 and model identity remain on the workflow event for top-level reporting; the
-authoritative per-call evidence lives on the `llm_call` activities.
+authoritative per-call evidence lives on the `llm_call` / `http_call`
+activities.
 
 ## Typical Event Sequences
 
