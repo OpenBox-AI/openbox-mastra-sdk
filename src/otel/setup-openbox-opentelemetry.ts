@@ -198,13 +198,23 @@ let activeFileRestore: (() => void) | undefined;
 let activeHookGovernanceRuntime: HookGovernanceRuntime | undefined;
 let activeUnregister: (() => void) | undefined;
 
-// Per-LLM-call buffer for the agent-context emission path. Keyed by the HTTP
-// hook span_id generated in patchedFetch. We buffer the started hook span when
-// an LLM URL is observed in agent context, then emit an ActivityStarted +
-// ActivityCompleted pair from the completed stage carrying both spans.
-const llmCallBuffer = new Map<
+// Per-call buffer for the agent-context emission paths. Keyed by the HTTP
+// hook span_id generated in patchedFetch. We buffer the started hook span
+// when an agent-context HTTP call is observed, then emit a 4-event
+// activity group from the completed stage carrying both spans. The `kind`
+// discriminator selects the wire-shape: LLM URLs emit "llm_call"; any
+// other URL (CopilotKit telemetry, runtime infra POSTs, etc.) emits a
+// generic "http_call". Both follow the "no blind spot" principle —
+// every agent-context HTTP call gets a renderable activity row.
+type AgentHttpCallKind = "llm_call" | "http_call";
+
+const agentHttpCallBuffer = new Map<
   string,
-  { activityId: string; startedSpan: Record<string, unknown> }
+  {
+    activityId: string;
+    kind: AgentHttpCallKind;
+    startedSpan: Record<string, unknown>;
+  }
 >();
 
 function isOpenBoxDebugEnabled(): boolean {
@@ -926,16 +936,15 @@ function patchFetch(
       traceId: spanContext.traceId
     });
 
-    const isAgentContextLlmCall = isAgentContextLlmHttpCall(
-      url,
-      request.method
-    );
-    if (isAgentContextLlmCall) {
+    const agentHttpCallKind = resolveAgentHttpCallKind(url, request.method);
+    if (agentHttpCallKind) {
       // Defer emission until the completed stage so we can ship both spans
-      // and the response body in a single per-call ActivityStarted +
-      // ActivityCompleted pair (mirrors the LangGraph adapter wire shape).
-      llmCallBuffer.set(hookSpanId, {
+      // and the response body in a single per-call 4-event group (creation
+      // ActivityStarted + 2 hook_trigger updates + ActivityCompleted).
+      // `kind` selects llm_call vs http_call activity_type at emit time.
+      agentHttpCallBuffer.set(hookSpanId, {
         activityId: randomUUID(),
+        kind: agentHttpCallKind,
         startedSpan: ensureStartedHookSpan(startedHookSpan)
       });
     } else {
@@ -962,7 +971,7 @@ function patchFetch(
       // Clean up the per-call buffer so a thrown fetch (network error, abort,
       // etc.) does not leak entries. The corresponding ActivityCompleted is
       // skipped; the agent-level error path handles user-visible reporting.
-      llmCallBuffer.delete(hookSpanId);
+      agentHttpCallBuffer.delete(hookSpanId);
       throw fetchError;
     }
 
@@ -1026,10 +1035,10 @@ function patchFetch(
         traceId: spanContext.traceId
       };
 
-      const bufferedLlmCall = llmCallBuffer.get(hookSpanId);
-      if (bufferedLlmCall) {
-        await emitLlmCallActivityPair({
-          activityId: bufferedLlmCall.activityId,
+      const bufferedAgentCall = agentHttpCallBuffer.get(hookSpanId);
+      if (bufferedAgentCall) {
+        await emitAgentHttpCallActivityGroup({
+          activityId: bufferedAgentCall.activityId,
           completedHookSpan: ensureCompletedHookSpan(
             createHookSpan({
               ...completedHookSpanBase,
@@ -1038,7 +1047,8 @@ function patchFetch(
           ),
           completedHookTrigger,
           hookGovernance,
-          startedHookSpan: bufferedLlmCall.startedSpan,
+          kind: bufferedAgentCall.kind,
+          startedHookSpan: bufferedAgentCall.startedSpan,
           traceId: spanContext.traceId
         });
       } else {
@@ -1057,7 +1067,7 @@ function patchFetch(
         });
       }
     } finally {
-      llmCallBuffer.delete(hookSpanId);
+      agentHttpCallBuffer.delete(hookSpanId);
     }
 
     return response;
@@ -1659,45 +1669,59 @@ async function evaluateHookGovernance(
   throw new GovernanceHaltError(`Governance blocked: ${reason}`);
 }
 
-// Detects an agent-context LLM HTTP call: there must be an active execution
-// context with source=agent (no concrete activityId), the request must be
-// POST (LLM completion endpoints are POST; gating excludes GET /v1/models
-// and similar non-completion calls), and the URL host must match a known LLM
-// provider. Tool-context calls (executionContext.activityId present) are
-// excluded so the existing inline hook_trigger path keeps owning them.
-function isAgentContextLlmHttpCall(url: string, method: string): boolean {
-  if (method.toUpperCase() !== "POST") {
-    return false;
-  }
+// Classifies an agent-context HTTP call so patchedFetch knows whether to
+// buffer it for per-call activity emission and which activity_type to use.
+// Tool-context calls (executionContext.activityId present) are excluded so
+// the existing inline hook_trigger path keeps owning them.
+//
+// Returns:
+//   - "llm_call" for POST to a known LLM provider host (api.openai.com,
+//     api.anthropic.com, generativelanguage.googleapis.com). LLM completion
+//     endpoints are POST; gating on POST excludes GET /v1/models and similar
+//     non-completion calls.
+//   - "http_call" for any other agent-context HTTP call (any method, any
+//     host). Implements the "no blind spot" principle: every HTTP call
+//     observable inside the agent run gets a renderable activity row.
+//   - undefined when there is no agent execution context, so the call falls
+//     through to the existing generic governance path (which silently
+//     returns when there is no activity to attach to).
+function resolveAgentHttpCallKind(
+  url: string,
+  method: string
+): AgentHttpCallKind | undefined {
   const executionContext = getOpenBoxExecutionContext();
   if (!executionContext || executionContext.source !== "agent") {
-    return false;
+    return undefined;
   }
   if (executionContext.activityId) {
-    return false;
+    return undefined;
   }
   if (
     !executionContext.workflowId ||
     !executionContext.workflowType ||
     !executionContext.runId
   ) {
-    return false;
+    return undefined;
   }
-  return inferProviderFromUrl(url) !== undefined;
+  const isLlmProvider = inferProviderFromUrl(url) !== undefined;
+  if (isLlmProvider && method.toUpperCase() === "POST") {
+    return "llm_call";
+  }
+  return "http_call";
 }
 
-// Emits the per-LLM-call activity events mirroring the tool-path wire shape
-// that openbox-core renders correctly (verified against the getWeather session
-// dump): one creation event, two hook_trigger updates (one span per stage,
-// matching the existing hook_request pattern), and one completion. Inline
-// spans on a creation event do not persist server-side; spans must arrive via
-// hook_trigger updates linked by activity_id. Fails open: every evaluate call
-// is wrapped, and the outer try/catch defends against payload-build throws.
-async function emitLlmCallActivityPair(input: {
+// Emits a per-call activity group (creation ActivityStarted + 2 hook_trigger
+// updates with one span per stage + ActivityCompleted) for an agent-context
+// HTTP call. The wire shape matches the working tool-path pattern openbox-core
+// renders. `kind` selects activity_type: "llm_call" for LLM URLs, "http_call"
+// for everything else in agent context. Fails open: every evaluate call is
+// wrapped, and the outer try/catch defends against payload-build throws.
+async function emitAgentHttpCallActivityGroup(input: {
   activityId: string;
   completedHookSpan: Record<string, unknown>;
   completedHookTrigger: Record<string, unknown>;
   hookGovernance: HookGovernanceRuntime | undefined;
+  kind: AgentHttpCallKind;
   startedHookSpan: Record<string, unknown>;
   traceId: string;
 }): Promise<void> {
@@ -1742,7 +1766,7 @@ async function emitLlmCallActivityPair(input: {
 
     const baseFields: Record<string, unknown> = {
       activity_id: input.activityId,
-      activity_type: "llm_call",
+      activity_type: input.kind,
       attempt,
       run_id: runId,
       source: "workflow-telemetry",
@@ -1827,14 +1851,14 @@ async function emitLlmCallActivityPair(input: {
       try {
         await hookGovernance.client.evaluate(event.payload);
       } catch (error) {
-        debugLog(`emitLlmCallActivityPair:${event.label}-failed`, {
+        debugLog(`emitAgentHttpCallActivityGroup:${event.label}-failed`, {
           activity_id: event.payload.activity_id,
           error: error instanceof Error ? error.message : String(error)
         });
       }
     }
   } catch (error) {
-    debugLog("emitLlmCallActivityPair:fatal", {
+    debugLog("emitAgentHttpCallActivityGroup:fatal", {
       activity_id: input.activityId,
       error: error instanceof Error ? error.message : String(error)
     });

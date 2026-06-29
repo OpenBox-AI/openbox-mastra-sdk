@@ -209,7 +209,7 @@ describe("llm_call activity emission", () => {
     expect(llmCompleted[0]).toHaveProperty("activity_output");
   });
 
-  it("does not emit llm_call activities for non-LLM URLs in agent context", async () => {
+  it("emits http_call (not llm_call) activities for non-LLM URLs in agent context", async () => {
     const { runWithOpenBoxExecutionContext } = await import(
       "../../src/governance/context.js"
     );
@@ -286,10 +286,29 @@ describe("llm_call activity emission", () => {
       .filter(req => req.pathname === "/api/v1/governance/evaluate")
       .map(req => req.body);
 
+    // No llm_call: the URL is not an LLM provider.
     const llmActivities = payloads.filter(
       body => body.activity_type === "llm_call"
     );
     expect(llmActivities).toHaveLength(0);
+
+    // But it IS captured as a per-call http_call activity ("no blind spot"):
+    // 1 creation ActivityStarted + 2 hook_trigger updates + 1 ActivityCompleted.
+    const httpStarted = payloads.filter(
+      body =>
+        body.event_type === "ActivityStarted" &&
+        body.activity_type === "http_call"
+    );
+    const httpCompleted = payloads.filter(
+      body =>
+        body.event_type === "ActivityCompleted" &&
+        body.activity_type === "http_call"
+    );
+    expect(httpStarted).toHaveLength(3);
+    expect(httpCompleted).toHaveLength(1);
+    const initial = httpStarted.find(body => body.hook_trigger !== true);
+    expect(initial?.activity_id).toBeDefined();
+    expect(httpCompleted[0]?.activity_id).toBe(`${initial?.activity_id}-c`);
   });
 
   it("assigns distinct activity_ids to parallel LLM HTTP calls without buffer collision", async () => {
@@ -402,6 +421,87 @@ describe("llm_call activity emission", () => {
     for (const startedId of startedIds) {
       expect(completedIds).toContain(`${startedId}-c`);
     }
+  });
+
+  it("classifies GET https://api.openai.com/v1/models as http_call (not llm_call): only POST to LLM hosts is llm_call", async () => {
+    const { runWithOpenBoxExecutionContext } = await import(
+      "../../src/governance/context.js"
+    );
+    const { trace } = await import("@opentelemetry/api");
+
+    const server = await startOpenBoxServer({
+      evaluate() {
+        return { verdict: "allow" };
+      }
+    });
+
+    globalThis.fetch = (async (
+      input: Parameters<typeof fetch>[0],
+      init?: RequestInit
+    ): Promise<Response> => {
+      const request = new globalThis.Request(input, init);
+      if (request.url === "https://api.openai.com/v1/models") {
+        return new globalThis.Response(JSON.stringify({ data: [] }), {
+          headers: { "content-type": "application/json" },
+          status: 200
+        });
+      }
+      return originalFetch(request);
+    }) as typeof fetch;
+
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_llm_call_get_models",
+      apiUrl: server.url,
+      validate: false
+    });
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+    const spanProcessor = new OpenBoxSpanProcessor();
+    const telemetry = setupOpenBoxOpenTelemetry({
+      captureHttpBodies: true,
+      governanceClient: client,
+      instrumentDatabases: false,
+      instrumentFileIo: false,
+      spanProcessor
+    });
+
+    const tracer = trace.getTracer("openbox.test.llm-call");
+    await tracer.startActiveSpan("agent.run", async span => {
+      await runWithOpenBoxExecutionContext(
+        {
+          attempt: 1,
+          runId: "llm-call-emission-get-models-run",
+          source: "agent",
+          taskQueue: "mastra",
+          workflowId: "agent:llm-call-emission-get-models",
+          workflowType: "llm-call-emission-get-models"
+        },
+        async () => {
+          await fetch("https://api.openai.com/v1/models", { method: "GET" });
+        }
+      );
+      span.end();
+    });
+
+    await telemetry.shutdown();
+    await server.close();
+
+    const payloads = server.requests
+      .filter(req => req.pathname === "/api/v1/governance/evaluate")
+      .map(req => req.body);
+
+    const llmActivities = payloads.filter(
+      body => body.activity_type === "llm_call"
+    );
+    const httpActivities = payloads.filter(
+      body => body.activity_type === "http_call"
+    );
+    expect(llmActivities).toHaveLength(0);
+    expect(httpActivities.length).toBeGreaterThan(0);
   });
 
   it("preserves fail-open posture: openbox-server 500 on evaluate does not surface as fetch error", async () => {

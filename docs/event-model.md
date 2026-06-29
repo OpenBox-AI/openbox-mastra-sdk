@@ -160,17 +160,34 @@ Supported hook span families:
 - `file_operation`
 - `function_call`
 
-## Agent LLM Span Semantics
+## Agent-Context HTTP Span Semantics
 
-Each LLM HTTP call made from agent context produces a per-call activity pair
-mirroring the LangGraph adapter wire shape:
+Every HTTP call made from agent context (any URL, any method, but not inside
+a wrapped tool) produces a per-call activity group so there are no blind
+spots in the session view. The classification is:
 
-- `ActivityStarted` with `activity_type: "llm_call"`, a fresh UUID `activity_id`, and `spans: [<started>, <completed>]` (`span_count: 2`)
-- `ActivityCompleted` with `activity_id: "<uuid>-c"`, `activity_type: "llm_call"`, and `activity_output` carrying a serialized model response
+- POST to a known LLM provider host (OpenAI, Anthropic, Google) → `activity_type: "llm_call"`
+- Anything else (GET to LLM hosts, CopilotKit telemetry, runtime infra POSTs, etc.) → `activity_type: "http_call"`
+
+Both shapes emit the same 4-event group, mirroring the openbox-core tool path:
+
+1. Creation `ActivityStarted` with a fresh UUID `activity_id` and `span_count: 0`
+2. `ActivityStarted{hook_trigger: true, hook_stage: "started"}` attaching the started HTTP hook span
+3. `ActivityStarted{hook_trigger: true, hook_stage: "completed"}` attaching the completed HTTP hook span (with response body, status; server computes `semantic_type: "llm_completion"` for LLM completion endpoints)
+4. `ActivityCompleted` with `activity_id: "<uuid>-c"` and the model response (for `llm_call`) on `activity_output`
+
+openbox-core aggregates the hook spans onto the creation event, so the events
+list returns `span_count: 2` with both spans inline on the activity row.
 
 `WorkflowCompleted` no longer carries a synthetic LLM rollup span. Token usage
 and model identity remain on the workflow event for top-level reporting; the
-authoritative per-call evidence lives on the `llm_call` activities.
+authoritative per-call evidence lives on the `llm_call` / `http_call`
+activities.
+
+Tool-context HTTP (inside a wrapped tool's `executeGovernedActivity`) keeps
+the existing inline hook update pattern: the tool's ActivityStarted is the
+parent and hook updates attach to it. Only HTTP not routed through a wrapped
+tool becomes an `llm_call` / `http_call` activity.
 
 ## Typical Event Sequences
 

@@ -26,6 +26,14 @@
 
 - `ActivityCompleted` events emitted by `wrap-tool` now always carry `activity_type`. Previously stripped when `hitlEnabled` was true (the default), which caused the openbox-core UI to render completion rows with no name.
 
+### Added (follow-up: no blind spot)
+
+- Every HTTP call observed inside an agent run (any URL, any method, but not routed through a wrapped tool) now produces a per-call activity. The classifier is:
+  - POST to a known LLM provider host (OpenAI / Anthropic / Google) → `activity_type: "llm_call"`
+  - Anything else (CopilotKit telemetry, runtime infra POSTs, `GET /v1/models`, etc.) → `activity_type: "http_call"`
+  
+  Both shapes use the same 4-event group (creation + 2 hook_trigger updates + completion). Closes the previously-silent gap for non-LLM agent-context HTTP. Operators that want to suppress noise from specific hosts should pass them in the `ignoredUrls` config.
+
 ### Why
 
 The suppression branch (introduced in commit `60e1765`, 2026-03-17) routed agent LLM HTTP hook spans into a `synthetic_model_usage_span` rollup on `WorkflowCompleted`. openbox-core's events-list endpoint never denormalized that rollup, so the LLM evidence was effectively invisible in the session UI. Mirroring the canonical Temporal/LangGraph emission pattern surfaces the same evidence as renderable per-call activity rows.

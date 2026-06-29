@@ -277,7 +277,7 @@ describe("setupOpenBoxOpenTelemetry", () => {
     });
   });
 
-  it("does not emit synthetic hook governance events for agent context without tool activity context", async () => {
+  it("emits a per-call http_call activity for agent-context HTTP outside a wrapped tool", async () => {
     const openBoxServer = await startOpenBoxServer({
       evaluate() {
         return { verdict: "allow" };
@@ -393,11 +393,56 @@ describe("setupOpenBoxOpenTelemetry", () => {
     await openBoxServer.close();
     downstream.close();
 
-    const hookEvents = openBoxServer.requests
+    // "No blind spot": agent-context HTTP not routed through a wrapped tool
+    // emits a per-call http_call activity group (creation + 2 hook_trigger
+    // updates carrying started/completed spans + ActivityCompleted with -c).
+    const payloads = openBoxServer.requests
       .filter(request => request.pathname === "/api/v1/governance/evaluate")
-      .map(request => request.body)
-      .filter(payload => payload.hook_trigger === true);
-    expect(hookEvents).toHaveLength(0);
+      .map(request => request.body);
+    const httpStarted = payloads.filter(
+      body =>
+        body.event_type === "ActivityStarted" &&
+        body.activity_type === "http_call"
+    );
+    const httpCompleted = payloads.filter(
+      body =>
+        body.event_type === "ActivityCompleted" &&
+        body.activity_type === "http_call"
+    );
+
+    expect(httpStarted).toHaveLength(3);
+    expect(httpCompleted).toHaveLength(1);
+
+    const initial = httpStarted.find(body => body.hook_trigger !== true);
+    const startedHookUpdate = httpStarted.find(
+      body =>
+        body.hook_trigger === true &&
+        body.span_count === 1 &&
+        (body.spans as Array<Record<string, unknown>>)?.[0]?.stage === "started"
+    );
+    const completedHookUpdate = httpStarted.find(
+      body =>
+        body.hook_trigger === true &&
+        body.span_count === 1 &&
+        (body.spans as Array<Record<string, unknown>>)?.[0]?.stage === "completed"
+    );
+
+    expect(initial).toBeDefined();
+    expect(startedHookUpdate).toBeDefined();
+    expect(completedHookUpdate).toBeDefined();
+
+    const activityId = initial?.activity_id as string;
+    expect(typeof activityId).toBe("string");
+    expect(startedHookUpdate?.activity_id).toBe(activityId);
+    expect(completedHookUpdate?.activity_id).toBe(activityId);
+    expect(httpCompleted[0]?.activity_id).toBe(`${activityId}-c`);
+
+    const startedSpan = (startedHookUpdate?.spans as Array<Record<string, unknown>>)[0];
+    expect(
+      (startedSpan?.attributes as Record<string, unknown> | undefined)?.["http.url"]
+    ).toBe(downstreamUrl);
+    expect(initial?.run_id).toBe("run-agent-1");
+    expect(initial?.workflow_id).toBe("wf-agent-1");
   });
 
   it("raises ApprovalPendingError when hook-level governance returns REQUIRE_APPROVAL", async () => {

@@ -128,7 +128,7 @@ It also captures operational spans for:
 
 Important production behavior:
 
-- each agent-context LLM HTTP call emits a per-call `ActivityStarted{activity_type: "llm_call"}` + `ActivityCompleted{activity_type: "llm_call"}` pair, mirroring the LangGraph adapter wire shape
+- every HTTP call inside an agent run that is not routed through a wrapped tool emits a per-call activity row: POST to a known LLM host → `activity_type: "llm_call"`; anything else → `activity_type: "http_call"`. Closes the "blind spot" for agent-context HTTP outside tools (CopilotKit telemetry, infra POSTs, etc.).
 - agent prompts are emitted as `SignalReceived(user_input)`, not as tool activities
 - the SDK ignores its own OpenBox API URL during telemetry setup to avoid feedback loops
 
