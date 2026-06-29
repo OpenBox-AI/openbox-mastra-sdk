@@ -26,23 +26,6 @@ import {
 import type { WrapToolOptions } from "./wrap-tool.js";
 
 const OPENBOX_WRAPPED_AGENT = Symbol.for("openbox.mastra.wrapAgent");
-
-function isOpenBoxDebugEnabled(): boolean {
-  const value = process.env.OPENBOX_DEBUG?.trim().toLowerCase();
-  return value === "1" || value === "true" || value === "yes";
-}
-
-function debugLog(scope: string, payload: Record<string, unknown>): void {
-  if (!isOpenBoxDebugEnabled()) {
-    return;
-  }
-  try {
-    // eslint-disable-next-line no-console
-    console.log(`[openbox-mastra-debug] ${scope}`, payload);
-  } catch {
-    // swallow — diagnostic only
-  }
-}
 const OPENBOX_AGENT_STREAM_META = Symbol.for("openbox.mastra.wrapAgent.streamMeta");
 const AGENT_INPUT_SIGNAL_NAME = "user_input";
 const AGENT_OUTPUT_SIGNAL_NAME = "agent_output";
@@ -483,25 +466,10 @@ async function executeAgentLifecycle<T>({
               `agent:${workflowType}:${phase}`,
               runId
             );
-            debugLog("agent.activeSpan:opened", {
-              workflowType,
-              workflowId,
-              phase,
-              runId,
-              traceId: activeSpan.spanContext().traceId,
-              spanId: activeSpan.spanContext().spanId
-            });
 
             try {
               return await operation();
             } finally {
-              debugLog("agent.activeSpan:closing", {
-                workflowType,
-                workflowId,
-                phase,
-                runId,
-                traceId: activeSpan.spanContext().traceId
-              });
               activeSpan.end();
             }
           });

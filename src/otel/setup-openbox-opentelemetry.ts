@@ -207,23 +207,6 @@ const llmCallBuffer = new Map<
   { activityId: string; startedSpan: Record<string, unknown> }
 >();
 
-function isOpenBoxDebugEnabled(): boolean {
-  const value = process.env.OPENBOX_DEBUG?.trim().toLowerCase();
-  return value === "1" || value === "true" || value === "yes";
-}
-
-function debugLog(scope: string, payload: Record<string, unknown>): void {
-  if (!isOpenBoxDebugEnabled()) {
-    return;
-  }
-  try {
-    // eslint-disable-next-line no-console
-    console.log(`[openbox-mastra-debug] ${scope}`, payload);
-  } catch {
-    // swallow — diagnostic only
-  }
-}
-
 export function setupOpenBoxOpenTelemetry({
   captureHttpBodies = true,
   dbLibraries,
@@ -236,16 +219,6 @@ export function setupOpenBoxOpenTelemetry({
   spanProcessor
 }: OpenBoxTelemetryOptions): OpenBoxTelemetryController {
   teardownActiveTelemetry();
-  debugLog("setupOpenBoxOpenTelemetry:enter", {
-    captureHttpBodies,
-    ignoredUrls,
-    instrumentDatabases,
-    instrumentFileIo,
-    hasGovernanceClient: Boolean(governanceClient),
-    nodeVersion: process.versions.node,
-    globalFetchPresent: typeof globalThis.fetch === "function",
-    globalFetchName: typeof globalThis.fetch === "function" ? globalThis.fetch.name : undefined
-  });
   const require = createRequire(import.meta.url);
   const { registerInstrumentations } = require(
     "@opentelemetry/instrumentation"
@@ -858,40 +831,22 @@ function patchFetch(
     throw new Error("Global fetch APIs are required for OpenBox HTTP body capture");
   }
 
-  debugLog("patchFetch:wrapping", {
-    originalFetchName: originalFetch.name,
-    ignoredUrls
-  });
-
   globalThis.fetch = async function patchedFetch(
     input: Parameters<typeof fetch>[0],
     init?: RequestInit
   ): Promise<Response> {
     const request = new globalThis.Request(input, init);
     const url = request.url;
-    const urlHost = (() => {
-      try { return new URL(url).host; } catch { return "<invalid-url>"; }
-    })();
 
     if (shouldIgnoreUrl(url, ignoredUrls)) {
-      debugLog("patchedFetch:early-exit:ignoredUrl", { url, urlHost, method: request.method });
       return originalFetch(request);
     }
 
     const activeSpan = trace.getActiveSpan();
 
     if (!activeSpan) {
-      debugLog("patchedFetch:early-exit:no-activeSpan", { url, urlHost, method: request.method });
       return originalFetch(request);
     }
-
-    debugLog("patchedFetch:proceeding", {
-      url,
-      urlHost,
-      method: request.method,
-      activeSpanTraceId: activeSpan.spanContext().traceId,
-      activeSpanId: activeSpan.spanContext().spanId
-    });
 
     const requestBody = normalizeHookBodyForTelemetry(
       await captureRequestBody(request)
@@ -1816,28 +1771,22 @@ async function emitLlmCallActivityPair(input: {
       completedPayload.activity_output = derived.activityOutput;
     }
 
-    const events: Array<{ label: string; payload: Record<string, unknown> }> = [
-      { label: "initial-started", payload: initialStartedPayload },
-      { label: "started-hook", payload: startedHookUpdate },
-      { label: "completed-hook", payload: completedHookUpdate },
-      { label: "completed", payload: completedPayload }
+    const events: Array<Record<string, unknown>> = [
+      initialStartedPayload,
+      startedHookUpdate,
+      completedHookUpdate,
+      completedPayload
     ];
 
-    for (const event of events) {
+    for (const payload of events) {
       try {
-        await hookGovernance.client.evaluate(event.payload);
-      } catch (error) {
-        debugLog(`emitLlmCallActivityPair:${event.label}-failed`, {
-          activity_id: event.payload.activity_id,
-          error: error instanceof Error ? error.message : String(error)
-        });
+        await hookGovernance.client.evaluate(payload);
+      } catch {
+        // fail-open: per-event evaluate errors must not propagate to the fetch caller
       }
     }
-  } catch (error) {
-    debugLog("emitLlmCallActivityPair:fatal", {
-      activity_id: input.activityId,
-      error: error instanceof Error ? error.message : String(error)
-    });
+  } catch {
+    // fail-open: payload-build throws must not propagate to the fetch caller
   }
 }
 
