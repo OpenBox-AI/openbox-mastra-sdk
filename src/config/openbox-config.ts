@@ -10,6 +10,32 @@ import {
 
 export const API_KEY_PATTERN = /^obx_(live|test)_[a-zA-Z0-9_]+$/;
 
+export interface OpenBoxMultiAgentSessionContext {
+  runId: string;
+  workflowId: string;
+  workflowType: string;
+}
+
+export type OpenBoxMultiAgentSessionIdResolver = (
+  context: OpenBoxMultiAgentSessionContext
+) => string | undefined;
+
+export interface OpenBoxMultiAgentInput {
+  enabled?: boolean | undefined;
+  multiAgentSessionId?:
+    | string
+    | OpenBoxMultiAgentSessionIdResolver
+    | undefined;
+}
+
+export interface OpenBoxMultiAgentConfig {
+  enabled: boolean;
+  multiAgentSessionId:
+    | string
+    | OpenBoxMultiAgentSessionIdResolver
+    | undefined;
+}
+
 export interface OpenBoxConfigInput {
   agentDid?: string | undefined;
   agentPrivateKey?: string | undefined;
@@ -23,6 +49,7 @@ export interface OpenBoxConfigInput {
   instrumentDatabases?: boolean | undefined;
   instrumentFileIo?: boolean | undefined;
   maxEvaluatePayloadBytes?: number | undefined;
+  multiAgent?: OpenBoxMultiAgentInput | undefined;
   onApiError?: OpenBoxApiErrorPolicy | undefined;
   sendActivityStartEvent?: boolean | undefined;
   sendStartEvent?: boolean | undefined;
@@ -46,6 +73,7 @@ export interface OpenBoxConfig {
   instrumentDatabases: boolean;
   instrumentFileIo: boolean;
   maxEvaluatePayloadBytes: number;
+  multiAgent: OpenBoxMultiAgentConfig;
   onApiError: OpenBoxApiErrorPolicy;
   sendActivityStartEvent: boolean;
   sendStartEvent: boolean;
@@ -112,6 +140,7 @@ export function parseOpenBoxConfig(
     input.agentDid ?? env.OPENBOX_AGENT_DID,
     input.agentPrivateKey ?? env.OPENBOX_AGENT_PRIVATE_KEY
   );
+  const multiAgent = parseMultiAgentConfig(input.multiAgent, env);
 
   if (!apiUrl || !apiKey) {
     throw new OpenBoxConfigError(
@@ -175,8 +204,30 @@ export function parseOpenBoxConfig(
   return {
     ...parsed,
     agentDid: agentIdentity?.did,
-    agentPrivateKey: agentIdentity?.privateKey
+    agentPrivateKey: agentIdentity?.privateKey,
+    multiAgent
   };
+}
+
+export function resolveOpenBoxMultiAgentSessionId(
+  config: Pick<OpenBoxConfig, "multiAgent">,
+  context: OpenBoxMultiAgentSessionContext
+): string | undefined {
+  if (!config.multiAgent.enabled) {
+    return undefined;
+  }
+
+  const configuredSessionId = config.multiAgent.multiAgentSessionId;
+
+  if (typeof configuredSessionId === "function") {
+    return normalizeOptionalString(configuredSessionId(context));
+  }
+
+  if (typeof configuredSessionId === "string") {
+    return normalizeOptionalString(configuredSessionId);
+  }
+
+  return `mas:${context.runId}`;
 }
 
 export async function initializeOpenBox(
@@ -232,9 +283,28 @@ function parseAgentIdentityConfig(
   });
 }
 
+function parseMultiAgentConfig(
+  input: OpenBoxMultiAgentInput | undefined,
+  env: NodeJS.ProcessEnv
+): OpenBoxMultiAgentConfig {
+  return {
+    enabled:
+      input?.enabled ??
+      parseOptionalBoolean(env.OPENBOX_MULTI_AGENT_ENABLED) ??
+      false,
+    multiAgentSessionId:
+      input?.multiAgentSessionId ??
+      normalizeOptionalString(env.OPENBOX_MULTI_AGENT_SESSION_ID)
+  };
+}
+
 function normalizeOptionalString(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   return trimmed ? trimmed : undefined;
+}
+
+function parseOptionalBoolean(value: string | undefined): boolean | undefined {
+  return value == null ? undefined : parseBoolean(value, false);
 }
 
 function parseBoolean(value: string | undefined, defaultValue: boolean): boolean {
