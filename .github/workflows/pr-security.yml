@@ -49,7 +49,9 @@ jobs:
         continue-on-error: true
         shell: bash
         run: |
-          set -euo pipefail
+          echo "### Trivy Filesystem Scan Results 🛡️" >> $GITHUB_STEP_SUMMARY
+          echo '```text' >> $GITHUB_STEP_SUMMARY
+          
           trivy fs . \
             --scanners vuln,misconfig \
             --vuln-type os,library \
@@ -57,7 +59,11 @@ jobs:
             --severity HIGH,CRITICAL \
             --include-dev-deps \
             --format table \
-            --exit-code 1
+            --exit-code 1 | tee -a $GITHUB_STEP_SUMMARY || EXIT_CODE=$?
+            
+          echo '```' >> $GITHUB_STEP_SUMMARY
+        
+          exit ${EXIT_CODE:-0}
 
       - name: Run Trivy filesystem scan for SARIF
         id: trivy_sarif
