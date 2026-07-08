@@ -1,13 +1,18 @@
 import { z } from "zod";
 
+import { OpenBoxConfig as BaseOpenBoxConfig } from "@openbox-ai/openbox-sdk/config";
+
 import { OpenBoxClient, type OpenBoxApiErrorPolicy } from "../client/index.js";
-import { validateAgentIdentityConfig } from "../identity/index.js";
 import {
-  OpenBoxAuthError,
   OpenBoxConfigError,
   OpenBoxInsecureURLError
 } from "../types/index.js";
 
+// Verified byte-identical to base's internal pattern (`config/index.ts`
+// `\w` === `[A-Za-z0-9_]`). Kept local: base does not export this regex
+// standalone (only reachable indirectly via the throwing `OpenBoxConfig.
+// resolve()`), and `validateApiKeyFormat` below is a boolean predicate, not a
+// throwing validator, so it cannot delegate to base's throwing check either.
 export const API_KEY_PATTERN = /^obx_(live|test)_[a-zA-Z0-9_]+$/;
 
 export interface OpenBoxMultiAgentSessionContext {
@@ -117,6 +122,14 @@ export function validateApiKeyFormat(apiKey: string): boolean {
   return API_KEY_PATTERN.test(apiKey);
 }
 
+// Verified byte-identical to base's internal `validateUrlSecurity`
+// (`config/index.ts`) — same WHATWG `URL` parse, bracket-stripped hostname,
+// exact-match localhost set, and message text. Base does not export this
+// helper standalone (only reachable via the throwing `OpenBoxConfig.
+// resolve()`/`.normalized()`), so it is kept as a local pure copy for
+// Mastra's synchronous public helper; `parseOpenBoxConfig` below ALSO runs
+// base's authoritative version via `BaseOpenBoxConfig.resolve()`, so the real
+// validation path exercised by config construction is base's.
 export function validateUrlSecurity(apiUrl: string): void {
   const url = new URL(apiUrl);
   const hostname = url.hostname.replace(/^\[(.*)\]$/, "$1");
@@ -136,10 +149,8 @@ export function parseOpenBoxConfig(
 ): OpenBoxConfig {
   const apiUrl = input.apiUrl ?? env.OPENBOX_URL;
   const apiKey = input.apiKey ?? env.OPENBOX_API_KEY;
-  const agentIdentity = parseAgentIdentityConfig(
-    input.agentDid ?? env.OPENBOX_AGENT_DID,
-    input.agentPrivateKey ?? env.OPENBOX_AGENT_PRIVATE_KEY
-  );
+  const agentDidInput = input.agentDid ?? env.OPENBOX_AGENT_DID;
+  const agentPrivateKeyInput = input.agentPrivateKey ?? env.OPENBOX_AGENT_PRIVATE_KEY;
   const multiAgent = parseMultiAgentConfig(input.multiAgent, env);
 
   if (!apiUrl || !apiKey) {
@@ -148,19 +159,38 @@ export function parseOpenBoxConfig(
     );
   }
 
-  if (!validateApiKeyFormat(apiKey)) {
-    throw new OpenBoxAuthError(
-      "Invalid API key format. Expected 'obx_live_*' or 'obx_test_*'."
-    );
+  // Delegate the shared validation primitives (API key format, HTTPS-required
+  // URL security, agent DID format + both-or-neither identity requirement) to
+  // the base SDK — base wins on conflict (migration-notes.md "config
+  // defaults"). Mastra's own `OPENBOX_URL`/`OPENBOX_AGENT_DID`/
+  // `OPENBOX_AGENT_PRIVATE_KEY` env var names (base uses differently-named
+  // `OPENBOX_API_URL` etc.) are resolved locally FIRST and passed as explicit
+  // values, so base's own (differently-named) env lookup never runs —
+  // `environ: {}` makes that explicit.
+  const baseConfig = BaseOpenBoxConfig.resolve({
+    agentDid: agentDidInput ?? null,
+    agentPrivateKey: agentPrivateKeyInput ?? null,
+    apiKey,
+    apiUrl,
+    environ: {},
+    sdkEngine: "mastra"
+  });
+  // Base's `.normalized()` only DID-format-checks the identity; eagerly
+  // validate the private key seed too (Mastra's historical contract: an
+  // invalid private key format fails at config-parse time, not lazily at
+  // first signed request).
+  if (baseConfig.agentDid) {
+    baseConfig.loadIdentity();
   }
-
-  validateUrlSecurity(apiUrl);
+  const agentIdentity = baseConfig.agentDid
+    ? { did: baseConfig.agentDid, privateKey: baseConfig.agentPrivateKey ?? "" }
+    : undefined;
 
   const parsed = OPENBOX_CONFIG_SCHEMA.parse({
     agentDid: agentIdentity?.did,
     agentPrivateKey: agentIdentity?.privateKey,
-    apiKey,
-    apiUrl: apiUrl.replace(/\/+$/, ""),
+    apiKey: baseConfig.apiKey,
+    apiUrl: baseConfig.apiUrl,
     evaluateMaxRetries:
       input.evaluateMaxRetries ??
       parseInteger(env.OPENBOX_EVALUATE_MAX_RETRIES, 2),
@@ -258,29 +288,6 @@ export function getOpenBoxConfig(): OpenBoxConfig | undefined {
 
 export function setOpenBoxConfig(config: OpenBoxConfig): void {
   globalConfig = config;
-}
-
-function parseAgentIdentityConfig(
-  agentDidValue: string | undefined,
-  agentPrivateKeyValue: string | undefined
-): { did: string; privateKey: string } | undefined {
-  const agentDid = normalizeOptionalString(agentDidValue);
-  const agentPrivateKey = normalizeOptionalString(agentPrivateKeyValue);
-
-  if (!agentDid && !agentPrivateKey) {
-    return undefined;
-  }
-
-  if (!agentDid || !agentPrivateKey) {
-    throw new OpenBoxConfigError(
-      "Both OPENBOX_AGENT_DID and OPENBOX_AGENT_PRIVATE_KEY are required when configuring OpenBox agent identity."
-    );
-  }
-
-  return validateAgentIdentityConfig({
-    did: agentDid,
-    privateKey: agentPrivateKey
-  });
 }
 
 function parseMultiAgentConfig(

@@ -987,6 +987,22 @@ describe("setupOpenBoxOpenTelemetry", () => {
     expect(startedSpan?.span_id).toBe(completedSpan?.span_id);
     expect(startedEvent.span_count).toBe(1);
     expect(completedEvent.span_count).toBe(1);
+
+    // Invariant (phase-06 migration): exactly ONE governance event per stage
+    // per instrumented pg query — no double-governance. Mastra's OTel-pg
+    // hook governance (this file) is the only pg governance path; a base
+    // pg wrapper (@openbox-ai/openbox-sdk/instrumentation) is intentionally
+    // NOT enabled alongside it. A regression that turned both on for the
+    // same query would emit 2 "started" (or "completed") events instead of
+    // 1 — this asserts the exact count, not just "at least one".
+    expect(
+      hookEvents.filter(payload => isHookSpanPayload(payload, "db_query", "started"))
+        .length
+    ).toBe(1);
+    expect(
+      hookEvents.filter(payload => isHookSpanPayload(payload, "db_query", "completed"))
+        .length
+    ).toBe(1);
   });
 });
 

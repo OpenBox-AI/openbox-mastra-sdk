@@ -11,6 +11,7 @@ import {
   normalizeSpansForGovernance,
   serializeValue
 } from "../governance/activity-runtime.js";
+import { parseApprovalDecision } from "../client/index.js";
 import { resolveOpenBoxMultiAgentSessionId } from "../config/index.js";
 import { runWithOpenBoxExecutionContext } from "../governance/context.js";
 import type { GovernanceVerdictResponse } from "../types/index.js";
@@ -18,8 +19,10 @@ import {
   ApprovalExpiredError,
   ApprovalPendingError,
   ApprovalRejectedError,
+  ContractError,
   GovernanceAPIError,
   GovernanceHaltError,
+  OpenBoxAuthError,
   Verdict,
   WorkflowEventType,
   WorkflowSpanBuffer
@@ -396,18 +399,24 @@ async function executeAgentLifecycle<T>({
     !options.config.skipWorkflowTypes.has(workflowType) &&
     options.config.sendStartEvent
   ) {
-    const verdict = await evaluateAgentEvent(options, {
-      event_type: WorkflowEventType.WORKFLOW_STARTED,
-      ...(effectiveGoal ? { goal: effectiveGoal } : {}),
-      run_id: runId,
-      task_queue: "mastra",
-      workflow_id: workflowId,
-      workflow_input: serializeWorkflowInputForGovernance(
-        messages,
-        effectiveGoal
-      ),
-      workflow_type: workflowType
-    });
+    const verdict = await evaluateAgentEvent(
+      options,
+      {
+        event_type: WorkflowEventType.WORKFLOW_STARTED,
+        ...(effectiveGoal ? { goal: effectiveGoal } : {}),
+        run_id: runId,
+        task_queue: "mastra",
+        workflow_id: workflowId,
+        workflow_input: serializeWorkflowInputForGovernance(
+          messages,
+          effectiveGoal
+        ),
+        workflow_type: workflowType
+      },
+      undefined,
+      undefined,
+      true
+    );
 
     if (verdict && Verdict.shouldStop(verdict.verdict)) {
       throw new GovernanceHaltError(
@@ -422,16 +431,22 @@ async function executeAgentLifecycle<T>({
     !options.config.skipWorkflowTypes.has(workflowType) &&
     !options.config.skipSignals.has(AGENT_INPUT_SIGNAL_NAME)
   ) {
-    const verdict = await evaluateAgentEvent(options, {
-      event_type: WorkflowEventType.SIGNAL_RECEIVED,
-      ...(effectiveGoal ? { goal: effectiveGoal } : {}),
-      run_id: runId,
-      signal_args: serializeAgentSignalArgs(messages, effectiveGoal),
-      signal_name: AGENT_INPUT_SIGNAL_NAME,
-      task_queue: "mastra",
-      workflow_id: workflowId,
-      workflow_type: workflowType
-    });
+    const verdict = await evaluateAgentEvent(
+      options,
+      {
+        event_type: WorkflowEventType.SIGNAL_RECEIVED,
+        ...(effectiveGoal ? { goal: effectiveGoal } : {}),
+        run_id: runId,
+        signal_args: serializeAgentSignalArgs(messages, effectiveGoal),
+        signal_name: AGENT_INPUT_SIGNAL_NAME,
+        task_queue: "mastra",
+        workflow_id: workflowId,
+        workflow_type: workflowType
+      },
+      undefined,
+      undefined,
+      true
+    );
 
     if (verdict && Verdict.shouldStop(verdict.verdict)) {
       throw new GovernanceHaltError(
@@ -553,19 +568,25 @@ async function handleAgentResume(
     !options.config.skipWorkflowTypes.has(workflowType) &&
     !options.config.skipSignals.has("resume")
   ) {
-    const verdict = await evaluateAgentEvent(options, {
-      event_type: WorkflowEventType.SIGNAL_RECEIVED,
-      ...(effectiveGoal ? { goal: effectiveGoal } : {}),
-      run_id: runId,
-      signal_args: appendGoalToSignalArgs(
-        serializeValue(resumeData),
-        effectiveGoal
-      ),
-      signal_name: "resume",
-      task_queue: "mastra",
-      workflow_id: workflowId,
-      workflow_type: workflowType
-    });
+    const verdict = await evaluateAgentEvent(
+      options,
+      {
+        event_type: WorkflowEventType.SIGNAL_RECEIVED,
+        ...(effectiveGoal ? { goal: effectiveGoal } : {}),
+        run_id: runId,
+        signal_args: appendGoalToSignalArgs(
+          serializeValue(resumeData),
+          effectiveGoal
+        ),
+        signal_name: "resume",
+        task_queue: "mastra",
+        workflow_id: workflowId,
+        workflow_type: workflowType
+      },
+      undefined,
+      undefined,
+      true
+    );
 
     if (verdict && Verdict.shouldStop(verdict.verdict)) {
       throw new GovernanceHaltError(
@@ -597,10 +618,11 @@ async function handleAgentResume(
     );
   }
 
-  const verdict = Verdict.fromString(
-    (approval.verdict as string | undefined) ??
-      (approval.action as string | undefined)
-  );
+  // Strict decision parsing at the human-approval trust boundary (base wins —
+  // see migration-notes.md "approval wire format"); unrecognized/garbled
+  // decisions fall through to "still pending" instead of the lenient
+  // evaluate-path parser's unknown-defaults-to-ALLOW behavior.
+  const verdict = parseApprovalDecision(approval);
 
   if (verdict === Verdict.ALLOW) {
     markActivityApproved(pending.runId, pending.activityId);
@@ -608,7 +630,7 @@ async function handleAgentResume(
     return;
   }
 
-  if (Verdict.shouldStop(verdict)) {
+  if (verdict !== null && Verdict.shouldStop(verdict)) {
     clearPendingApproval(runId);
     throw new ApprovalRejectedError(
       `Activity rejected: ${String(approval.reason ?? "Activity rejected")}`
@@ -704,7 +726,10 @@ async function finalizeAgentSuccess(
 
 function buildWorkflowCompletedCompactPayload(
   basePayload: {
-    event_type: WorkflowEventType.WORKFLOW_COMPLETED;
+    // `WorkflowEventType` is a const-object + union type (not a real TS
+    // `enum`), so narrowing to one member's literal type in a type position
+    // needs `typeof member`, not `Namespace.Member` (enum-only syntax).
+    event_type: typeof WorkflowEventType.WORKFLOW_COMPLETED;
     run_id: string;
     workflow_id: string;
     workflow_type: string;
@@ -728,7 +753,10 @@ function buildWorkflowCompletedCompactPayload(
   );
 
   const payload: Record<string, unknown> & {
-    event_type: WorkflowEventType.WORKFLOW_COMPLETED;
+    // `WorkflowEventType` is a const-object + union type (not a real TS
+    // `enum`), so narrowing to one member's literal type in a type position
+    // needs `typeof member`, not `Namespace.Member` (enum-only syntax).
+    event_type: typeof WorkflowEventType.WORKFLOW_COMPLETED;
   } = {
     event_type: basePayload.event_type,
     run_id: basePayload.run_id,
@@ -770,7 +798,10 @@ function buildWorkflowCompletedCompactPayload(
 
 function buildWorkflowCompletedUltraMinimalPayload(
   basePayload: {
-    event_type: WorkflowEventType.WORKFLOW_COMPLETED;
+    // `WorkflowEventType` is a const-object + union type (not a real TS
+    // `enum`), so narrowing to one member's literal type in a type position
+    // needs `typeof member`, not `Namespace.Member` (enum-only syntax).
+    event_type: typeof WorkflowEventType.WORKFLOW_COMPLETED;
     run_id: string;
     workflow_id: string;
     workflow_type: string;
@@ -809,7 +840,10 @@ function buildWorkflowCompletedUltraMinimalPayload(
 
 function buildWorkflowCompletedTelemetryPayload(
   basePayload: {
-    event_type: WorkflowEventType.WORKFLOW_COMPLETED;
+    // `WorkflowEventType` is a const-object + union type (not a real TS
+    // `enum`), so narrowing to one member's literal type in a type position
+    // needs `typeof member`, not `Namespace.Member` (enum-only syntax).
+    event_type: typeof WorkflowEventType.WORKFLOW_COMPLETED;
     run_id: string;
     workflow_id: string;
     workflow_output: unknown;
@@ -2076,7 +2110,8 @@ async function evaluateAgentEvent(
   options: WrapToolOptions,
   payload: Record<string, unknown> & { event_type: WorkflowEventType },
   fallbackPayload?: Record<string, unknown> & { event_type: WorkflowEventType },
-  minimalPayload?: Record<string, unknown> & { event_type: WorkflowEventType }
+  minimalPayload?: Record<string, unknown> & { event_type: WorkflowEventType },
+  isGatingEvent = false
 ): Promise<GovernanceVerdictResponse | null> {
   const candidates = buildCandidatePayloads(
     withMultiAgentSessionId(options, payload),
@@ -2123,6 +2158,21 @@ async function evaluateAgentEvent(
     }
   }
 
+  // WORKFLOW_STARTED and the user_input/resume SIGNAL_RECEIVED calls (all
+  // isGatingEvent=true) gate the operation — their verdict decides whether
+  // the run proceeds — so they must fail CLOSED on an auth/signing/
+  // governance-API/contract error even under the default fail_open policy:
+  // the client already throws loud on these (never a network outage), so
+  // re-swallowing them to `null` (= ALLOW) here would silently bypass
+  // governance. Mirrors base SDK's `isFailClosedCondition` (runtime/
+  // hook-evaluator-types.ts). The agent_output signal and WORKFLOW_COMPLETED/
+  // WORKFLOW_FAILED calls (isGatingEvent=false) fire after the run already
+  // finished — telemetry only — and keep swallowing every error exactly as
+  // before.
+  if (isGatingEvent && isFailClosedGovernanceError(resolvedError)) {
+    throw resolvedError;
+  }
+
   if (options.config.onApiError === "fail_closed") {
     return {
       action: "stop",
@@ -2146,6 +2196,21 @@ async function evaluateAgentEvent(
   }
 
   return null;
+}
+
+/**
+ * Mirrors base SDK's `isFailClosedCondition` (runtime/hook-evaluator-types.ts):
+ * an auth/signing (`OpenBoxAuthError` covers `OpenBoxSigningError`),
+ * governance-API, or contract error is never a network outage and must fail
+ * CLOSED regardless of the configured `onApiError` policy — only a genuine
+ * connectivity/outage failure may fail open.
+ */
+function isFailClosedGovernanceError(error: unknown): boolean {
+  return (
+    error instanceof OpenBoxAuthError ||
+    error instanceof GovernanceAPIError ||
+    error instanceof ContractError
+  );
 }
 
 function withMultiAgentSessionId<T extends Record<string, unknown> & {

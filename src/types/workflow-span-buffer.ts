@@ -1,4 +1,8 @@
-import type { Verdict } from "./verdict.js";
+// Repointed to base per phase-06: `Verdict` (the type) now lives in
+// `@openbox-ai/openbox-sdk`. This file only uses `Verdict` as a type
+// annotation (never calls `Verdict.fromString`/`.shouldStop`/etc.), so a
+// type-only import straight from base is exact and needs no local wrapper.
+import type { Verdict } from "@openbox-ai/openbox-sdk";
 
 export interface WorkflowSpanBufferInit {
   error?: Record<string, unknown> | undefined;

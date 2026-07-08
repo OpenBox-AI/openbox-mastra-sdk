@@ -7,6 +7,7 @@ import { trace } from "@opentelemetry/api";
 import { z } from "zod";
 
 import {
+  OpenBoxAuthError,
   OpenBoxClient,
   OpenBoxSpanProcessor,
   WorkflowSpanBuffer,
@@ -2717,5 +2718,145 @@ describe("wrapAgent", () => {
         .filter(request => request.pathname === "/api/v1/governance/evaluate")
         .map(request => request.body.event_type)
     ).toContain("WorkflowCompleted");
+  });
+
+  it("blocks agent generate on a persistent auth rejection instead of silently proceeding under the default fail_open policy", async () => {
+    const server = await startOpenBoxServer({
+      evaluate() {
+        return { body: { error: "invalid_api_key" }, statusCode: 401 };
+      }
+    });
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_agent_auth_fail_open",
+      apiUrl: server.url,
+      validate: false
+    });
+
+    expect(config.onApiError).toBe("fail_open");
+
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+    const generate = vi.fn(
+      async (
+        _messages?: unknown,
+        _executionOptions?: Record<string, unknown>
+      ) => ({ text: "should-not-run" })
+    );
+    const agent = wrapAgent(
+      {
+        generate,
+        id: "auth-fail-open-agent",
+        name: "Auth Fail Open Agent"
+      },
+      {
+        client,
+        config,
+        spanProcessor: new OpenBoxSpanProcessor()
+      }
+    );
+
+    await expect(
+      agent.generate("hello", { runId: "agent-auth-fail-open-run" })
+    ).rejects.toBeInstanceOf(OpenBoxAuthError);
+
+    await server.close();
+
+    expect(generate).not.toHaveBeenCalled();
+  });
+
+  it("still blocks agent generate on a persistent auth rejection under fail_closed", async () => {
+    const server = await startOpenBoxServer({
+      evaluate() {
+        return { body: { error: "invalid_api_key" }, statusCode: 401 };
+      }
+    });
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_agent_auth_fail_closed",
+      apiUrl: server.url,
+      onApiError: "fail_closed",
+      validate: false
+    });
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+    const generate = vi.fn(
+      async (
+        _messages?: unknown,
+        _executionOptions?: Record<string, unknown>
+      ) => ({ text: "should-not-run" })
+    );
+    const agent = wrapAgent(
+      {
+        generate,
+        id: "auth-fail-closed-agent",
+        name: "Auth Fail Closed Agent"
+      },
+      {
+        client,
+        config,
+        spanProcessor: new OpenBoxSpanProcessor()
+      }
+    );
+
+    await expect(
+      agent.generate("hello", { runId: "agent-auth-fail-closed-run" })
+    ).rejects.toBeInstanceOf(OpenBoxAuthError);
+
+    await server.close();
+
+    expect(generate).not.toHaveBeenCalled();
+  });
+
+  it("keeps WorkflowCompleted telemetry fail-open when a persistent auth rejection happens after the agent already ran", async () => {
+    const server = await startOpenBoxServer({
+      evaluate(body) {
+        if (body.event_type === "WorkflowCompleted") {
+          return { body: { error: "invalid_api_key" }, statusCode: 401 };
+        }
+
+        return { verdict: "allow" };
+      }
+    });
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_agent_completed_auth_error",
+      apiUrl: server.url,
+      validate: false
+    });
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+    const agent = wrapAgent(
+      {
+        async generate(
+          _messages?: unknown,
+          _executionOptions?: Record<string, unknown>
+        ) {
+          return { finishReason: "stop", text: "ok" };
+        },
+        id: "completed-auth-error-agent",
+        name: "Completed Auth Error Agent"
+      },
+      {
+        client,
+        config,
+        spanProcessor: new OpenBoxSpanProcessor()
+      }
+    );
+
+    await expect(
+      agent.generate("hello", { runId: "agent-completed-auth-error-run" })
+    ).resolves.toMatchObject({ text: "ok" });
+
+    await server.close();
   });
 });
