@@ -1,3 +1,5 @@
+import { EvaluationResult } from "@openbox-ai/openbox-sdk";
+
 import {
   GuardrailsCheckResult,
   type GuardrailReason
@@ -41,6 +43,22 @@ type GovernanceVerdictResponseWire = {
   verdict?: string;
 };
 
+/**
+ * Mastra's DTO shape for a governance verdict — kept as a constructor-based
+ * class (many call sites do `new GovernanceVerdictResponse({...})` or an
+ * object-literal `as GovernanceVerdictResponse` cast) so the public API and
+ * every internal consumer keep compiling unchanged.
+ *
+ * `fromObject` DELEGATES the actual wire-parsing behavior to base's
+ * `EvaluationResult.fromDict` (verdict-first, action-fallback, guardrails
+ * parsing) rather than re-implementing it — base wins on conflict. This is a
+ * genuine behavior fix carried over from base: the old local parser did
+ * `Verdict.fromString(data.verdict ?? data.action ?? "continue")`, where `??`
+ * does NOT fall through on an empty string, so `{verdict:"", action:"stop"}`
+ * incorrectly resolved to ALLOW; base's parser checks `verdict.trim()` before
+ * preferring it over `action`. See migration-notes.md ("verdict priority +
+ * application").
+ */
 export class GovernanceVerdictResponse {
   public readonly alignmentScore: number | undefined;
   public readonly approvalId: string | undefined;
@@ -102,31 +120,30 @@ export class GovernanceVerdictResponse {
   public static fromObject(
     data: GovernanceVerdictResponseWire
   ): GovernanceVerdictResponse {
-    const guardrailsResult =
-      data.guardrails_result && Object.keys(data.guardrails_result).length > 0
-        ? new GuardrailsCheckResult({
-            inputType: data.guardrails_result.input_type ?? "",
-            rawLogs: data.guardrails_result.raw_logs,
-            reasons: data.guardrails_result.reasons ?? [],
-            redactedInput: data.guardrails_result.redacted_input,
-            validationPassed:
-              data.guardrails_result.validation_passed ?? true
-          })
-        : undefined;
+    const base = EvaluationResult.fromDict(data as Record<string, unknown>);
+    const guardrailsResult = base.guardrails
+      ? new GuardrailsCheckResult({
+          inputType: base.guardrails.inputType,
+          rawLogs: base.guardrails.rawLogs ?? undefined,
+          reasons: base.guardrails.reasons as GuardrailReason[],
+          redactedInput: base.guardrails.redactedInput,
+          validationPassed: base.guardrails.validationPassed
+        })
+      : undefined;
 
     return new GovernanceVerdictResponse({
-      alignmentScore: data.alignment_score,
-      approvalId: data.approval_id,
-      behavioralViolations: data.behavioral_violations,
-      constraints: data.constraints,
-      governanceEventId: data.governance_event_id,
+      alignmentScore: base.alignmentScore ?? undefined,
+      approvalId: base.approvalId ?? undefined,
+      behavioralViolations: base.behavioralViolations ?? undefined,
+      constraints: base.constraints ?? undefined,
+      governanceEventId: base.governanceEventId ?? undefined,
       guardrailsResult,
-      metadata: data.metadata,
-      policyId: data.policy_id,
-      reason: data.reason,
-      riskScore: data.risk_score ?? 0,
-      trustTier: data.trust_tier,
-      verdict: Verdict.fromString(data.verdict ?? data.action ?? "continue")
+      metadata: base.metadata ?? undefined,
+      policyId: base.policyId ?? undefined,
+      reason: base.reason ?? undefined,
+      riskScore: base.riskScore,
+      trustTier: base.trustTier ?? undefined,
+      verdict: base.verdict
     });
   }
 }

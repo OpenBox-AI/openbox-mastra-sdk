@@ -65,23 +65,27 @@ describe("validateAgentIdentityConfig", () => {
   it("rejects invalid DID values", () => {
     const identity = createTestIdentity();
 
+    // Message text delegated to base's `validateAgentDid` (migration-notes.md
+    // "Public API" — same OpenBoxConfigError type, base's message wording).
     expect(() => {
       validateAgentIdentityConfig({
         ...identity,
         did: "did:web:agent"
       });
-    }).toThrow("Invalid OpenBox agent DID");
+    }).toThrow("Invalid agent DID");
   });
 
   it("rejects private keys that are not 32-byte base64 Ed25519 seeds", () => {
     const identity = createTestIdentity();
 
+    // Message text delegated to base's `loadEd25519Seed` (migration-notes.md
+    // "Public API" — same OpenBoxConfigError type, base's message wording).
     expect(() => {
       validateAgentIdentityConfig({
         ...identity,
         privateKey: Buffer.from("not-a-seed").toString("base64")
       });
-    }).toThrow("Invalid OpenBox agent private key");
+    }).toThrow("Invalid agent private key");
   });
 });
 

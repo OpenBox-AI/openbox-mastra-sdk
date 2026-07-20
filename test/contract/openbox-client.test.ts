@@ -10,6 +10,8 @@ import {
   OpenBoxAuthError,
   OpenBoxClient,
   OpenBoxNetworkError,
+  OpenBoxSigningError,
+  parseApprovalDecision,
   Verdict
 } from "../../src/index.js";
 
@@ -627,6 +629,80 @@ describe("OpenBoxClient.evaluate", () => {
     ).resolves.toBeNull();
   });
 
+  it.each([401, 403])(
+    "never fail-opens on a %s auth rejection, even when onApiError=fail_open",
+    async statusCode => {
+      server.use(
+        http.post("https://api.openbox.ai/api/v1/governance/evaluate", () =>
+          HttpResponse.json({ error: "invalid" }, { status: statusCode })
+        )
+      );
+
+      const client = new OpenBoxClient({
+        apiKey: "obx_test_eval_key",
+        apiUrl: "https://api.openbox.ai",
+        onApiError: "fail_open"
+      });
+
+      await expect(
+        client.evaluate({ event_type: "WorkflowStarted" })
+      ).rejects.toBeInstanceOf(OpenBoxAuthError);
+    }
+  );
+
+  it.each([401, 403])(
+    "raises OpenBoxSigningError (not just OpenBoxAuthError) on a %s carrying a reason_code, and never fail-opens",
+    async statusCode => {
+      server.use(
+        http.post("https://api.openbox.ai/api/v1/governance/evaluate", () =>
+          HttpResponse.json(
+            { error: "signature rejected", reason_code: "clock_skew" },
+            { status: statusCode }
+          )
+        )
+      );
+
+      const client = new OpenBoxClient({
+        apiKey: "obx_test_eval_key",
+        apiUrl: "https://api.openbox.ai",
+        // Default policy — a signing rejection must never fail-open even here.
+        onApiError: "fail_open"
+      });
+
+      const rejection = client.evaluate({ event_type: "WorkflowStarted" });
+
+      await expect(rejection).rejects.toBeInstanceOf(OpenBoxSigningError);
+      await expect(rejection).rejects.toBeInstanceOf(OpenBoxAuthError);
+      await rejection.catch((error: unknown) => {
+        expect(error).toMatchObject({ reasonCode: "clock_skew" });
+      });
+    }
+  );
+
+  it("does not retry a 401/403 auth rejection", async () => {
+    let attempts = 0;
+
+    server.use(
+      http.post("https://api.openbox.ai/api/v1/governance/evaluate", () => {
+        attempts += 1;
+        return HttpResponse.json({ error: "invalid" }, { status: 401 });
+      })
+    );
+
+    const client = new OpenBoxClient({
+      apiKey: "obx_test_eval_key",
+      apiUrl: "https://api.openbox.ai",
+      evaluateMaxRetries: 3,
+      evaluateRetryBaseDelayMs: 0,
+      onApiError: "fail_closed"
+    });
+
+    await expect(
+      client.evaluate({ event_type: "WorkflowStarted" })
+    ).rejects.toBeInstanceOf(OpenBoxAuthError);
+    expect(attempts).toBe(1);
+  });
+
   it("raises GovernanceAPIError on HTTP failure in fail_closed mode", async () => {
     server.use(
       http.post("https://api.openbox.ai/api/v1/governance/evaluate", () =>
@@ -719,6 +795,46 @@ describe("OpenBoxClient.evaluate", () => {
       client.evaluate({ event_type: "WorkflowStarted" })
     ).rejects.toBeInstanceOf(GovernanceAPIError);
     expect(attempts).toBe(1);
+  });
+});
+
+describe("parseApprovalDecision", () => {
+  it("falls back to verdict when action is an empty string", () => {
+    expect(parseApprovalDecision({ action: "", verdict: "allow" })).toBe(
+      Verdict.ALLOW
+    );
+  });
+
+  it("falls back to verdict when action is whitespace-only", () => {
+    expect(parseApprovalDecision({ action: "  ", verdict: "block" })).toBe(
+      Verdict.BLOCK
+    );
+  });
+
+  it("prefers a non-empty action over verdict", () => {
+    expect(
+      parseApprovalDecision({ action: "block", verdict: "allow" })
+    ).toBe(Verdict.BLOCK);
+  });
+
+  it("does not fall back to verdict when action is present but unrecognized", () => {
+    expect(
+      parseApprovalDecision({ action: "banana", verdict: "allow" })
+    ).toBeNull();
+  });
+
+  it("returns null (pending) when both action and verdict are absent", () => {
+    expect(parseApprovalDecision({})).toBeNull();
+  });
+
+  it("returns null (pending) when verdict alone is unrecognized", () => {
+    expect(parseApprovalDecision({ verdict: "maybe" })).toBeNull();
+  });
+
+  it("normalizes hyphenated decisions from either field", () => {
+    expect(
+      parseApprovalDecision({ action: undefined, verdict: "require-approval" })
+    ).toBe(Verdict.REQUIRE_APPROVAL);
   });
 });
 

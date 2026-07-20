@@ -8,14 +8,18 @@ import {
   resolveOpenBoxMultiAgentSessionId,
   type OpenBoxConfig
 } from "../config/index.js";
+import { MastraFrameworkAdapter } from "../mastra/framework-adapter.js";
 import type { OpenBoxSpanProcessor } from "../span/index.js";
 import {
   ApprovalExpiredError,
   ApprovalPendingError,
   ApprovalRejectedError,
+  ContractError,
+  GovernanceAPIError,
   GovernanceVerdictResponse,
   GovernanceHaltError,
   GuardrailsValidationError,
+  OpenBoxAuthError,
   Verdict,
   WorkflowEventType,
   WorkflowSpanBuffer
@@ -122,19 +126,23 @@ export async function executeGovernedActivity<TInput, TOutput>({
   );
 
   const startVerdict = dependencies.config.sendActivityStartEvent
-    ? await evaluateActivityEvent(dependencies, {
-        activity_id: descriptor.activityId,
-        activity_input: startedInputForEvent,
-        activity_type: descriptor.activityType,
-        attempt: descriptor.attempt,
-        event_type: WorkflowEventType.ACTIVITY_STARTED,
-        ...(descriptor.goal ? { goal: descriptor.goal } : {}),
-        ...(eventMetadata ? { metadata: eventMetadata } : {}),
-        run_id: descriptor.runId,
-        task_queue: descriptor.taskQueue,
-        workflow_id: descriptor.workflowId,
-        workflow_type: descriptor.workflowType
-      })
+    ? await evaluateActivityEvent(
+        dependencies,
+        {
+          activity_id: descriptor.activityId,
+          activity_input: startedInputForEvent,
+          activity_type: descriptor.activityType,
+          attempt: descriptor.attempt,
+          event_type: WorkflowEventType.ACTIVITY_STARTED,
+          ...(descriptor.goal ? { goal: descriptor.goal } : {}),
+          ...(eventMetadata ? { metadata: eventMetadata } : {}),
+          run_id: descriptor.runId,
+          task_queue: descriptor.taskQueue,
+          workflow_id: descriptor.workflowId,
+          workflow_type: descriptor.workflowType
+        },
+        true
+      )
     : null;
 
   applyStopVerdict(startVerdict);
@@ -406,12 +414,21 @@ export async function executeGovernedActivity<TInput, TOutput>({
   );
 }
 
-const INLINE_APPROVAL_TIMEOUT_MS = 300_000;
-const INLINE_APPROVAL_INITIAL_POLL_INTERVAL_MS = 2_500;
-const INLINE_APPROVAL_MAX_POLL_INTERVAL_MS = 15_000;
-const INLINE_APPROVAL_BACKOFF_MULTIPLIER = 2;
 const inflightInlineApprovalWaits = new Map<string, Promise<void>>();
 
+/**
+ * Inline (non-suspending) approval wait, used when the caller has no
+ * `workflow.suspend()` available. The actual poll-until-decided loop is
+ * `MastraFrameworkAdapter.waitForApproval` (`../mastra/framework-adapter.js`)
+ * — base's `FrameworkAdapter` seam, per phase-06 "wire wrappers to base
+ * runtime". This wrapper keeps two Mastra-specific concerns the generic
+ * adapter does not know about: de-duplicating concurrent waits for the same
+ * run+activity, and the approval-registry side effects (mark-approved /
+ * clear-pending), timed identically to the pre-migration implementation —
+ * `clearPendingApproval` fires on resolution (allow) and on a terminal
+ * rejection/expiry, but deliberately NOT on a timeout (`ApprovalPendingError`)
+ * so a still-outstanding approval remains discoverable by a future resume.
+ */
 async function waitForApprovalInline(
   client: OpenBoxClient,
   descriptor: ReturnType<typeof resolveActivityDescriptor>,
@@ -426,64 +443,27 @@ async function waitForApprovalInline(
   }
 
   const waitPromise = (async () => {
-    const timeoutAt = Date.now() + INLINE_APPROVAL_TIMEOUT_MS;
-    let pollIntervalMs = INLINE_APPROVAL_INITIAL_POLL_INTERVAL_MS;
+    const adapter = new MastraFrameworkAdapter({ client });
 
-    while (Date.now() < timeoutAt) {
-      await delay(pollIntervalMs);
-
-      if (Date.now() >= timeoutAt) {
-        break;
-      }
-
-      const approval = await client.pollApproval({
-        activityId: descriptor.activityId,
-        runId: descriptor.runId,
-        workflowId: descriptor.workflowId
-      });
-
-      if (!approval) {
-        pollIntervalMs = Math.min(
-          INLINE_APPROVAL_MAX_POLL_INTERVAL_MS,
-          Math.ceil(pollIntervalMs * INLINE_APPROVAL_BACKOFF_MULTIPLIER)
-        );
-        continue;
-      }
-
-      if (approval.expired) {
-        clearPendingApproval(descriptor.runId);
-        throw new ApprovalExpiredError(
-          `Approval expired for activity ${descriptor.activityType}`
-        );
-      }
-
-      const verdict = Verdict.fromString(
-        (approval.verdict) ??
-          (approval.action)
+    try {
+      await adapter.waitForApproval(
+        descriptor.workflowId,
+        descriptor.runId,
+        descriptor.activityId,
+        reason
       );
-
-      if (verdict === Verdict.ALLOW) {
-        markActivityApproved(descriptor.runId, descriptor.activityId);
+      markActivityApproved(descriptor.runId, descriptor.activityId);
+      clearPendingApproval(descriptor.runId);
+    } catch (error) {
+      if (
+        error instanceof ApprovalExpiredError ||
+        error instanceof ApprovalRejectedError
+      ) {
         clearPendingApproval(descriptor.runId);
-        return;
       }
 
-      if (Verdict.shouldStop(verdict)) {
-        clearPendingApproval(descriptor.runId);
-        throw new ApprovalRejectedError(
-          `Activity rejected: ${String(approval.reason ?? "Activity rejected")}`
-        );
-      }
-
-      pollIntervalMs = Math.min(
-        INLINE_APPROVAL_MAX_POLL_INTERVAL_MS,
-        Math.ceil(pollIntervalMs * INLINE_APPROVAL_BACKOFF_MULTIPLIER)
-      );
+      throw error;
     }
-
-    throw new ApprovalPendingError(
-      reason ?? `Awaiting approval for activity ${descriptor.activityType}`
-    );
   })();
 
   inflightInlineApprovalWaits.set(inflightKey, waitPromise);
@@ -493,16 +473,6 @@ async function waitForApprovalInline(
   } finally {
     inflightInlineApprovalWaits.delete(inflightKey);
   }
-}
-
-async function delay(ms: number): Promise<void> {
-  if (ms <= 0) {
-    return;
-  }
-
-  await new Promise<void>(resolve => {
-    setTimeout(resolve, ms);
-  });
 }
 
 export function serializeValue(value: unknown): unknown {
@@ -763,7 +733,8 @@ async function evaluateActivityEvent(
   dependencies: ActivityRuntimeDependencies,
   payload: Record<string, unknown> & {
     event_type: WorkflowEventType;
-  }
+  },
+  isGatingEvent = false
 ): Promise<GovernanceVerdictResponse | null> {
   const body = {
     source: "workflow-telemetry",
@@ -774,6 +745,19 @@ async function evaluateActivityEvent(
   try {
     return await dependencies.client.evaluate(body);
   } catch (error) {
+    // ACTIVITY_STARTED (isGatingEvent=true) gates the operation — its verdict
+    // decides whether the tool/step runs — so it must fail CLOSED on an
+    // auth/signing/governance-API/contract error even under the default
+    // fail_open policy: the client already throws loud on these (never a
+    // network outage), so re-swallowing them to `null` (= ALLOW) here would
+    // silently bypass governance. Mirrors base SDK's `isFailClosedCondition`
+    // (runtime/hook-evaluator-types.ts). ACTIVITY_COMPLETED (isGatingEvent=
+    // false) fires after the operation already ran — telemetry only, nothing
+    // left to gate — and keeps swallowing every error exactly as before.
+    if (isGatingEvent && isFailClosedGovernanceError(error)) {
+      throw error;
+    }
+
     if (dependencies.config.onApiError === "fail_closed") {
       return new GovernanceVerdictResponse({
         reason: `Governance API error: ${
@@ -785,6 +769,21 @@ async function evaluateActivityEvent(
 
     return null;
   }
+}
+
+/**
+ * Mirrors base SDK's `isFailClosedCondition` (runtime/hook-evaluator-types.ts):
+ * an auth/signing (`OpenBoxAuthError` covers `OpenBoxSigningError`),
+ * governance-API, or contract error is never a network outage and must fail
+ * CLOSED regardless of the configured `onApiError` policy — only a genuine
+ * connectivity/outage failure may fail open.
+ */
+function isFailClosedGovernanceError(error: unknown): boolean {
+  return (
+    error instanceof OpenBoxAuthError ||
+    error instanceof GovernanceAPIError ||
+    error instanceof ContractError
+  );
 }
 
 function withMultiAgentSessionId<T extends Record<string, unknown> & {
@@ -853,7 +852,10 @@ function assertGuardrailsValid(
   const reasons = verdict.guardrailsResult.getReasonStrings();
   const reason = reasons.length > 0 ? reasons.join("; ") : fallbackMessage;
 
-  throw new GuardrailsValidationError(reason);
+  // Base's `GuardrailsValidationError` constructor takes `string[] | null`
+  // and joins internally; `[reason].join("; ") === reason` reproduces the
+  // exact original single-string message.
+  throw new GuardrailsValidationError([reason]);
 }
 
 function serializeError(error: unknown): Record<string, unknown> {

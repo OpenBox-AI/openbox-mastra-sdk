@@ -6,6 +6,7 @@ import { z } from "zod";
 import {
   GuardrailsValidationError,
   GovernanceHaltError,
+  OpenBoxAuthError,
   OpenBoxClient,
   OpenBoxSpanProcessor,
   parseOpenBoxConfig,
@@ -806,5 +807,187 @@ describe("wrapTool", () => {
 
     expect(startedEvent).toBeDefined();
     expect(startedEvent?.activity_type).toBe("searchCryptoCoins");
+  });
+
+  it("blocks a REQUIRE_APPROVAL-gated tool instead of silently proceeding on a persistent auth rejection under the default fail_open policy", async () => {
+    const server = await startOpenBoxServer({
+      evaluate() {
+        // Every ActivityStarted evaluation persistently 401s — the client
+        // always throws OpenBoxAuthError for this, regardless of onApiError.
+        return { body: { error: "invalid_api_key" }, statusCode: 401 };
+      }
+    });
+
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_tool_auth_fail_open",
+      apiUrl: server.url,
+      validate: false
+    });
+
+    expect(config.onApiError).toBe("fail_open");
+
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+    const execute = vi.fn(async () => ({ result: "should-not-run" }));
+    const suspend = vi.fn(async () => undefined);
+    const tool = createTool({
+      description: "Delete a record",
+      id: "delete-record-auth-fail-open",
+      inputSchema: z.object({
+        id: z.string()
+      }),
+      outputSchema: z.object({
+        result: z.string()
+      }),
+      execute
+    });
+    const wrapped = wrapTool(tool, {
+      client,
+      config,
+      spanProcessor: new OpenBoxSpanProcessor()
+    });
+
+    await expect(
+      wrapped.execute?.(
+        { id: "rec-1" },
+        {
+          workflow: {
+            runId: "run-auth-fail-open",
+            setState: vi.fn(),
+            state: {},
+            suspend,
+            workflowId: "wf-auth-fail-open"
+          }
+        }
+      )
+    ).rejects.toBeInstanceOf(OpenBoxAuthError);
+
+    await server.close();
+
+    // Neither the tool's own execute() nor a "wait for approval" suspend()
+    // may run — a persistent auth rejection must hard-block, not silently
+    // ALLOW nor silently treat the (unknowable) verdict as REQUIRE_APPROVAL.
+    expect(execute).not.toHaveBeenCalled();
+    expect(suspend).not.toHaveBeenCalled();
+  });
+
+  it("still blocks tool execution on a persistent auth rejection under fail_closed", async () => {
+    const server = await startOpenBoxServer({
+      evaluate() {
+        return { body: { error: "invalid_api_key" }, statusCode: 401 };
+      }
+    });
+
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_tool_auth_fail_closed",
+      apiUrl: server.url,
+      onApiError: "fail_closed",
+      validate: false
+    });
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+    const execute = vi.fn(async () => ({ result: "should-not-run" }));
+    const tool = createTool({
+      description: "Delete a record",
+      id: "delete-record-auth-fail-closed",
+      inputSchema: z.object({
+        id: z.string()
+      }),
+      outputSchema: z.object({
+        result: z.string()
+      }),
+      execute
+    });
+    const wrapped = wrapTool(tool, {
+      client,
+      config,
+      spanProcessor: new OpenBoxSpanProcessor()
+    });
+
+    await expect(
+      wrapped.execute?.(
+        { id: "rec-1" },
+        {
+          workflow: {
+            runId: "run-auth-fail-closed",
+            setState: vi.fn(),
+            state: {},
+            suspend: vi.fn(async () => undefined),
+            workflowId: "wf-auth-fail-closed"
+          }
+        }
+      )
+    ).rejects.toBeInstanceOf(OpenBoxAuthError);
+
+    await server.close();
+
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("keeps ActivityCompleted telemetry fail-open when a persistent auth rejection happens after the tool already ran", async () => {
+    const server = await startOpenBoxServer({
+      evaluate(body) {
+        if (body.event_type === "ActivityCompleted") {
+          return { body: { error: "invalid_api_key" }, statusCode: 401 };
+        }
+
+        return { verdict: "allow" };
+      }
+    });
+
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_tool_completed_auth_error",
+      apiUrl: server.url,
+      validate: false
+    });
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+    const tool = createTool({
+      description: "Process a prompt",
+      id: "process-prompt-completed-auth-error",
+      inputSchema: z.object({
+        prompt: z.string()
+      }),
+      outputSchema: z.object({
+        result: z.string()
+      }),
+      async execute(input) {
+        return { result: `processed:${input.prompt}` };
+      }
+    });
+    const wrapped = wrapTool(tool, {
+      client,
+      config,
+      spanProcessor: new OpenBoxSpanProcessor()
+    });
+
+    await expect(
+      wrapped.execute?.(
+        { prompt: "hello" },
+        {
+          workflow: {
+            runId: "run-completed-auth-error",
+            setState: vi.fn(),
+            state: {},
+            suspend: vi.fn(async () => undefined),
+            workflowId: "wf-completed-auth-error"
+          }
+        }
+      )
+    ).resolves.toEqual({ result: "processed:hello" });
+
+    await server.close();
   });
 });

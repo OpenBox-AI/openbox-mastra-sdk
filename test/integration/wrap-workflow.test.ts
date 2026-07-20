@@ -5,6 +5,7 @@ import { z } from "zod";
 
 import {
   ApprovalExpiredError,
+  OpenBoxAuthError,
   OpenBoxClient,
   OpenBoxSpanProcessor,
   parseOpenBoxConfig,
@@ -466,6 +467,184 @@ describe("wrapWorkflow", () => {
         step: "approve-step"
       })
     ).rejects.toBeInstanceOf(ApprovalExpiredError);
+
+    await server.close();
+
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("blocks workflow run.start on a persistent auth rejection instead of silently proceeding under the default fail_open policy", async () => {
+    const server = await startOpenBoxServer({
+      evaluate() {
+        // Every evaluation persistently 401s — the client always throws
+        // OpenBoxAuthError for this, regardless of onApiError.
+        return { body: { error: "invalid_api_key" }, statusCode: 401 };
+      }
+    });
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_workflow_auth_fail_open",
+      apiUrl: server.url,
+      validate: false
+    });
+
+    expect(config.onApiError).toBe("fail_open");
+
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+    const execute = vi.fn(async ({ inputData }: { inputData: { value: string } }) => ({
+      result: inputData.value.toUpperCase()
+    }));
+    const workflow = wrapWorkflow(
+      createWorkflow({
+        id: "auth-fail-open-workflow",
+        inputSchema: z.object({
+          value: z.string()
+        }),
+        outputSchema: z.object({
+          result: z.string()
+        })
+      })
+        .then(
+          createStep({
+            execute,
+            id: "uppercase-step",
+            inputSchema: z.object({
+              value: z.string()
+            }),
+            outputSchema: z.object({
+              result: z.string()
+            })
+          })
+        )
+        .commit(),
+      {
+        client,
+        config,
+        spanProcessor: new OpenBoxSpanProcessor()
+      }
+    );
+    const mastra = new Mastra({
+      storage: new InMemoryStore(),
+      workflows: {
+        authFailOpen: workflow
+      }
+    });
+    const run = await mastra.getWorkflow("authFailOpen").createRun();
+
+    await expect(
+      run.start({
+        inputData: {
+          value: "hello"
+        }
+      })
+    ).rejects.toBeInstanceOf(OpenBoxAuthError);
+
+    await server.close();
+
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("blocks workflow resume on a persistent auth rejection during the resume signal evaluation", async () => {
+    const server = await startOpenBoxServer({
+      evaluate(body) {
+        if (body.event_type === "ActivityStarted") {
+          return {
+            approval_id: "approval-resume-auth-fail",
+            reason: "Needs review",
+            verdict: "require_approval"
+          };
+        }
+
+        if (
+          body.event_type === "SignalReceived" &&
+          body.signal_name === "resume"
+        ) {
+          return { body: { error: "invalid_api_key" }, statusCode: 401 };
+        }
+
+        return { verdict: "allow" };
+      }
+    });
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_workflow_resume_auth_fail_open",
+      apiUrl: server.url,
+      validate: false
+    });
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+    const execute = vi.fn(async ({ inputData }: { inputData: { value: string } }) => ({
+      result: inputData.value.toUpperCase()
+    }));
+    const workflow = wrapWorkflow(
+      createWorkflow({
+        id: "resume-auth-fail-open-workflow",
+        inputSchema: z.object({
+          value: z.string()
+        }),
+        outputSchema: z.object({
+          result: z.string()
+        })
+      })
+        .then(
+          createStep({
+            execute,
+            id: "approve-step",
+            inputSchema: z.object({
+              value: z.string()
+            }),
+            outputSchema: z.object({
+              result: z.string()
+            }),
+            resumeSchema: z.object({
+              approved: z.boolean()
+            }).optional(),
+            suspendSchema: z.object({
+              openbox: z.object({
+                approvalId: z.string().optional(),
+                runId: z.string(),
+                workflowId: z.string()
+              })
+            }).optional()
+          })
+        )
+        .commit(),
+      {
+        client,
+        config,
+        spanProcessor: new OpenBoxSpanProcessor()
+      }
+    );
+    const mastra = new Mastra({
+      storage: new InMemoryStore(),
+      workflows: {
+        resumeAuthFailOpen: workflow
+      }
+    });
+    const run = await mastra.getWorkflow("resumeAuthFailOpen").createRun();
+    const firstResult = await run.start({
+      inputData: {
+        value: "hello"
+      }
+    });
+
+    expect(firstResult.status).toBe("suspended");
+
+    await expect(
+      run.resume({
+        resumeData: {
+          approved: true
+        },
+        step: "approve-step"
+      })
+    ).rejects.toBeInstanceOf(OpenBoxAuthError);
 
     await server.close();
 

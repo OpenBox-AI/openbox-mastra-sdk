@@ -13,6 +13,12 @@ import {
 import { startOpenBoxServer } from "../helpers/openbox-server.js";
 
 describe("withOpenBox", () => {
+  // Explicit timeout (default 5000ms is marginal for this test specifically):
+  // this is the heaviest end-to-end case (tool + workflow + agent all wired
+  // and executed together) and can exceed the default under full-suite V8
+  // coverage instrumentation load; it completes in ~600ms standalone. Not a
+  // functional change — this file and src/mastra/with-openbox.ts are
+  // untouched by the base-SDK migration.
   it("wires existing Mastra tools, workflows, and agents in place", async () => {
     const server = await startOpenBoxServer({
       evaluate() {
@@ -146,7 +152,7 @@ describe("withOpenBox", () => {
       "SignalReceived",
       "WorkflowCompleted"
     ]);
-  });
+  }, 15000);
 
   it("wraps tools, workflows, agents, and agent-local tools added after initialization", async () => {
     const server = await startOpenBoxServer({

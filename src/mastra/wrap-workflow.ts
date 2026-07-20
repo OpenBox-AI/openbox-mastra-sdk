@@ -11,6 +11,7 @@ import {
   serializeValue,
   type WorkflowSuspendContext
 } from "../governance/activity-runtime.js";
+import { parseApprovalDecision } from "../client/index.js";
 import {
   getOpenBoxExecutionContext,
   mergeOpenBoxEventMetadata,
@@ -21,7 +22,10 @@ import {
   ApprovalExpiredError,
   ApprovalPendingError,
   ApprovalRejectedError,
+  ContractError,
+  GovernanceAPIError,
   GovernanceHaltError,
+  OpenBoxAuthError,
   Verdict,
   WorkflowEventType
 } from "../types/index.js";
@@ -220,13 +224,17 @@ async function executeWorkflowRun(
     !options.config.skipWorkflowTypes.has(workflow.id) &&
     options.config.sendStartEvent
   ) {
-    const startVerdict = await evaluateWorkflowEvent(context, {
-      event_type: WorkflowEventType.WORKFLOW_STARTED,
-      run_id: run.runId,
-      task_queue: "mastra",
-      workflow_id: workflow.id,
-      workflow_type: workflow.id
-    });
+    const startVerdict = await evaluateWorkflowEvent(
+      context,
+      {
+        event_type: WorkflowEventType.WORKFLOW_STARTED,
+        run_id: run.runId,
+        task_queue: "mastra",
+        workflow_id: workflow.id,
+        workflow_type: workflow.id
+      },
+      true
+    );
 
     if (startVerdict && Verdict.shouldStop(startVerdict.verdict)) {
       throw new GovernanceHaltError(
@@ -280,13 +288,17 @@ function executeWorkflowStream(
         !options.config.skipWorkflowTypes.has(workflow.id) &&
         options.config.sendStartEvent
       ) {
-        const startVerdict = await evaluateWorkflowEvent(context, {
-          event_type: WorkflowEventType.WORKFLOW_STARTED,
-          run_id: run.runId,
-          task_queue: "mastra",
-          workflow_id: workflow.id,
-          workflow_type: workflow.id
-        });
+        const startVerdict = await evaluateWorkflowEvent(
+          context,
+          {
+            event_type: WorkflowEventType.WORKFLOW_STARTED,
+            run_id: run.runId,
+            task_queue: "mastra",
+            workflow_id: workflow.id,
+            workflow_type: workflow.id
+          },
+          true
+        );
 
         if (startVerdict && Verdict.shouldStop(startVerdict.verdict)) {
           throw new GovernanceHaltError(
@@ -424,7 +436,8 @@ async function handleResumeSignal(
       task_queue: "mastra",
       workflow_id: workflow.id,
       workflow_type: workflow.id
-    }
+    },
+    true
   );
 
   if (verdict && Verdict.shouldStop(verdict.verdict)) {
@@ -467,10 +480,9 @@ async function pollPendingApproval(
     );
   }
 
-  const verdict = Verdict.fromString(
-    (approval.verdict as string | undefined) ??
-      (approval.action as string | undefined)
-  );
+  // Strict decision parsing at the human-approval trust boundary (base wins —
+  // see migration-notes.md "approval wire format").
+  const verdict = parseApprovalDecision(approval);
 
   if (verdict === Verdict.ALLOW) {
     markActivityApproved(pending.runId, pending.activityId);
@@ -478,7 +490,7 @@ async function pollPendingApproval(
     return;
   }
 
-  if (Verdict.shouldStop(verdict)) {
+  if (verdict !== null && Verdict.shouldStop(verdict)) {
     clearPendingApproval(run.runId);
     throw new ApprovalRejectedError(
       `Activity rejected: ${String(approval.reason ?? "Activity rejected")}`
@@ -496,7 +508,8 @@ async function evaluateWorkflowEvent(
     run: WorkflowRunLike;
     workflow: AnyWorkflow & { id: string };
   },
-  payload: Record<string, unknown> & { event_type: WorkflowEventType }
+  payload: Record<string, unknown> & { event_type: WorkflowEventType },
+  isGatingEvent = false
 ): Promise<GovernanceVerdictResponse | null> {
   if (context.options.config.skipWorkflowTypes.has(context.workflow.id)) {
     return null;
@@ -515,6 +528,20 @@ async function evaluateWorkflowEvent(
       ...payload
     });
   } catch (error) {
+    // WORKFLOW_STARTED and the resume SIGNAL_RECEIVED call (both
+    // isGatingEvent=true) gate the operation — their verdict decides whether
+    // the run proceeds — so they must fail CLOSED on an auth/signing/
+    // governance-API/contract error even under the default fail_open policy:
+    // the client already throws loud on these (never a network outage), so
+    // re-swallowing them to `null` (= ALLOW) here would silently bypass
+    // governance. Mirrors base SDK's `isFailClosedCondition` (runtime/
+    // hook-evaluator-types.ts). WORKFLOW_COMPLETED/WORKFLOW_FAILED
+    // (isGatingEvent=false) fire after the run already finished — telemetry
+    // only — and keep swallowing every error exactly as before.
+    if (isGatingEvent && isFailClosedGovernanceError(error)) {
+      throw error;
+    }
+
     if (context.options.config.onApiError === "fail_closed") {
       return {
         action: "stop",
@@ -537,6 +564,21 @@ async function evaluateWorkflowEvent(
 
     return null;
   }
+}
+
+/**
+ * Mirrors base SDK's `isFailClosedCondition` (runtime/hook-evaluator-types.ts):
+ * an auth/signing (`OpenBoxAuthError` covers `OpenBoxSigningError`),
+ * governance-API, or contract error is never a network outage and must fail
+ * CLOSED regardless of the configured `onApiError` policy — only a genuine
+ * connectivity/outage failure may fail open.
+ */
+function isFailClosedGovernanceError(error: unknown): boolean {
+  return (
+    error instanceof OpenBoxAuthError ||
+    error instanceof GovernanceAPIError ||
+    error instanceof ContractError
+  );
 }
 
 function serializeError(error: unknown): Record<string, unknown> {

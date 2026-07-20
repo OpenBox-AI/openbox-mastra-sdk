@@ -3,7 +3,9 @@ import {
   GovernanceVerdictResponse,
   OpenBoxAuthError,
   OpenBoxConfigError,
-  OpenBoxNetworkError
+  OpenBoxNetworkError,
+  OpenBoxSigningError,
+  Verdict
 } from "../types/index.js";
 import {
   createAgentIdentityHeaders,
@@ -307,6 +309,25 @@ export class OpenBoxClient {
         });
       }
 
+      // Re-verified vs base (migration-notes.md "error retry/fail-open"): a
+      // persistent auth/signing rejection is NOT a network outage and must
+      // never be laundered into a fail-open ALLOW via #withApiPolicy below.
+      // Base's OpenBoxClient (@openbox-ai/openbox-sdk/client) always throws
+      // loud + fail-closed on 401/403 regardless of onApiError — mirror that
+      // here by raising an auth-specific error type that #withApiPolicy
+      // recognizes and always rethrows.
+      if (response.status === 401 || response.status === 403) {
+        const reasonCode = extractSigningReasonCode(body);
+        throw reasonCode
+          ? new OpenBoxSigningError(
+              `OpenBox evaluate rejected with HTTP ${response.status} (${reasonCode}). Governance is NOT failing open on an auth rejection — check API key, signing key, and clock skew.`,
+              reasonCode
+            )
+          : new OpenBoxAuthError(
+              `OpenBox evaluate rejected with HTTP ${response.status} (auth/signing). Governance is NOT failing open on an auth rejection — check API key, signing key, and clock skew.`
+            );
+      }
+
       throw new GovernanceAPIError(
         `HTTP ${response.status}: ${body}`
       );
@@ -348,6 +369,12 @@ export class OpenBoxClient {
     try {
       return await operation();
     } catch (error) {
+      // Auth/signing rejections are never network outages — always rethrow,
+      // regardless of onApiError (see the matching comment in #evaluateOnce).
+      if (error instanceof OpenBoxAuthError) {
+        throw error;
+      }
+
       if (this.onApiError === "fail_open") {
         return null;
       }
@@ -367,6 +394,75 @@ export class OpenBoxClient {
 
     return String(error);
   }
+}
+
+/** Machine reason code from Core's JSON error body, if present (mirrors base's `extractReasonCode`). */
+function extractSigningReasonCode(body: string | undefined): string | null {
+  if (!body) {
+    return null;
+  }
+
+  try {
+    const data: unknown = JSON.parse(body);
+
+    if (typeof data !== "object" || data === null) {
+      return null;
+    }
+
+    const dict = data as Record<string, unknown>;
+    const code = dict["reason_code"] ?? dict["code"] ?? dict["reason"];
+
+    return typeof code === "string" ? code : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Strict HITL approval-decision parsing (migration-notes.md "approval wire
+ * format" — base wins). Mirrors base's `ApprovalResult`-internal decision
+ * vocabulary: an explicit, closed set of accepted decision strings; anything
+ * outside it (garbled/unknown/missing) resolves to `null` (still pending) —
+ * NEVER an implicit ALLOW. Call sites previously used the lenient
+ * evaluate-path parser (`Verdict.fromString`, which defaults unknown -> ALLOW)
+ * for this human-approval trust boundary; that was too loose (an unrecognized
+ * decision string would silently approve).
+ */
+const APPROVAL_DECISION_VOCABULARY = new Set<string>([
+  "allow",
+  "constrain",
+  "require_approval",
+  "request_approval",
+  "block",
+  "halt",
+  "continue",
+  "stop"
+]);
+
+export function parseApprovalDecision(
+  approval: Pick<ApprovalPollResponse, "action" | "verdict">
+): Verdict | null {
+  // Match base's `ApprovalResult.fromDict`: an empty/whitespace `action` is
+  // ABSENT, not present-but-blank — it must fall through to `verdict` rather
+  // than shadow it. `approval.action ?? approval.verdict` was wrong here
+  // because `??` only falls through on null/undefined, not on `""`, so
+  // `{action:"", verdict:"allow"}` resolved to `""` (pending) forever instead
+  // of reading the `verdict` fallback.
+  const action =
+    typeof approval.action === "string" && approval.action.trim().length > 0
+      ? approval.action
+      : undefined;
+  const raw = action !== undefined ? action : approval.verdict;
+
+  if (typeof raw !== "string" || !raw.trim()) {
+    return null;
+  }
+
+  const normalized = raw.trim().toLowerCase().replaceAll("-", "_");
+
+  return APPROVAL_DECISION_VOCABULARY.has(normalized)
+    ? Verdict.fromString(normalized)
+    : null;
 }
 
 function isOpenBoxDebugEnabled(): boolean {
