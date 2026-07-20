@@ -73,6 +73,21 @@ where it previously failed open — see Security.
   [`docs/migration-notes-base-sdk-delegation.md`](docs/migration-notes-base-sdk-delegation.md)
   for what moved, what stayed local, and per-surface rollback notes.
 
+## [0.2.1] - 2026-06-30
+
+### Changed
+
+- Mastra multi-agent session grouping for governed agent, workflow, and tool
+  events. When enabled, the SDK emits `multi_agent_session_id` across evaluation
+  payloads so related child-agent runs group together in OpenBox.
+- `multiAgent` configuration via `OPENBOX_MULTI_AGENT_ENABLED`,
+  `OPENBOX_MULTI_AGENT_SESSION_ID`, and custom resolver support; when enabled
+  without an explicit session id, the SDK defaults to `mas:<runId>`.
+
+### Notes
+
+- Added unit coverage for multi-agent configuration and resolver behavior.
+
 ## [0.2.0] - 2026-05-19
 
 ### Added
@@ -101,6 +116,7 @@ Initial release — the OpenBox governance and observability SDK for Mastra.
   activity input shape.
 - Production hardening for long-running sessions.
 
-[1.0.0]: https://github.com/OpenBox-AI/openbox-mastra-sdk/compare/0.2.0...1.0.0
+[1.0.0]: https://github.com/OpenBox-AI/openbox-mastra-sdk/compare/0.2.1...1.0.0
+[0.2.1]: https://github.com/OpenBox-AI/openbox-mastra-sdk/compare/0.2.0...0.2.1
 [0.2.0]: https://github.com/OpenBox-AI/openbox-mastra-sdk/compare/v0.1.0...0.2.0
 [0.1.0]: https://github.com/OpenBox-AI/openbox-mastra-sdk/releases/tag/v0.1.0
