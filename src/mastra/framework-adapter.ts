@@ -62,10 +62,16 @@ export class MastraFrameworkAdapter implements FrameworkAdapter {
     this.#approvalWaitOptions = approvalWaitOptions ?? {};
   }
 
-  public async handleApproval(result: EvaluationResult): Promise<void> {
-    const workflowId = readRawString(result.raw, "workflow_id");
-    const runId = readRawString(result.raw, "run_id");
-    const activityId = readRawString(result.raw, "activity_id");
+  public async handleApproval(
+    result: EvaluationResult,
+    context?: ActivityContext | null
+  ): Promise<void> {
+    // Core's evaluate response does NOT echo the workflow/run/activity IDs, so
+    // the base runtime threads the originating context in. `result.raw` is only
+    // a fallback for an older base runtime that predates the context argument.
+    const workflowId = context?.workflowId || readRawString(result.raw, "workflow_id");
+    const runId = context?.runId || readRawString(result.raw, "run_id");
+    const activityId = context?.activityId || readRawString(result.raw, "activity_id");
 
     await this.waitForApproval(
       workflowId,

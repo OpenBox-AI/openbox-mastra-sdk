@@ -127,6 +127,14 @@ describe("base SDK conformance kit (inside Mastra)", () => {
       }
 
       expect(fakeCore.approvalRequests.length).toBeGreaterThan(0);
+      // The poll must carry the originating workflow/run IDs — Core's evaluate
+      // response never echoes them, so an empty ID here means the adapter fell
+      // back to result.raw (the bug this fix closes).
+      const pollBody = fakeCore.approvalRequests[0]?.bodyJson as Record<string, unknown>;
+      expect(pollBody).toMatchObject({
+        run_id: `run-${scenario.name}`,
+        workflow_id: `wf-${scenario.name}`
+      });
       runtime.close();
     }
   );
