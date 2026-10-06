@@ -80,11 +80,48 @@ process.on("SIGTERM", async () => {
 `withOpenBox()` is the recommended production entrypoint. It:
 
 1. parses and validates SDK configuration
-2. validates the API key unless `validate: false` is set
-3. creates the OpenBox client and span processor
+2. creates one shared base SDK client and validates the API key and configured identity
+3. creates the span processor
 4. installs process-wide telemetry
 5. wraps existing Mastra tools, workflows, and agents
 6. patches future `addTool()`, `addWorkflow()`, and `addAgent()` calls
+
+## IAM v3 workload identity
+
+```ts
+await withOpenBox(mastra, {
+  apiUrl: process.env.OPENBOX_API_URL,
+  apiKey: process.env.OPENBOX_API_KEY,
+  identityMethod: "keycloak_workload",
+  workloadPrivateKey: process.env.OPENBOX_WORKLOAD_PRIVATE_KEY,
+  onApiError: "fail_closed"
+});
+```
+
+Supply the active agent service account's PKCS8 PEM RSA private key. The shared
+base SDK bootstraps the workload metadata from Core, acquires and renews a
+short-lived token, and sends governed requests to `/api/v3/*` using the API key
+and `X-OpenBox-Workload-Token`. One client/token cache serves startup, agent/tool/
+workflow gates, approval polling, hooks, and completion telemetry. Workload
+authentication failures stop enforcing gates even under `fail_open`; the client
+never downgrades to v1/v2 or unsigned authentication.
+
+API URL, API key, and identity options resolve from explicit values, then
+`OPENBOX_MASTRA_*`, then global `OPENBOX_*` variables. Blank environment values
+are unset. `OPENBOX_URL` remains a supported global URL alias. For example,
+`OPENBOX_MASTRA_WORKLOAD_PRIVATE_KEY` overrides `OPENBOX_WORKLOAD_PRIVATE_KEY`.
+Select `identityMethod` explicitly to make a missing key an error. DID and Okta
+v2 identities remain supported, with mutually exclusive identity inputs.
+
+`validate` and `OPENBOX_VALIDATE` have been removed: startup always authenticates.
+An injected `client` owns its connection, identity, timeout, and outage policy;
+separate identity options and environment variables do not override it.
+Runtime `shutdown()` closes that client after telemetry drains, including an
+injected client, so shared-client users must coordinate shutdown.
+
+See [configuration](./docs/configuration.md) for Okta options and
+[the client API](./docs/api-reference.md#class-openboxclient) for metadata,
+refresh, and candidate-key proof helpers.
 
 ## Reference Demo
 
@@ -142,7 +179,8 @@ Most applications only need a small part of the config surface:
 | `apiKey` | required | authenticate governance and approval calls |
 | `agentDid` | unset | identify the agent for DID-signed OpenBox requests |
 | `agentPrivateKey` | unset | sign OpenBox requests for agents with signing required |
-| `validate` | `true` | fail fast on invalid credentials or insecure URL setup |
+| `identityMethod` | inferred | select `openbox_did`, `okta_ai_agent`, or `keycloak_workload` |
+| `workloadPrivateKey` | unset | authenticate with an IAM v3 workload RSA key |
 | `onApiError` | `"fail_open"` | decide whether OpenBox outages should halt execution |
 | `hitlEnabled` | `true` | enable approval suspension or polling flows |
 | `httpCapture` | `true` | attach text HTTP bodies and headers to governance-relevant telemetry |
@@ -158,9 +196,9 @@ See [docs/configuration.md](./docs/configuration.md) for the complete surface.
 
 ## Production Guidance
 
-- Keep `validate` enabled outside tests and local mocks.
+- Startup authentication is mandatory; mock servers must implement the selected auth route.
 - Use HTTPS for all non-localhost OpenBox endpoints.
-- Store `OPENBOX_AGENT_PRIVATE_KEY` as a secret and never share it between agents.
+- Store agent private keys as secrets and never share them between agents.
 - Decide explicitly between `fail_open` and `fail_closed` before deployment.
 - Treat hook-triggered telemetry as internal operational data unless your policy intentionally governs it.
 - Keep `instrumentFileIo` disabled until you have a concrete file-governance requirement.

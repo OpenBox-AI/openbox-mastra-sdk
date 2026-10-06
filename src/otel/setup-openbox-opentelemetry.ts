@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 
 import { context, trace } from "@opentelemetry/api";
+import { isInternalCall } from "@openbox-ai/openbox-sdk/instrumentation";
 import type {
   Instrumentation,
   InstrumentationConfig
@@ -17,6 +18,9 @@ import { getOpenBoxExecutionContext } from "../governance/context.js";
 import { OpenBoxSpanProcessor } from "../span/index.js";
 import {
   ApprovalPendingError,
+  ContractError,
+  GovernanceAPIError,
+  OpenBoxAuthError,
   GovernanceHaltError,
   Verdict,
   WorkflowEventType
@@ -445,12 +449,14 @@ function selectHttpInstrumentations(
         }) => {
           const url = buildRequestUrl(request);
 
-          return shouldIgnoreUrl(url, ignoredUrls);
+          return isInternalCall() || shouldIgnoreUrl(url, ignoredUrls);
         }
       });
     }
 
-    return loadInstrumentation(definition);
+    return loadInstrumentation(definition, {
+      ignoreRequestHook: () => isInternalCall()
+    });
   });
 }
 
@@ -826,6 +832,7 @@ function patchFetch(
     input: Parameters<typeof fetch>[0],
     init?: RequestInit
   ): Promise<Response> {
+    if (isInternalCall()) return originalFetch(input, init);
     const request = new globalThis.Request(input, init);
     const url = request.url;
 
@@ -1385,7 +1392,7 @@ async function evaluateHookGovernance(
     traceId: string;
   }
 ): Promise<void> {
-  if (!hookGovernance) {
+  if (!hookGovernance || isInternalCall()) {
     return;
   }
 
@@ -1534,6 +1541,16 @@ async function evaluateHookGovernance(
   try {
     verdict = await hookGovernance.client.evaluate(payload);
   } catch (error) {
+    // Completed hooks are telemetry only; an enforcing hook must propagate
+    // auth/contract failures even under fail_open.
+    if (
+      input.stage === "started" &&
+      (error instanceof OpenBoxAuthError ||
+        error instanceof GovernanceAPIError ||
+        error instanceof ContractError)
+    ) {
+      throw error;
+    }
     if (hookGovernance.onApiError === "fail_open") {
       return;
     }

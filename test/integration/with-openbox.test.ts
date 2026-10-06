@@ -90,7 +90,6 @@ describe("withOpenBox", () => {
     const governed = await withOpenBox(mastra, {
       apiKey: "obx_test_with_openbox",
       apiUrl: server.url,
-      validate: false
     });
     const runtime = getOpenBoxRuntime(governed);
 
@@ -166,7 +165,6 @@ describe("withOpenBox", () => {
     const governed = await withOpenBox(mastra, {
       apiKey: "obx_test_with_openbox",
       apiUrl: server.url,
-      validate: false
     });
     const runtime = getOpenBoxRuntime(governed);
 
@@ -339,7 +337,6 @@ describe("withOpenBox", () => {
     const governedApp = await withOpenBox(app, {
       apiKey: "obx_test_with_openbox",
       apiUrl: server.url,
-      validate: false
     });
     const runtimeFromApp = getOpenBoxRuntime(governedApp);
     const runtimeFromMastra = getOpenBoxRuntime(mastra);

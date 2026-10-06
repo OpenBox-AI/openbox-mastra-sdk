@@ -1,12 +1,21 @@
 import { z } from "zod";
 
-import { OpenBoxConfig as BaseOpenBoxConfig } from "@openbox-ai/openbox-sdk/config";
+import type { OpenBoxConfig as BaseOpenBoxConfig } from "@openbox-ai/openbox-sdk/config";
 
 import { OpenBoxClient, type OpenBoxApiErrorPolicy } from "../client/index.js";
 import {
-  OpenBoxConfigError,
-  OpenBoxInsecureURLError
-} from "../types/index.js";
+  identityOptionsFromConfig,
+  redactConfig,
+  resolveBaseOpenBoxConfig,
+  type OpenBoxIdentityOptions
+} from "./base-config.js";
+
+import { OpenBoxConfigError, OpenBoxInsecureURLError } from "../types/index.js";
+
+export type {
+  AgentIdentityMethod,
+  OpenBoxIdentityOptions
+} from "./base-config.js";
 
 // Verified byte-identical to base's internal pattern (`config/index.ts`
 // `\w` === `[A-Za-z0-9_]`). Kept local: base does not export this regex
@@ -27,23 +36,16 @@ export type OpenBoxMultiAgentSessionIdResolver = (
 
 export interface OpenBoxMultiAgentInput {
   enabled?: boolean | undefined;
-  multiAgentSessionId?:
-    | string
-    | OpenBoxMultiAgentSessionIdResolver
-    | undefined;
+  multiAgentSessionId?: string | OpenBoxMultiAgentSessionIdResolver | undefined;
 }
 
 export interface OpenBoxMultiAgentConfig {
   enabled: boolean;
-  multiAgentSessionId:
-    | string
-    | OpenBoxMultiAgentSessionIdResolver
-    | undefined;
+  multiAgentSessionId: string | OpenBoxMultiAgentSessionIdResolver | undefined;
 }
 
-export interface OpenBoxConfigInput {
-  agentDid?: string | undefined;
-  agentPrivateKey?: string | undefined;
+export interface OpenBoxConfigInput extends OpenBoxIdentityOptions {
+  envPrefix?: string | undefined;
   apiKey?: string | undefined;
   apiUrl?: string | undefined;
   evaluateMaxRetries?: number | undefined;
@@ -62,10 +64,9 @@ export interface OpenBoxConfigInput {
   skipHitlActivityTypes?: Iterable<string> | undefined;
   skipSignals?: Iterable<string> | undefined;
   skipWorkflowTypes?: Iterable<string> | undefined;
-  validate?: boolean | undefined;
 }
 
-export interface OpenBoxConfig {
+export interface OpenBoxConfig extends OpenBoxIdentityOptions {
   agentDid: string | undefined;
   agentPrivateKey: string | undefined;
   apiKey: string;
@@ -86,7 +87,6 @@ export interface OpenBoxConfig {
   skipHitlActivityTypes: Set<string>;
   skipSignals: Set<string>;
   skipWorkflowTypes: Set<string>;
-  validate: boolean;
 }
 
 const OPENBOX_CONFIG_SCHEMA = z.object({
@@ -107,13 +107,14 @@ const OPENBOX_CONFIG_SCHEMA = z.object({
   onApiError: z.enum(["fail_open", "fail_closed"]).default("fail_open"),
   sendActivityStartEvent: z.boolean().default(true),
   sendStartEvent: z.boolean().default(true),
-  skipActivityTypes: z.set(z.string()).default(new Set(["send_governance_event"])),
+  skipActivityTypes: z
+    .set(z.string())
+    .default(new Set(["send_governance_event"])),
   skipHitlActivityTypes: z
     .set(z.string())
     .default(new Set(["send_governance_event"])),
   skipSignals: z.set(z.string()).default(new Set()),
-  skipWorkflowTypes: z.set(z.string()).default(new Set()),
-  validate: z.boolean().default(true)
+  skipWorkflowTypes: z.set(z.string()).default(new Set())
 });
 
 let globalConfig: OpenBoxConfig | undefined;
@@ -145,50 +146,30 @@ export function validateUrlSecurity(apiUrl: string): void {
 
 export function parseOpenBoxConfig(
   input: OpenBoxConfigInput = {},
-  env: NodeJS.ProcessEnv = process.env
+  env: NodeJS.ProcessEnv = process.env,
+  // A runtime with an injected client uses that client's identity unchanged.
+  connectionConfig?: BaseOpenBoxConfig
 ): OpenBoxConfig {
-  const apiUrl = input.apiUrl ?? env.OPENBOX_URL;
-  const apiKey = input.apiKey ?? env.OPENBOX_API_KEY;
-  const agentDidInput = input.agentDid ?? env.OPENBOX_AGENT_DID;
-  const agentPrivateKeyInput = input.agentPrivateKey ?? env.OPENBOX_AGENT_PRIVATE_KEY;
   const multiAgent = parseMultiAgentConfig(input.multiAgent, env);
-
-  if (!apiUrl || !apiKey) {
-    throw new OpenBoxConfigError(
-      "Missing OpenBox configuration. Both OPENBOX_URL and OPENBOX_API_KEY are required."
+  const baseConfig =
+    connectionConfig ??
+    resolveBaseOpenBoxConfig(
+      {
+        ...input,
+        timeoutSeconds:
+          input.governanceTimeout ??
+          parseNumber(env.OPENBOX_GOVERNANCE_TIMEOUT, 30),
+        onApiError:
+          input.onApiError ??
+          parsePolicy(env.OPENBOX_GOVERNANCE_POLICY, "fail_open")
+      },
+      env
     );
-  }
-
-  // Delegate the shared validation primitives (API key format, HTTPS-required
-  // URL security, agent DID format + both-or-neither identity requirement) to
-  // the base SDK — base wins on conflict (migration-notes.md "config
-  // defaults"). Mastra's own `OPENBOX_URL`/`OPENBOX_AGENT_DID`/
-  // `OPENBOX_AGENT_PRIVATE_KEY` env var names (base uses differently-named
-  // `OPENBOX_API_URL` etc.) are resolved locally FIRST and passed as explicit
-  // values, so base's own (differently-named) env lookup never runs —
-  // `environ: {}` makes that explicit.
-  const baseConfig = BaseOpenBoxConfig.resolve({
-    agentDid: agentDidInput ?? null,
-    agentPrivateKey: agentPrivateKeyInput ?? null,
-    apiKey,
-    apiUrl,
-    environ: {},
-    sdkEngine: "mastra"
-  });
-  // Base's `.normalized()` only DID-format-checks the identity; eagerly
-  // validate the private key seed too (Mastra's historical contract: an
-  // invalid private key format fails at config-parse time, not lazily at
-  // first signed request).
-  if (baseConfig.agentDid) {
-    baseConfig.loadIdentity();
-  }
-  const agentIdentity = baseConfig.agentDid
-    ? { did: baseConfig.agentDid, privateKey: baseConfig.agentPrivateKey ?? "" }
-    : undefined;
+  const identity = identityOptionsFromConfig(baseConfig);
 
   const parsed = OPENBOX_CONFIG_SCHEMA.parse({
-    agentDid: agentIdentity?.did,
-    agentPrivateKey: agentIdentity?.privateKey,
+    agentDid: baseConfig.agentDid ?? undefined,
+    agentPrivateKey: baseConfig.agentPrivateKey ?? undefined,
     apiKey: baseConfig.apiKey,
     apiUrl: baseConfig.apiUrl,
     evaluateMaxRetries:
@@ -197,21 +178,21 @@ export function parseOpenBoxConfig(
     evaluateRetryBaseDelayMs:
       input.evaluateRetryBaseDelayMs ??
       parseInteger(env.OPENBOX_EVALUATE_RETRY_BASE_DELAY_MS, 150),
-    governanceTimeout:
-      input.governanceTimeout ?? parseNumber(env.OPENBOX_GOVERNANCE_TIMEOUT, 30),
-    hitlEnabled: input.hitlEnabled ?? parseBoolean(env.OPENBOX_HITL_ENABLED, true),
-    httpCapture: input.httpCapture ?? parseBoolean(env.OPENBOX_HTTP_CAPTURE, true),
+    governanceTimeout: baseConfig.timeoutSeconds,
+    hitlEnabled:
+      input.hitlEnabled ?? parseBoolean(env.OPENBOX_HITL_ENABLED, true),
+    httpCapture:
+      input.httpCapture ?? parseBoolean(env.OPENBOX_HTTP_CAPTURE, true),
     instrumentDatabases:
       input.instrumentDatabases ??
       parseBoolean(env.OPENBOX_INSTRUMENT_DATABASES, true),
     instrumentFileIo:
-      input.instrumentFileIo ?? parseBoolean(env.OPENBOX_INSTRUMENT_FILE_IO, false),
+      input.instrumentFileIo ??
+      parseBoolean(env.OPENBOX_INSTRUMENT_FILE_IO, false),
     maxEvaluatePayloadBytes:
       input.maxEvaluatePayloadBytes ??
       parseInteger(env.OPENBOX_MAX_EVALUATE_PAYLOAD_BYTES, 256_000),
-    onApiError:
-      input.onApiError ??
-      parsePolicy(env.OPENBOX_GOVERNANCE_POLICY, "fail_open"),
+    onApiError: baseConfig.onApiError,
     sendActivityStartEvent:
       input.sendActivityStartEvent ??
       parseBoolean(env.OPENBOX_SEND_ACTIVITY_START_EVENT, true),
@@ -222,21 +203,23 @@ export function parseOpenBoxConfig(
       parseCsvSet(env.OPENBOX_SKIP_ACTIVITY_TYPES, ["send_governance_event"]),
     skipHitlActivityTypes:
       iterableToSet(input.skipHitlActivityTypes) ??
-      parseCsvSet(env.OPENBOX_SKIP_HITL_ACTIVITY_TYPES, ["send_governance_event"]),
+      parseCsvSet(env.OPENBOX_SKIP_HITL_ACTIVITY_TYPES, [
+        "send_governance_event"
+      ]),
     skipSignals:
       iterableToSet(input.skipSignals) ?? parseCsvSet(env.OPENBOX_SKIP_SIGNALS),
     skipWorkflowTypes:
       iterableToSet(input.skipWorkflowTypes) ??
-      parseCsvSet(env.OPENBOX_SKIP_WORKFLOW_TYPES),
-    validate: input.validate ?? parseBoolean(env.OPENBOX_VALIDATE, true)
+      parseCsvSet(env.OPENBOX_SKIP_WORKFLOW_TYPES)
   });
 
-  return {
+  return redactConfig({
     ...parsed,
-    agentDid: agentIdentity?.did,
-    agentPrivateKey: agentIdentity?.privateKey,
+    ...identity,
+    agentDid: baseConfig.agentDid ?? undefined,
+    agentPrivateKey: baseConfig.agentPrivateKey ?? undefined,
     multiAgent
-  };
+  });
 }
 
 export function resolveOpenBoxMultiAgentSessionId(
@@ -265,16 +248,11 @@ export async function initializeOpenBox(
 ): Promise<OpenBoxConfig> {
   const config = parseOpenBoxConfig(input);
 
-  if (config.validate) {
-    const client = new OpenBoxClient({
-      agentDid: config.agentDid,
-      agentPrivateKey: config.agentPrivateKey,
-      apiKey: config.apiKey,
-      apiUrl: config.apiUrl,
-      timeoutSeconds: config.governanceTimeout
-    });
-
+  const client = OpenBoxClient.fromConfig(config);
+  try {
     await client.validateApiKey();
+  } finally {
+    client.close();
   }
 
   globalConfig = config;
@@ -305,7 +283,9 @@ function parseMultiAgentConfig(
   };
 }
 
-function normalizeOptionalString(value: string | undefined): string | undefined {
+function normalizeOptionalString(
+  value: string | undefined
+): string | undefined {
   const trimmed = value?.trim();
   return trimmed ? trimmed : undefined;
 }
@@ -314,7 +294,10 @@ function parseOptionalBoolean(value: string | undefined): boolean | undefined {
   return value == null ? undefined : parseBoolean(value, false);
 }
 
-function parseBoolean(value: string | undefined, defaultValue: boolean): boolean {
+function parseBoolean(
+  value: string | undefined,
+  defaultValue: boolean
+): boolean {
   if (value == null) {
     return defaultValue;
   }
@@ -343,7 +326,7 @@ function parseCsvSet(
   return new Set(
     value
       .split(",")
-      .map(item => item.trim())
+      .map((item) => item.trim())
       .filter(Boolean)
   );
 }

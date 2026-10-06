@@ -5,6 +5,36 @@ All notable changes to `@openbox-ai/openbox-mastra-sdk` are documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-10-06
+
+### Breaking
+
+- Remove `validate` and `OPENBOX_VALIDATE`. `withOpenBox()` and
+  `initializeOpenBox()` now always authenticate before returning; mock Core
+  servers must implement authentication.
+- Delegate runtime authentication and errors to base SDK `^2.1.0`.
+  Unsigned runtime auth rejections now raise `GovernanceAPIError`; signed and
+  workload errors retain their specialized base SDK types. Approval auth
+  failures throw instead of being returned as a pending `null` response.
+- Use base SDK headers branded `openbox-mastra-typescript-v<version>`.
+  Runtime shutdown closes injected clients as well as owned clients.
+
+### Added
+
+- IAM v3 `keycloak_workload` identity, `workloadPrivateKey`, and Okta v2 options,
+  with explicit / `OPENBOX_MASTRA_*` / global environment precedence and blank
+  environment fallback. `OPENBOX_URL` remains supported.
+- One base client and token cache for startup, gates, approvals, hooks, and
+  telemetry; metadata, refresh, transition-proof, and close helpers.
+- `OpenBoxWorkloadAuthError` and related public identity/workload types.
+
+### Security
+
+- Fail closed at instrumentation gates on authentication/contract errors under
+  `fail_open`; workload authentication never downgrades or replays a rejection.
+- Exclude internal Core/Keycloak HTTP traffic from capture and recursion, and
+  redact credentials in config/client JSON and Node inspection.
+
 ## [1.0.0] - 2026-07-20
 
 First stable release. Mastra's governance internals now delegate to the shared
@@ -116,6 +146,7 @@ Initial release — the OpenBox governance and observability SDK for Mastra.
   activity input shape.
 - Production hardening for long-running sessions.
 
+[2.0.0]: https://github.com/OpenBox-AI/openbox-mastra-sdk/compare/1.0.0...v2.0.0
 [1.0.0]: https://github.com/OpenBox-AI/openbox-mastra-sdk/compare/0.2.1...1.0.0
 [0.2.1]: https://github.com/OpenBox-AI/openbox-mastra-sdk/compare/0.2.0...0.2.1
 [0.2.0]: https://github.com/OpenBox-AI/openbox-mastra-sdk/compare/v0.1.0...0.2.0

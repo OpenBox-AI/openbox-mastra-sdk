@@ -6,7 +6,7 @@ import { z } from "zod";
 import {
   GuardrailsValidationError,
   GovernanceHaltError,
-  OpenBoxAuthError,
+  GovernanceAPIError,
   OpenBoxClient,
   OpenBoxSpanProcessor,
   parseOpenBoxConfig,
@@ -91,7 +91,6 @@ describe("wrapTool", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_contract",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -199,7 +198,6 @@ describe("wrapTool", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_contract",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -290,7 +288,6 @@ describe("wrapTool", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_contract",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -361,7 +358,6 @@ describe("wrapTool", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_contract",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -445,7 +441,6 @@ describe("wrapTool", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_hook_approval_suspend",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -557,7 +552,6 @@ describe("wrapTool", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_hook_halt",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -641,7 +635,6 @@ describe("wrapTool", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_hook_activity_ids",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -754,7 +747,6 @@ describe("wrapTool", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_contract",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -813,7 +805,7 @@ describe("wrapTool", () => {
     const server = await startOpenBoxServer({
       evaluate() {
         // Every ActivityStarted evaluation persistently 401s — the client
-        // always throws OpenBoxAuthError for this, regardless of onApiError.
+        // always throws GovernanceAPIError for this, regardless of onApiError.
         return { body: { error: "invalid_api_key" }, statusCode: 401 };
       }
     });
@@ -821,7 +813,6 @@ describe("wrapTool", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_tool_auth_fail_open",
       apiUrl: server.url,
-      validate: false
     });
 
     expect(config.onApiError).toBe("fail_open");
@@ -864,7 +855,7 @@ describe("wrapTool", () => {
           }
         }
       )
-    ).rejects.toBeInstanceOf(OpenBoxAuthError);
+    ).rejects.toBeInstanceOf(GovernanceAPIError);
 
     await server.close();
 
@@ -886,7 +877,6 @@ describe("wrapTool", () => {
       apiKey: "obx_test_tool_auth_fail_closed",
       apiUrl: server.url,
       onApiError: "fail_closed",
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -925,7 +915,7 @@ describe("wrapTool", () => {
           }
         }
       )
-    ).rejects.toBeInstanceOf(OpenBoxAuthError);
+    ).rejects.toBeInstanceOf(GovernanceAPIError);
 
     await server.close();
 
@@ -946,7 +936,6 @@ describe("wrapTool", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_tool_completed_auth_error",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,

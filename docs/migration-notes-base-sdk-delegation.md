@@ -1,5 +1,13 @@
 # Migration Notes: `openbox-mastra-sdk` → `@openbox-ai/openbox-sdk` Delegation
 
+> Historical record of the 1.0 migration. IAM v3 now supersedes the client and
+> dependency decisions below: the published base SDK dependency is `^2.1.0`,
+> and Mastra wraps `OpenBoxClient.fromConfig` for all authentication modes.
+> Responses are adapted from the base result's `raw` data, preserving Mastra's
+> shape. SDK branding now identifies `openbox-mastra-typescript-v<version>`.
+> Startup validation is mandatory. See [configuration.md](./configuration.md)
+> and the [2.0.0 changelog](../CHANGELOG.md#200---2026-10-06) for current behavior.
+
 Records the base-SDK delegation migration: what moved, what stayed local (and
 why), the 5 flagged-surface re-verifications, and rollback notes. Written
 during implementation; consult git history for the exact diffs referenced
