@@ -8,6 +8,8 @@ export const WORKLOAD_API_URL = "https://core.workload.test";
 export const WORKLOAD_API_KEY = "obx_test_mastra_workload";
 export const WORKLOAD_ISSUER = "https://identity.workload.test/realms/openbox";
 export const WORKLOAD_TOKEN_ENDPOINT = `${WORKLOAD_ISSUER}/protocol/openid-connect/token`;
+const CORE_ORIGIN = new URL(WORKLOAD_API_URL).origin;
+const TOKEN_URL = new URL(WORKLOAD_TOKEN_ENDPOINT);
 
 export function generateWorkloadPem(): string {
   return generateKeyPairSync("rsa", { modulusLength: 2048 })
@@ -42,6 +44,7 @@ export function json(status: number, body: unknown): Response {
 
 export interface WorkloadCall {
   readonly url: string;
+  readonly origin: string;
   readonly path: string;
   readonly headers: Record<string, string>;
   readonly body: Record<string, unknown>;
@@ -50,6 +53,10 @@ export interface WorkloadCall {
 }
 
 type Responder = (call: WorkloadCall) => Response | Promise<Response>;
+
+function isTokenCall(call: WorkloadCall): boolean {
+  return call.origin === TOKEN_URL.origin && call.path === TOKEN_URL.pathname;
+}
 
 function readBody(body: unknown): string {
   if (body === null || body === undefined) return "";
@@ -107,17 +114,20 @@ export class WorkloadCoreFake {
     } catch {
       body = {};
     }
+    const parsedUrl = new URL(url);
     const call: WorkloadCall = {
       url,
-      path: new URL(url).pathname,
+      origin: parsedUrl.origin,
+      path: parsedUrl.pathname,
       headers,
       body,
       rawBody,
       redirect: init?.redirect
     };
     this.calls.push(call);
-    if (url.startsWith(WORKLOAD_TOKEN_ENDPOINT))
-      return Promise.resolve(this.token(call));
+    if (isTokenCall(call)) return Promise.resolve(this.token(call));
+    if (call.origin !== CORE_ORIGIN)
+      return Promise.resolve(json(404, { code: 404 }));
     switch (call.path) {
       case "/api/v3/auth/bootstrap":
         return Promise.resolve(this.bootstrap(call));
@@ -137,22 +147,26 @@ export class WorkloadCoreFake {
   };
 
   get bootstrapCalls(): WorkloadCall[] {
-    return this.calls.filter((c) => c.path === "/api/v3/auth/bootstrap");
+    return this.calls.filter(
+      (c) => c.origin === CORE_ORIGIN && c.path === "/api/v3/auth/bootstrap"
+    );
   }
 
   get tokenCalls(): WorkloadCall[] {
-    return this.calls.filter((c) => c.url.startsWith(WORKLOAD_TOKEN_ENDPOINT));
+    return this.calls.filter(isTokenCall);
   }
 
   get evaluateCalls(): WorkloadCall[] {
-    return this.calls.filter((c) => c.path === "/api/v3/governance/evaluate");
+    return this.calls.filter(
+      (c) => c.origin === CORE_ORIGIN && c.path === "/api/v3/governance/evaluate"
+    );
   }
 
   /** Every Core request except bootstrap (which is API-key-only by design). */
   get governedCalls(): WorkloadCall[] {
     return this.calls.filter(
       (c) =>
-        c.url.startsWith(WORKLOAD_API_URL) &&
+        c.origin === CORE_ORIGIN &&
         c.path !== "/api/v3/auth/bootstrap"
     );
   }

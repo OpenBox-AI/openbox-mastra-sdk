@@ -34,6 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `fail_open`; workload authentication never downgrades or replays a rejection.
 - Exclude internal Core/Keycloak HTTP traffic from capture and recursion, and
   redact credentials in config/client JSON and Node inspection.
+- Update OpenTelemetry and locked dependencies to patched releases, and move
+  the test runner to Vitest 4 to remove the vulnerable Tinypool dependency.
 
 ## [1.0.0] - 2026-07-20
 
