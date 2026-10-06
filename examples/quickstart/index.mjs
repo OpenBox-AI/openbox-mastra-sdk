@@ -182,7 +182,6 @@ try {
   governedMastra = await withOpenBox(mastra, {
     apiKey: "obx_test_example_quickstart",
     apiUrl: openBoxServer.url,
-    validate: false
   });
 
   const workflowRun = await governedMastra

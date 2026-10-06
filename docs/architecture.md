@@ -42,9 +42,9 @@ OpenBox Mastra SDK
     |
     v
 OpenBox Core
-|- /api/v1/auth/validate
-|- /api/v1/governance/evaluate
-`- /api/v1/governance/approval
+|- /api/v{1,2,3}/auth/validate
+|- /api/v{1,2,3}/governance/evaluate
+`- /api/v{1,2,3}/governance/approval
 ```
 
 ## Main Runtime Components
@@ -63,6 +63,12 @@ Operational implication:
 - one governed Mastra process should normally have one active OpenBox runtime
 
 ### `OpenBoxClient`
+
+Mastra wraps the published base SDK client built with `fromConfig`. One client
+owns authentication for the whole runtime: v1 DID, v2 Okta assertions/bootstrap,
+or v3 Keycloak workload tokens. Mastra retains payload normalization, bounded
+outage retries, and public response shapes. Startup authenticates before any
+wrappers are installed; shutdown drains telemetry then closes the client.
 
 Responsibilities:
 

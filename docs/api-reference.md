@@ -61,6 +61,9 @@ Key fields:
 
 - `agentDid`
 - `agentPrivateKey`
+- `identityMethod`, `workloadPrivateKey`
+- `agentId`, `organizationId`, `deploymentId`, `agentProofAudience`
+- `oktaAgentId`, `oktaAgentKeyId`, `oktaAgentPrivateKey`, `oktaAgentAlgorithm`
 - `apiKey`
 - `apiUrl`
 - `evaluateMaxRetries`
@@ -73,9 +76,31 @@ Key fields:
 
 Main methods:
 
+- `static fromConfig(config: OpenBoxConfig, options?: { fetch?: typeof fetch }): OpenBoxClient`
 - `validateApiKey(): Promise<void>`
 - `evaluate(payload): Promise<GovernanceVerdictResponse | null>`
 - `pollApproval(payload): Promise<ApprovalPollResponse | null>`
+- `identityMetadata()` / `refreshIdentityMetadata()` for Okta bootstrap
+- `workloadIdentityMetadata()` / `refreshWorkloadIdentity()` for IAM v3
+- `proveWorkloadIdentityTransition({ transitionId, candidatePrivateKey })`
+- `close(): void` (idempotent; clears cached authentication and prevents later requests)
+
+`fromConfig` preserves all identity inputs resolved by `parseOpenBoxConfig`.
+Direct construction accepts explicit connection/identity options without reading
+the environment. `config` exposes the resolved base connection configuration.
+`withOpenBox({ client })` uses that client's connection and identity unchanged.
+
+Metadata methods return non-secret data (or `null` before acquisition).
+Candidate proof requires an explicit candidate RSA key, returns
+`{ proofVerified: true }` on success, and never activates the candidate or changes
+the active client identity. Refresh discards the current token first; if renewal
+fails, later operations remain blocked until authentication succeeds.
+
+Workload failures are `OpenBoxWorkloadAuthError` (an `OpenBoxAuthError`) with
+sanitized `stage`, `httpStatus`, and `reasonCode`. Base SDK auth errors propagate:
+unsigned runtime 401/403 responses raise `GovernanceAPIError`, signed failures
+may raise `OpenBoxSigningError`, and none become fail-open results. Approval
+auth failures throw; only ordinary poll outages return `null` (still pending).
 
 Use this class when you need explicit control over transport, retries, or approval polling.
 
@@ -114,13 +139,13 @@ Performs:
 
 - required field checks
 - API key format validation
-- DID identity validation when `agentDid` or `agentPrivateKey` is configured
+- identity method and mutual-exclusion validation delegated to the base SDK
 - URL security validation
 - default filling
 
 ### `initializeOpenBox(input?)`
 
-Parses config and, if validation is enabled, validates the API key against OpenBox Core.
+Parses config, creates a temporary client, and always validates the API key and configured identity against Core. The temporary client is closed before returning the config; use `withOpenBox()` for a runtime with a shared token cache.
 
 Use it when:
 
@@ -145,7 +170,7 @@ import {
 } from "@openbox-ai/openbox-mastra-sdk/identity";
 ```
 
-These helpers implement the OpenBox agent DID signing contract used internally by `OpenBoxClient`.
+These compatibility helpers expose the OpenBox DID signing contract. `OpenBoxClient` delegates all identity handling directly to the base SDK.
 
 Most applications should configure `OPENBOX_AGENT_DID` and `OPENBOX_AGENT_PRIVATE_KEY` and let the client sign requests automatically. Use these helpers only for diagnostics or advanced manual client wiring.
 
@@ -351,6 +376,7 @@ import {
   GuardrailsCheckResult,
   GuardrailsValidationError,
   OpenBoxAuthError,
+  OpenBoxWorkloadAuthError,
   OpenBoxConfigError,
   OpenBoxError,
   OpenBoxInsecureURLError,

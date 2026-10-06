@@ -29,7 +29,7 @@ The release workflow uses:
 ## Release Flow
 
 1. Create a release PR from `dev` to `main`.
-2. In that PR, update `version` in [package.json](./package.json).
+2. In that PR, update `version` in [package.json](./package.json) and `SDK_VERSION` in [src/version.ts](./src/version.ts); they must match for Core SDK identification.
 3. Merge the PR into `main`.
 3. GitHub Actions will:
    - install dependencies

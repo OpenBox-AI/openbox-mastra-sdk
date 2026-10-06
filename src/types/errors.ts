@@ -28,6 +28,7 @@ export {
   OpenBoxInsecureURLError,
   OpenBoxNetworkError,
   OpenBoxSigningError,
+  OpenBoxWorkloadAuthError,
   extractGovernanceError,
   mapSigningError
 } from "@openbox-ai/openbox-sdk";
@@ -40,3 +41,8 @@ import { OpenBoxError } from "@openbox-ai/openbox-sdk";
  * instead of failing the operation outright.
  */
 export class ApprovalPendingError extends OpenBoxError {}
+
+export type {
+  WorkloadAuthStage,
+  OpenBoxWorkloadAuthErrorDetails
+} from "@openbox-ai/openbox-sdk";

@@ -115,7 +115,7 @@ describe("OpenBoxClient.validateApiKey", () => {
     await expect(client.validateApiKey()).resolves.toBeUndefined();
     expect(observedAuthHeader).toBe("Bearer obx_live_valid_key");
     expect(observedContentType).toBe("application/json");
-    expect(observedUserAgent).toBe("OpenBox-SDK/1.0");
+    expect(observedUserAgent).toBe("OpenBox-SDK/openbox-mastra-typescript-v2.0.0");
   });
 
   it("signs auth validation requests when DID credentials are configured", async () => {
@@ -646,7 +646,7 @@ describe("OpenBoxClient.evaluate", () => {
 
       await expect(
         client.evaluate({ event_type: "WorkflowStarted" })
-      ).rejects.toBeInstanceOf(OpenBoxAuthError);
+      ).rejects.toBeInstanceOf(GovernanceAPIError);
     }
   );
 
@@ -665,6 +665,7 @@ describe("OpenBoxClient.evaluate", () => {
       const client = new OpenBoxClient({
         apiKey: "obx_test_eval_key",
         apiUrl: "https://api.openbox.ai",
+        ...createTestIdentity(),
         // Default policy — a signing rejection must never fail-open even here.
         onApiError: "fail_open"
       });
@@ -699,7 +700,7 @@ describe("OpenBoxClient.evaluate", () => {
 
     await expect(
       client.evaluate({ event_type: "WorkflowStarted" })
-    ).rejects.toBeInstanceOf(OpenBoxAuthError);
+    ).rejects.toBeInstanceOf(GovernanceAPIError);
     expect(attempts).toBe(1);
   });
 

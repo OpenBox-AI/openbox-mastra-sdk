@@ -92,7 +92,7 @@ describe("parseOpenBoxConfig", () => {
     });
     expect(config.agentDid).toBeUndefined();
     expect(config.agentPrivateKey).toBeUndefined();
-    expect(config.validate).toBe(true);
+    expect(config).not.toHaveProperty("validate");
   });
 
   it("parses environment variables", () => {
@@ -248,15 +248,19 @@ describe("initializeOpenBox", () => {
     expect(getOpenBoxConfig()?.apiUrl).toBe("https://api.openbox.ai");
   });
 
-  it("can skip remote validation", async () => {
-    const config = await initializeOpenBox({
-      apiKey: "obx_live_valid_key",
-      apiUrl: "https://api.openbox.ai",
-      validate: false
-    });
-
-    expect(config.validate).toBe(false);
-    expect(getOpenBoxConfig()?.apiKey).toBe("obx_live_valid_key");
+  it("always validates even when the removed environment bypass is set", async () => {
+    vi.stubEnv("OPENBOX_VALIDATE", "false");
+    const validate = vi.fn(() => HttpResponse.json({ error: "invalid" }, { status: 401 }));
+    server.use(http.get("https://api.openbox.ai/api/v1/auth/validate", validate));
+    try {
+      await expect(initializeOpenBox({
+        apiKey: "obx_live_valid_key",
+        apiUrl: "https://api.openbox.ai"
+      })).rejects.toBeInstanceOf(OpenBoxAuthError);
+      expect(validate).toHaveBeenCalledOnce();
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("surfaces auth failures from the validation endpoint", async () => {
