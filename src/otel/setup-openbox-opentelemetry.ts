@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 
+import { scheduleOpenRouterProvenance } from "@openbox-ai/openbox-sdk/instrumentation";
 import { context, trace } from "@opentelemetry/api";
 import type {
   Instrumentation,
@@ -888,9 +889,8 @@ function patchFetch(
 
     const response = await originalFetch(request);
     const responseHeaders = headersToRecord(response.headers);
-    const responseBody = normalizeHookBodyForTelemetry(
-      await captureResponseBody(response)
-    );
+    const rawResponseBody = await captureResponseBody(response);
+    const responseBody = normalizeHookBodyForTelemetry(rawResponseBody);
 
     spanProcessor.storeTraceBody(spanContext.traceId, {
       method: request.method,
@@ -955,12 +955,141 @@ function patchFetch(
       traceId: spanContext.traceId
     });
 
+    scheduleProvenance({
+      activeSpan,
+      callWindow: { endTimeNs, startTimeNs },
+      hookGovernance,
+      originalFetch,
+      parentSpanId: hookSpanId,
+      request,
+      requestBody,
+      responseBody: rawResponseBody,
+      spanProcessor,
+      traceId: spanContext.traceId
+    });
+
     return response;
   };
 
   return () => {
     globalThis.fetch = originalFetch;
   };
+}
+
+/**
+ * OpenRouter routing provenance for a governed model call — which provider
+ * served it, at what cost, and whether the requested routing was honoured.
+ * The base SDK does the lookup (bounded, off the critical path) and its client
+ * waits for it before the session closes. Inside a tool or workflow step the
+ * span is a hook span on that activity. An agent run's model calls have no
+ * activity of their own (their HTTP spans ride on the `agent_output` signal,
+ * and Core does not store signal spans), so each gets an `llm_call` activity
+ * carrying its provenance. No-op for any host other than openrouter.ai.
+ */
+function scheduleProvenance(input: {
+  activeSpan: HookSpan;
+  /** When the model call ran, so its `llm_call` activity sits there on the timeline. */
+  callWindow: { endTimeNs: number; startTimeNs: number };
+  hookGovernance: HookGovernanceRuntime | undefined;
+  originalFetch: typeof fetch;
+  parentSpanId: string;
+  request: Request;
+  requestBody: string | undefined;
+  responseBody: string | undefined;
+  spanProcessor: OpenBoxSpanProcessor;
+  traceId: string;
+}): void {
+  if (!input.hookGovernance) {
+    return;
+  }
+
+  const activityContext = resolveActivityContext(input.spanProcessor, input.traceId);
+
+  if (!activityContext) {
+    return;
+  }
+
+  const hookGovernance = input.hookGovernance;
+  scheduleOpenRouterProvenance({
+    authorization: input.request.headers.get("authorization"),
+    fetchImpl: input.originalFetch,
+    logger: {
+      error: message => {
+        console.error(`[openbox-sdk] ${message}`);
+      },
+      info: () => undefined,
+      warn: message => {
+        console.warn(`[openbox-sdk] ${message}`);
+      }
+    },
+    parentSpanId: input.parentSpanId,
+    requestBody: input.requestBody ?? null,
+    responseBody: input.responseBody ?? null,
+    send: span =>
+      activityContext.syntheticAgentActivity
+        ? sendAgentRunProvenance(hookGovernance, activityContext, span, input.callWindow)
+        : evaluateHookGovernance(hookGovernance, {
+            activeSpan: input.activeSpan,
+            hookTrigger: { stage: "completed", type: "llm_provenance" },
+            span,
+            stage: "completed",
+            traceId: input.traceId
+          }),
+    session: { runId: activityContext.runId, workflowId: activityContext.workflowId },
+    traceId: input.traceId,
+    url: input.request.url
+  });
+}
+
+/**
+ * Record one agent-run model call as an `llm_call` activity carrying its
+ * provenance span. Core stores a hook span only on an activity it already has a
+ * row for, so the activity is opened first, then the span attached, then the
+ * activity closed. Telemetry only: the call has already been answered, and
+ * verdicts on these events are not enforced.
+ */
+async function sendAgentRunProvenance(
+  hookGovernance: HookGovernanceRuntime,
+  activityContext: NonNullable<ReturnType<typeof resolveActivityContext>>,
+  span: Record<string, unknown>,
+  callWindow: { endTimeNs: number; startTimeNs: number }
+): Promise<void> {
+  // Stamped with the model call's own times, not the (later) send time, so the
+  // activity sits inside the run even though the lookup finished afterwards.
+  const startedAt = new Date(Math.floor(callWindow.startTimeNs / 1_000_000)).toISOString();
+  const endedAt = new Date(Math.floor(callWindow.endTimeNs / 1_000_000)).toISOString();
+  const callId = toStringValue(span.parent_span_id) ?? toStringValue(span.span_id) ?? randomUUID();
+  const activity = {
+    activity_id: `${activityContext.runId}:llm_call:${callId}`,
+    activity_type: "llm_call",
+    attempt: 1,
+    run_id: activityContext.runId,
+    source: "workflow-telemetry",
+    task_queue: activityContext.taskQueue,
+    workflow_id: activityContext.workflowId,
+    workflow_type: activityContext.workflowType
+  };
+  const hookSpan = ensureCompletedHookSpan(enrichHookSpanForData(cloneHookSpanPayload(span)));
+
+  await hookGovernance.client.evaluate({
+    ...activity,
+    event_type: WorkflowEventType.ACTIVITY_STARTED,
+    timestamp: startedAt
+  });
+  await hookGovernance.client.evaluate({
+    ...activity,
+    event_type: WorkflowEventType.ACTIVITY_STARTED,
+    hook_trigger: true,
+    span_count: 1,
+    spans: [hookSpan],
+    timestamp: endedAt
+  });
+  await hookGovernance.client.evaluate({
+    ...activity,
+    event_type: WorkflowEventType.ACTIVITY_COMPLETED,
+    status: "completed",
+    timestamp: endedAt
+  });
 }
 
 async function captureRequestBody(request: Request): Promise<string | undefined> {

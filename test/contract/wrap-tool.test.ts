@@ -264,6 +264,68 @@ describe("wrapTool", () => {
     });
   });
 
+  it("keeps the output and does not suspend when approval is required only after the tool ran", async () => {
+    const server = await startOpenBoxServer({
+      evaluate(body) {
+        if (body.event_type === "ActivityCompleted") {
+          return { reason: "Review refunds after they run", verdict: "require_approval" };
+        }
+
+        return { verdict: "allow" };
+      }
+    });
+
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_contract",
+      apiUrl: server.url,
+      validate: false
+    });
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+    const execute = vi.fn(async () => ({ result: "refunded" }));
+    const suspend = vi.fn(async () => undefined);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const tool = createTool({
+      description: "Refund an order",
+      id: "refund-order",
+      inputSchema: z.object({ id: z.string() }),
+      outputSchema: z.object({ result: z.string() }),
+      execute
+    });
+    const wrapped = wrapTool(tool, {
+      client,
+      config,
+      spanProcessor: new OpenBoxSpanProcessor()
+    });
+
+    const result = await wrapped.execute?.(
+      { id: "ord-1" },
+      {
+        workflow: {
+          runId: "run-after",
+          setState: vi.fn(),
+          state: {},
+          suspend,
+          workflowId: "wf-after"
+        }
+      }
+    );
+
+    await server.close();
+    const warnings = warn.mock.calls.map(call => String(call[0]));
+    warn.mockRestore();
+
+    // The tool already ran: approval can no longer gate it, so nothing waits.
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({ result: "refunded" });
+    expect(suspend).not.toHaveBeenCalled();
+    expect(warnings.some(line => line.includes("after activity") && line.includes("Review refunds"))).toBe(true);
+  });
+
   it("requests approval only once when both activity start and completion require approval", async () => {
     let approvalCalls = 0;
 

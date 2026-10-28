@@ -14,6 +14,7 @@ import {
   parseApprovalDecision,
   Verdict
 } from "../../src/index.js";
+import { SDK_VERSION } from "../../src/version.js";
 
 const server = setupServer();
 const ED25519_PKCS8_SEED_PREFIX = "302e020100300506032b657004220420";
@@ -94,13 +95,13 @@ function expectValidAgentIdentityHeaders({
 describe("OpenBoxClient.validateApiKey", () => {
   it("calls the auth endpoint with required headers", async () => {
     let observedAuthHeader = "";
-    let observedContentType = "";
+    let observedSdkVersion = "";
     let observedUserAgent = "";
 
     server.use(
       http.get("https://api.openbox.ai/api/v1/auth/validate", ({ request }) => {
         observedAuthHeader = request.headers.get("authorization") ?? "";
-        observedContentType = request.headers.get("content-type") ?? "";
+        observedSdkVersion = request.headers.get("x-openbox-sdk-version") ?? "";
         observedUserAgent = request.headers.get("user-agent") ?? "";
 
         return HttpResponse.json({ ok: true }, { status: 200 });
@@ -114,8 +115,10 @@ describe("OpenBoxClient.validateApiKey", () => {
 
     await expect(client.validateApiKey()).resolves.toBeUndefined();
     expect(observedAuthHeader).toBe("Bearer obx_live_valid_key");
-    expect(observedContentType).toBe("application/json");
-    expect(observedUserAgent).toBe("OpenBox-SDK/1.0");
+    // The base SDK's transport identifies the caller in Core's
+    // `openbox-<engine>-<language>-v<version>` format.
+    expect(observedSdkVersion).toBe(`openbox-mastra-typescript-v${SDK_VERSION}`);
+    expect(observedUserAgent).toBe(`OpenBox-SDK/openbox-mastra-typescript-v${SDK_VERSION}`);
   });
 
   it("signs auth validation requests when DID credentials are configured", async () => {
@@ -662,7 +665,12 @@ describe("OpenBoxClient.evaluate", () => {
         )
       );
 
+      // A signing rejection needs a signing identity: an unsigned (API-key
+      // only) client has no signature for Core to reject.
+      const { agentDid, agentPrivateKey } = createTestIdentity();
       const client = new OpenBoxClient({
+        agentDid,
+        agentPrivateKey,
         apiKey: "obx_test_eval_key",
         apiUrl: "https://api.openbox.ai",
         // Default policy — a signing rejection must never fail-open even here.
@@ -839,16 +847,14 @@ describe("parseApprovalDecision", () => {
 });
 
 describe("OpenBoxClient.pollApproval", () => {
-  it("posts workflow, run, and activity identifiers with JSON content type", async () => {
+  it("posts workflow, run, and activity identifiers", async () => {
     let observedBody: unknown;
-    let observedContentType: string | null = null;
 
     server.use(
       http.post(
         "https://api.openbox.ai/api/v1/governance/approval",
         async ({ request }) => {
           observedBody = await request.json();
-          observedContentType = request.headers.get("content-type");
 
           return HttpResponse.json({
             reason: "Approved by admin",
@@ -874,7 +880,6 @@ describe("OpenBoxClient.pollApproval", () => {
       run_id: "run-456",
       workflow_id: "wf-123"
     });
-    expect(observedContentType).toContain("application/json");
     expect(response).toEqual({ reason: "Approved by admin", verdict: "allow" });
   });
 

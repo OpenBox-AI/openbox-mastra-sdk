@@ -32,9 +32,18 @@ export OPENBOX_URL="https://your-openbox-core.example"
 export OPENBOX_API_KEY="obx_live_your_key"
 ```
 
-For agents that require DID signing, OpenBox also returns a DID and private key during agent registration or identity rotation. Set both values together:
+Then set the identity credentials the dashboard issued for the agent. The SDK picks Core's API version from them:
+
+| Agent identity in the dashboard | Set | Core API |
+| --- | --- | --- |
+| Workload identity (Keycloak service account) | `OPENBOX_WORKLOAD_PRIVATE_KEY` | `/api/v3` |
+| OpenBox DID | `OPENBOX_AGENT_DID` + `OPENBOX_AGENT_PRIVATE_KEY` | `/api/v1`, signed |
+| Okta AI Agent | `OPENBOX_OKTA_AGENT_PRIVATE_KEY` | `/api/v2` |
+| API key only | none of the above | `/api/v1` |
 
 ```bash
+export OPENBOX_WORKLOAD_PRIVATE_KEY="$(cat workload-private-key.pem)"   # IAM v3
+# or, for an OpenBox DID agent:
 export OPENBOX_AGENT_DID="did:aip:your-agent-did"
 export OPENBOX_AGENT_PRIVATE_KEY="base64_raw_ed25519_seed"
 ```
@@ -142,6 +151,8 @@ Most applications only need a small part of the config surface:
 | `apiKey` | required | authenticate governance and approval calls |
 | `agentDid` | unset | identify the agent for DID-signed OpenBox requests |
 | `agentPrivateKey` | unset | sign OpenBox requests for agents with signing required |
+| `workloadPrivateKey` | unset | authenticate an IAM v3 workload-identity agent (PKCS8 PEM) |
+| `oktaAgentPrivateKey` | unset | authenticate an Okta AI Agent (v2) |
 | `validate` | `true` | fail fast on invalid credentials or insecure URL setup |
 | `onApiError` | `"fail_open"` | decide whether OpenBox outages should halt execution |
 | `hitlEnabled` | `true` | enable approval suspension or polling flows |
