@@ -339,48 +339,20 @@ export async function executeGovernedActivity<TInput, TOutput>({
             }
 
             if (
-              dependencies.config.hitlEnabled &&
               Verdict.requiresApproval(completedVerdict?.verdict ?? Verdict.ALLOW) &&
               !alreadyApproved &&
               !isActivityApproved(descriptor.runId, descriptor.activityId)
             ) {
-              const approvalPayload = {
-                openbox: {
-                  activityId: descriptor.activityId,
-                  activityType: descriptor.activityType,
-                  approvalId: completedVerdict?.approvalId,
-                  reason: completedVerdict?.reason,
-                  requestedAt: rfc3339Now(),
-                  runId: descriptor.runId,
-                  workflowId: descriptor.workflowId,
-                  workflowType: descriptor.workflowType
-                }
-              };
-
-              setPendingApproval({
-                activityId: descriptor.activityId,
-                activityType: descriptor.activityType,
-                approvalId: completedVerdict?.approvalId,
-                requestedAt: approvalPayload.openbox.requestedAt,
-                runId: descriptor.runId,
-                workflowId: descriptor.workflowId,
-                workflowType: descriptor.workflowType
-              });
-
-              const workflowSuspend = runtimeContext.workflow?.suspend;
-
-              if (workflowSuspend) {
-                output = (await workflowSuspend(approvalPayload)) as
-                  | TOutput
-                  | undefined;
-              } else {
-                await waitForApprovalInline(
-                  dependencies.client,
-                  descriptor,
-                  completedVerdict?.reason ??
-                    "Activity output requires human approval"
-                );
-              }
+              // The activity already ran: an approval can no longer gate it,
+              // and waiting (suspending the workflow, or polling inline) only
+              // stalls the run until someone approves by hand. Log it and keep
+              // the output — the same behavior as the other OpenBox SDKs.
+              console.warn(
+                `[openbox-sdk] REQUIRE_APPROVAL returned after activity ${descriptor.activityType} ` +
+                  "completed; continuing without waiting. Match the rule on ActivityStarted to " +
+                  "gate the activity." +
+                  (completedVerdict?.reason ? ` Reason: ${completedVerdict.reason}` : "")
+              );
             }
           }
 
