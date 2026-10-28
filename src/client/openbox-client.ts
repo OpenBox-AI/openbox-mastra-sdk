@@ -4,18 +4,40 @@ import {
   OpenBoxAuthError,
   OpenBoxConfigError,
   OpenBoxNetworkError,
-  OpenBoxSigningError,
   Verdict
 } from "../types/index.js";
+import type { AgentIdentityMethod } from "@openbox-ai/openbox-sdk";
+import { OpenBoxClient as BaseOpenBoxClient } from "@openbox-ai/openbox-sdk/client";
+import { OpenBoxConfig as BaseOpenBoxConfig } from "@openbox-ai/openbox-sdk/config";
+
 import {
-  createAgentIdentityHeaders,
   type AgentIdentityConfig,
   validateAgentIdentityConfig
 } from "../identity/index.js";
+import { SDK_VERSION } from "../version.js";
 
 export type OpenBoxApiErrorPolicy = "fail_open" | "fail_closed";
 
-export interface OpenBoxClientOptions {
+/**
+ * Okta AI Agent (v2) and Keycloak workload (v3) identity. The base SDK picks
+ * Core's API version from whichever credentials are set and refuses mixed
+ * modes; see `OpenBoxConfig.resolve` in `@openbox-ai/openbox-sdk-ts/config`.
+ */
+export interface OpenBoxIdentityOptions {
+  identityMethod?: AgentIdentityMethod | undefined;
+  oktaAgentPrivateKey?: string | undefined;
+  oktaAgentId?: string | undefined;
+  oktaAgentKeyId?: string | undefined;
+  oktaAgentAlgorithm?: string | undefined;
+  agentId?: string | undefined;
+  organizationId?: string | undefined;
+  deploymentId?: string | undefined;
+  agentProofAudience?: string | undefined;
+  /** PKCS8 PEM of the agent's Keycloak service account — selects IAM v3. */
+  workloadPrivateKey?: string | undefined;
+}
+
+export interface OpenBoxClientOptions extends OpenBoxIdentityOptions {
   agentDid?: string | undefined;
   agentPrivateKey?: string | undefined;
   apiKey: string;
@@ -42,8 +64,6 @@ export interface ApprovalPollResponse {
   [key: string]: unknown;
 }
 
-const USER_AGENT = "OpenBox-SDK/1.0";
-
 export class OpenBoxClient {
   public readonly agentDid: string | undefined;
   public readonly agentPrivateKey: string | undefined;
@@ -54,9 +74,14 @@ export class OpenBoxClient {
   public readonly onApiError: OpenBoxApiErrorPolicy;
   public readonly timeoutSeconds: number;
 
-  readonly #fetch: typeof fetch;
   readonly #debugEnabled: boolean;
-  readonly #agentIdentity: AgentIdentityConfig | undefined;
+  /**
+   * The base SDK's client owns the wire: Core API version routing by identity
+   * (v1 DID, v2 Okta, v3 Keycloak workload), signing, workload token exchange,
+   * and auth-failure handling. This class keeps Mastra's retry, fail-open
+   * policy and debug logging on top of it.
+   */
+  readonly #base: BaseOpenBoxClient;
 
   public constructor({
     agentDid,
@@ -67,7 +92,8 @@ export class OpenBoxClient {
     evaluateRetryBaseDelayMs = 150,
     fetch: customFetch,
     onApiError = "fail_open",
-    timeoutSeconds = 30
+    timeoutSeconds = 30,
+    ...identity
   }: OpenBoxClientOptions) {
     const agentIdentity = parseOptionalAgentIdentityConfig(
       agentDid,
@@ -81,39 +107,20 @@ export class OpenBoxClient {
     this.evaluateRetryBaseDelayMs = Math.max(0, Math.floor(evaluateRetryBaseDelayMs));
     this.onApiError = onApiError;
     this.timeoutSeconds = timeoutSeconds;
-    this.#fetch = customFetch ?? fetch;
     this.#debugEnabled = isOpenBoxDebugEnabled();
-    this.#agentIdentity = agentIdentity;
+    this.#base = createBaseClient({
+      agentIdentity,
+      apiKey,
+      apiUrl: this.apiUrl,
+      customFetch,
+      identity,
+      timeoutSeconds
+    });
   }
 
   public async validateApiKey(): Promise<void> {
     try {
-      const response = await this.#fetch(
-        this.#buildUrl("/api/v1/auth/validate"),
-        {
-          headers: this.#buildJsonHeaders({
-            body: "",
-            method: "GET",
-            pathname: "/api/v1/auth/validate"
-          }),
-          method: "GET",
-          signal: AbortSignal.timeout(this.timeoutSeconds * 1000)
-        }
-      );
-
-      if (response.status === 200) {
-        return;
-      }
-
-      if (response.status === 401 || response.status === 403) {
-        throw new OpenBoxAuthError(
-          "Invalid API key. Check your API key at dashboard.openbox.ai"
-        );
-      }
-
-      throw new OpenBoxNetworkError(
-        `Cannot reach OpenBox Core at ${this.apiUrl}: HTTP ${response.status}`
-      );
+      await this.#base.validateApiKey();
     } catch (error) {
       if (error instanceof OpenBoxAuthError || error instanceof OpenBoxNetworkError) {
         throw error;
@@ -147,42 +154,24 @@ export class OpenBoxClient {
         });
       }
 
-      const body = JSON.stringify({
-        activity_id: payload.activityId,
-        run_id: payload.runId,
-        workflow_id: payload.workflowId
-      });
-      const response = await this.#fetch(
-        this.#buildUrl("/api/v1/governance/approval"),
-        {
-          body,
-          headers: this.#buildJsonHeaders({
-            body,
-            method: "POST",
-            pathname: "/api/v1/governance/approval"
-          }),
-          method: "POST",
-          signal: AbortSignal.timeout(this.timeoutSeconds * 1000)
-        }
+      const result = await this.#base.pollApproval(
+        payload.workflowId,
+        payload.runId,
+        payload.activityId
       );
 
-      if (response.status !== 200) {
-        const body = await response.text().catch(() => "");
+      if (result === null) {
         if (this.#debugEnabled) {
-          console.error("[openbox-sdk] approval.response", {
-            reason: body,
-            status: response.status
-          });
+          console.error("[openbox-sdk] approval.response", { status: "unavailable" });
         }
 
         return null;
       }
 
-      const data = (await response.json()) as ApprovalPollResponse;
+      const data = result.raw as ApprovalPollResponse;
       if (this.#debugEnabled) {
         console.info("[openbox-sdk] approval.response", {
           action: data.action,
-          status: response.status,
           verdict: data.verdict
         });
       }
@@ -203,41 +192,6 @@ export class OpenBoxClient {
     } catch {
       return null;
     }
-  }
-
-  #buildUrl(pathname: string): string {
-    return `${this.apiUrl}${pathname}`;
-  }
-
-  #buildJsonHeaders({
-    body,
-    method,
-    pathname
-  }: {
-    body: string;
-    method: string;
-    pathname: string;
-  }): Record<string, string> {
-    const headers: Record<string, string> = {
-      Authorization: `Bearer ${this.apiKey}`,
-      "Content-Type": "application/json",
-      "User-Agent": USER_AGENT
-    };
-
-    if (!this.#agentIdentity) {
-      return headers;
-    }
-
-    return {
-      ...headers,
-      ...createAgentIdentityHeaders({
-        body,
-        did: this.#agentIdentity.did,
-        method,
-        pathname,
-        privateKey: this.#agentIdentity.privateKey
-      })
-    };
   }
 
   async #evaluateWithRetry(
@@ -283,57 +237,26 @@ export class OpenBoxClient {
       console.info("[openbox-sdk] evaluate.request", summarizeEvaluatePayload(payload));
     }
 
-    const body = JSON.stringify(payload);
-    const response = await this.#fetch(
-      this.#buildUrl("/api/v1/governance/evaluate"),
-      {
-        body,
-        headers: this.#buildJsonHeaders({
-          body,
-          method: "POST",
-          pathname: "/api/v1/governance/evaluate"
-        }),
-        method: "POST",
-        signal: AbortSignal.timeout(this.timeoutSeconds * 1000)
-      }
-    );
+    // Auth and signing rejections (401/403, workload token failures) throw out
+    // of the base client as OpenBoxAuthError subclasses, which #withApiPolicy
+    // always rethrows: an auth rejection is never laundered into a fail-open
+    // ALLOW. The base client is built fail-open, so a network/5xx failure comes
+    // back as an empty fallback; raise it here so Mastra's retry and policy
+    // decide, as before.
+    const result = await asAuthError(() => this.#base.evaluate(payload as never));
 
-    if (response.status !== 200) {
-      const body = await response.text();
-
+    if (result.fallbackUsed && Object.keys(result.raw).length === 0) {
       if (this.#debugEnabled) {
         console.error("[openbox-sdk] evaluate.response", {
           event_type: payload.event_type,
-          reason: body,
-          status: response.status
+          reason: result.reason
         });
       }
 
-      // Re-verified vs base (migration-notes.md "error retry/fail-open"): a
-      // persistent auth/signing rejection is NOT a network outage and must
-      // never be laundered into a fail-open ALLOW via #withApiPolicy below.
-      // Base's OpenBoxClient (@openbox-ai/openbox-sdk/client) always throws
-      // loud + fail-closed on 401/403 regardless of onApiError — mirror that
-      // here by raising an auth-specific error type that #withApiPolicy
-      // recognizes and always rethrows.
-      if (response.status === 401 || response.status === 403) {
-        const reasonCode = extractSigningReasonCode(body);
-        throw reasonCode
-          ? new OpenBoxSigningError(
-              `OpenBox evaluate rejected with HTTP ${response.status} (${reasonCode}). Governance is NOT failing open on an auth rejection — check API key, signing key, and clock skew.`,
-              reasonCode
-            )
-          : new OpenBoxAuthError(
-              `OpenBox evaluate rejected with HTTP ${response.status} (auth/signing). Governance is NOT failing open on an auth rejection — check API key, signing key, and clock skew.`
-            );
-      }
-
-      throw new GovernanceAPIError(
-        `HTTP ${response.status}: ${body}`
-      );
+      throw new GovernanceAPIError(result.reason ?? "OpenBox governance request failed");
     }
 
-    const parsed = (await response.json()) as Parameters<
+    const parsed = result.raw as Parameters<
       typeof GovernanceVerdictResponse.fromObject
     >[0];
 
@@ -357,7 +280,6 @@ export class OpenBoxClient {
             ? ageResult.goal_drifted
             : undefined,
         event_type: payload.event_type,
-        status: response.status,
         verdict: parsed.verdict
       });
     }
@@ -396,26 +318,80 @@ export class OpenBoxClient {
   }
 }
 
-/** Machine reason code from Core's JSON error body, if present (mirrors base's `extractReasonCode`). */
-function extractSigningReasonCode(body: string | undefined): string | null {
-  if (!body) {
-    return null;
-  }
-
+/**
+ * The base client reports an API-key-only 401/403 (no signing reason code) as
+ * a `GovernanceAPIError` "auth rejected". It is still an auth rejection, and
+ * #withApiPolicy must never fail it open, so surface it as `OpenBoxAuthError`.
+ */
+async function asAuthError<T>(call: () => Promise<T>): Promise<T> {
   try {
-    const data: unknown = JSON.parse(body);
-
-    if (typeof data !== "object" || data === null) {
-      return null;
+    return await call();
+  } catch (error) {
+    if (
+      error instanceof GovernanceAPIError &&
+      !(error instanceof OpenBoxAuthError) &&
+      /auth rejected \(HTTP 40[13]\)/i.test(error.message)
+    ) {
+      throw new OpenBoxAuthError(error.message);
     }
 
-    const dict = data as Record<string, unknown>;
-    const code = dict["reason_code"] ?? dict["code"] ?? dict["reason"];
-
-    return typeof code === "string" ? code : null;
-  } catch {
-    return null;
+    throw error;
   }
+}
+
+function createBaseClient({
+  agentIdentity,
+  apiKey,
+  apiUrl,
+  customFetch,
+  identity,
+  timeoutSeconds
+}: {
+  agentIdentity: AgentIdentityConfig | undefined;
+  apiKey: string;
+  apiUrl: string;
+  customFetch: typeof fetch | undefined;
+  identity: OpenBoxIdentityOptions;
+  timeoutSeconds: number;
+}): BaseOpenBoxClient {
+  const config = BaseOpenBoxConfig.resolve({
+    agentDid: agentIdentity?.did ?? null,
+    agentId: identity.agentId ?? null,
+    agentPrivateKey: agentIdentity?.privateKey ?? null,
+    agentProofAudience: identity.agentProofAudience ?? null,
+    apiKey,
+    apiUrl,
+    deploymentId: identity.deploymentId ?? null,
+    // Mastra resolves its own env names; base must not read OPENBOX_* again.
+    environ: {},
+    identityMethod: identity.identityMethod ?? null,
+    oktaAgentAlgorithm: identity.oktaAgentAlgorithm ?? null,
+    oktaAgentId: identity.oktaAgentId ?? null,
+    oktaAgentKeyId: identity.oktaAgentKeyId ?? null,
+    oktaAgentPrivateKey: identity.oktaAgentPrivateKey ?? null,
+    onApiError: "fail_open",
+    organizationId: identity.organizationId ?? null,
+    sdkEngine: "mastra",
+    sdkLanguage: "typescript",
+    sdkVersion: SDK_VERSION,
+    timeoutSeconds,
+    workloadPrivateKey: identity.workloadPrivateKey ?? null
+  });
+
+  return BaseOpenBoxClient.fromConfig(config, {
+    ...(customFetch ? { fetchImpl: customFetch } : {}),
+    logger: {
+      error: message => {
+        console.error(`[openbox-sdk] ${message}`);
+      },
+      info: message => {
+        if (isOpenBoxDebugEnabled()) console.info(`[openbox-sdk] ${message}`);
+      },
+      warn: message => {
+        console.warn(`[openbox-sdk] ${message}`);
+      }
+    }
+  });
 }
 
 /**

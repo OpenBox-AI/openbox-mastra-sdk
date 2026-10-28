@@ -2,7 +2,11 @@ import { z } from "zod";
 
 import { OpenBoxConfig as BaseOpenBoxConfig } from "@openbox-ai/openbox-sdk/config";
 
-import { OpenBoxClient, type OpenBoxApiErrorPolicy } from "../client/index.js";
+import {
+  OpenBoxClient,
+  type OpenBoxApiErrorPolicy,
+  type OpenBoxIdentityOptions
+} from "../client/index.js";
 import {
   OpenBoxConfigError,
   OpenBoxInsecureURLError
@@ -41,7 +45,7 @@ export interface OpenBoxMultiAgentConfig {
     | undefined;
 }
 
-export interface OpenBoxConfigInput {
+export interface OpenBoxConfigInput extends OpenBoxIdentityOptions {
   agentDid?: string | undefined;
   agentPrivateKey?: string | undefined;
   apiKey?: string | undefined;
@@ -66,6 +70,8 @@ export interface OpenBoxConfigInput {
 }
 
 export interface OpenBoxConfig {
+  /** Okta (v2) / Keycloak workload (v3) identity, passed to every client. */
+  identity: OpenBoxIdentityOptions;
   agentDid: string | undefined;
   agentPrivateKey: string | undefined;
   apiKey: string;
@@ -151,6 +157,7 @@ export function parseOpenBoxConfig(
   const apiKey = input.apiKey ?? env.OPENBOX_API_KEY;
   const agentDidInput = input.agentDid ?? env.OPENBOX_AGENT_DID;
   const agentPrivateKeyInput = input.agentPrivateKey ?? env.OPENBOX_AGENT_PRIVATE_KEY;
+  const identity = resolveIdentityOptions(input, env);
   const multiAgent = parseMultiAgentConfig(input.multiAgent, env);
 
   if (!apiUrl || !apiKey) {
@@ -167,13 +174,25 @@ export function parseOpenBoxConfig(
   // `OPENBOX_API_URL` etc.) are resolved locally FIRST and passed as explicit
   // values, so base's own (differently-named) env lookup never runs —
   // `environ: {}` makes that explicit.
+  // The base SDK also refuses mixed identity modes (DID with a workload key,
+  // and so on), so a misconfiguration fails here rather than on first request.
   const baseConfig = BaseOpenBoxConfig.resolve({
     agentDid: agentDidInput ?? null,
+    agentId: identity.agentId ?? null,
     agentPrivateKey: agentPrivateKeyInput ?? null,
+    agentProofAudience: identity.agentProofAudience ?? null,
     apiKey,
     apiUrl,
+    deploymentId: identity.deploymentId ?? null,
     environ: {},
-    sdkEngine: "mastra"
+    identityMethod: identity.identityMethod ?? null,
+    oktaAgentAlgorithm: identity.oktaAgentAlgorithm ?? null,
+    oktaAgentId: identity.oktaAgentId ?? null,
+    oktaAgentKeyId: identity.oktaAgentKeyId ?? null,
+    oktaAgentPrivateKey: identity.oktaAgentPrivateKey ?? null,
+    organizationId: identity.organizationId ?? null,
+    sdkEngine: "mastra",
+    workloadPrivateKey: identity.workloadPrivateKey ?? null
   });
   // Base's `.normalized()` only DID-format-checks the identity; eagerly
   // validate the private key seed too (Mastra's historical contract: an
@@ -235,7 +254,34 @@ export function parseOpenBoxConfig(
     ...parsed,
     agentDid: agentIdentity?.did,
     agentPrivateKey: agentIdentity?.privateKey,
+    identity,
     multiAgent
+  };
+}
+
+/**
+ * Okta (v2) and Keycloak workload (v3) credentials: explicit input first, then
+ * the `OPENBOX_*` environment. A blank variable counts as unset.
+ */
+function resolveIdentityOptions(
+  input: OpenBoxIdentityOptions,
+  env: NodeJS.ProcessEnv
+): OpenBoxIdentityOptions {
+  const pick = (explicit: string | undefined, name: string): string | undefined =>
+    normalizeOptionalString(explicit) ?? normalizeOptionalString(env[name]);
+  const identityMethod = pick(input.identityMethod, "OPENBOX_AGENT_IDENTITY_METHOD");
+
+  return {
+    agentId: pick(input.agentId, "OPENBOX_AGENT_ID"),
+    agentProofAudience: pick(input.agentProofAudience, "OPENBOX_AGENT_PROOF_AUDIENCE"),
+    deploymentId: pick(input.deploymentId, "OPENBOX_DEPLOYMENT_ID"),
+    identityMethod: identityMethod as OpenBoxIdentityOptions["identityMethod"],
+    oktaAgentAlgorithm: pick(input.oktaAgentAlgorithm, "OPENBOX_OKTA_AGENT_ALGORITHM"),
+    oktaAgentId: pick(input.oktaAgentId, "OPENBOX_OKTA_AGENT_ID"),
+    oktaAgentKeyId: pick(input.oktaAgentKeyId, "OPENBOX_OKTA_AGENT_KEY_ID"),
+    oktaAgentPrivateKey: pick(input.oktaAgentPrivateKey, "OPENBOX_OKTA_AGENT_PRIVATE_KEY"),
+    organizationId: pick(input.organizationId, "OPENBOX_ORGANIZATION_ID"),
+    workloadPrivateKey: pick(input.workloadPrivateKey, "OPENBOX_WORKLOAD_PRIVATE_KEY")
   };
 }
 
@@ -267,6 +313,7 @@ export async function initializeOpenBox(
 
   if (config.validate) {
     const client = new OpenBoxClient({
+      ...config.identity,
       agentDid: config.agentDid,
       agentPrivateKey: config.agentPrivateKey,
       apiKey: config.apiKey,
