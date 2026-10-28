@@ -49,6 +49,9 @@ These environment variables are read during config parsing:
 | `OPENBOX_API_KEY` | OpenBox API key | required |
 | `OPENBOX_AGENT_DID` | DID assigned to this OpenBox agent | unset |
 | `OPENBOX_AGENT_PRIVATE_KEY` | base64 raw Ed25519 seed returned by OpenBox during registration or rotation | unset |
+| `OPENBOX_WORKLOAD_PRIVATE_KEY` | PKCS8 PEM of the agent's Keycloak service account (IAM v3) | unset |
+| `OPENBOX_OKTA_AGENT_PRIVATE_KEY` | PKCS8 PEM of the linked Okta AI Agent (v2) | unset |
+| `OPENBOX_AGENT_IDENTITY_METHOD` | force `openbox_did`, `okta_ai_agent` or `keycloak_workload` | inferred |
 | `OPENBOX_EVALUATE_MAX_RETRIES` | evaluate retry count | `2` |
 | `OPENBOX_EVALUATE_RETRY_BASE_DELAY_MS` | evaluate retry base delay in milliseconds | `150` |
 | `OPENBOX_GOVERNANCE_TIMEOUT` | OpenBox API timeout in seconds | `30` |
@@ -111,6 +114,22 @@ Parsing rules:
 - the SDK never logs the private key.
 
 The private key is returned only when an agent identity is provisioned or rotated. Store it as a secret and rotate it from OpenBox if it is exposed.
+
+## Workload Identity (IAM v3) and Okta (v2)
+
+Agents created with a workload identity authenticate with their Keycloak service account's PKCS8 PEM private key instead of a DID:
+
+```bash
+export OPENBOX_WORKLOAD_PRIVATE_KEY="$(cat workload-private-key.pem)"
+```
+
+or `workloadPrivateKey` in `withOpenBox(mastra, { ... })`. The base SDK fetches Core's bootstrap document, exchanges a signed assertion for a workload token, caches and refreshes it, and sends `/api/v3/*` requests with `X-OpenBox-Workload-Token`. An Okta AI Agent sets `OPENBOX_OKTA_AGENT_PRIVATE_KEY` (and, for an explicit configuration, `OPENBOX_OKTA_AGENT_ID`, `OPENBOX_OKTA_AGENT_KEY_ID`, `OPENBOX_AGENT_ID`, `OPENBOX_ORGANIZATION_ID`, `OPENBOX_DEPLOYMENT_ID`, `OPENBOX_AGENT_PROOF_AUDIENCE`) and is served on `/api/v2/*`.
+
+Set the credentials for one identity only: configuration parsing refuses a DID together with a workload or Okta key. An authentication or signing rejection is never treated as an outage, whatever `onApiError` says.
+
+## OpenRouter Routing Provenance
+
+When a governed model call goes to `openrouter.ai`, the SDK also reports which upstream provider served it, at what cost, and whether the requested model and provider routing were honoured. The lookup runs after the answer, off its critical path, and the span reaches OpenBox before the run's `WorkflowCompleted`, so it appears on the agent's Provenance tab. Inside a tool or workflow step the span is attached to that activity. In an agent run each OpenRouter model call is recorded as an `llm_call` activity, stamped with the call's own start and end time, that carries its provenance. Set `OPENBOX_OPENROUTER_PROVENANCE=false` to turn it off.
 
 ## Activity Type Matching
 

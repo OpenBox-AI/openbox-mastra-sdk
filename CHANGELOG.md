@@ -5,6 +5,34 @@ All notable changes to `@openbox-ai/openbox-mastra-sdk` are documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-10-28
+
+### Added
+
+- **IAM v3 workload identity and Okta (v2).** `workloadPrivateKey`
+  (`OPENBOX_WORKLOAD_PRIVATE_KEY`), `oktaAgentPrivateKey` and the other Okta
+  fields, and `identityMethod`, on `withOpenBox` / `parseOpenBoxConfig` /
+  `OpenBoxClient`. Core's API version is chosen from the identity; mixed
+  identities are refused at config parse time.
+- **OpenRouter routing provenance.** Governed model calls to `openrouter.ai`
+  report the serving provider, model, cost, token usage and requested-vs-honored
+  routing to the Provenance tab. Inside a tool or workflow step the span is
+  attached to that activity; each model call in an agent run is recorded as an
+  `llm_call` activity carrying it (Core stores spans only on activity events).
+  `OPENBOX_OPENROUTER_PROVENANCE=false` turns it off.
+
+### Changed
+
+- **`OpenBoxClient` sends through the base SDK's client** (`@openbox-ai/openbox-sdk-ts`
+  `^2.2.0`), which owns API-version routing, signing, the workload token exchange
+  and auth-failure handling. Mastra's retry, fail-open policy and debug logging
+  are unchanged. Requests now identify as `openbox-mastra-typescript-v<version>`
+  in `User-Agent` / `X-OpenBox-SDK-Version`.
+- **REQUIRE_APPROVAL on `ActivityCompleted` no longer suspends or waits.** The
+  activity already ran, so approval can no longer gate it: it is logged, and the
+  activity's output is kept — the same behavior as the other OpenBox SDKs.
+  Start-stage approvals are unchanged.
+
 ## [1.0.0] - 2026-07-20
 
 First stable release. Mastra's governance internals now delegate to the shared
