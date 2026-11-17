@@ -78,27 +78,16 @@ By default, this will:
 
 ## Validation And Local Development
 
-For tests, local demos, or mock OpenBox servers, you may want startup without API key validation:
-
-```ts
-await withOpenBox(mastra, {
-  apiKey: "obx_test_local_mock",
-  apiUrl: "http://127.0.0.1:8086",
-  validate: false
-});
-```
-
-Use `validate: false` only when:
-
-- the target server does not implement `/api/v1/auth/validate`
-- you are running against a local mock or fixture server
-- you need deterministic tests without a real auth roundtrip
-
-Do not disable validation in normal production environments unless credential validation is handled elsewhere in your platform.
+Startup authentication is mandatory for `withOpenBox()` and `initializeOpenBox()`.
+Tests and local mock servers must answer the selected `/api/v1/auth/validate`,
+`/api/v2/auth/validate`, or `/api/v3/auth/validate` route; v3 also needs bootstrap
+and token endpoints. Inject `fetch` or a prebuilt `client` for offline fixtures.
+`parseOpenBoxConfig()` itself performs no network calls. The bundled quickstart
+includes a validation endpoint and works without a real Core deployment.
 
 ## Shutdown
 
-Telemetry installed by the SDK is process-wide. Shut it down on process exit or when you intentionally want to tear the integration down:
+Telemetry installed by the SDK is process-wide. Runtime shutdown also closes the client and clears its token cache, including an injected client. Shut it down on process exit or when you intentionally want to tear the integration down:
 
 ```ts
 import { getOpenBoxRuntime } from "@openbox-ai/openbox-mastra-sdk";
@@ -117,7 +106,7 @@ Shutdown:
 Before declaring the integration healthy:
 
 1. Confirm the application can reach `OPENBOX_URL`.
-2. Confirm startup validation succeeds, or `validate: false` is intentionally set.
+2. Confirm startup authentication succeeds before the runtime is installed.
 3. Trigger a governed tool or workflow and verify events appear in OpenBox.
 4. If you are intentionally consuming a local SDK checkout instead of npm, make sure the consuming service is running the rebuilt package output.
 

@@ -127,7 +127,6 @@ describe("setupOpenBoxOpenTelemetry", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_hook_events",
       apiUrl: openBoxServer.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -331,7 +330,6 @@ describe("setupOpenBoxOpenTelemetry", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_hook_events_agent_context",
       apiUrl: openBoxServer.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -438,7 +436,6 @@ describe("setupOpenBoxOpenTelemetry", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_hook_approval",
       apiUrl: openBoxServer.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -542,7 +539,6 @@ describe("setupOpenBoxOpenTelemetry", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_hook_approval_already_granted",
       apiUrl: openBoxServer.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -621,7 +617,6 @@ describe("setupOpenBoxOpenTelemetry", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_hook_events_function",
       apiUrl: openBoxServer.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -745,7 +740,6 @@ describe("setupOpenBoxOpenTelemetry", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_hook_approval_function",
       apiUrl: openBoxServer.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -798,7 +792,6 @@ describe("setupOpenBoxOpenTelemetry", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_hook_events_db",
       apiUrl: openBoxServer.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,

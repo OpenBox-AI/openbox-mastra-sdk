@@ -8,6 +8,7 @@ Symptoms:
 
 - `OpenBoxConfigError`
 - `OpenBoxAuthError`
+- `OpenBoxWorkloadAuthError` (check its sanitized stage and reason code)
 - `OpenBoxInsecureURLError`
 
 Checks:
@@ -17,7 +18,7 @@ Checks:
 3. Verify the API key matches `obx_live_*` or `obx_test_*`.
 4. Verify non-localhost URLs use HTTPS.
 5. If the agent uses DID signing, verify both `OPENBOX_AGENT_DID` and `OPENBOX_AGENT_PRIVATE_KEY` are set.
-6. If using a mock server, set `validate: false`.
+6. If using a mock server, implement the selected auth validation endpoint; IAM v3 also requires bootstrap and token responses. Startup validation cannot be disabled.
 
 ## OpenBox Returns `401 invalid token or agent identity`
 

@@ -5,7 +5,7 @@ import { z } from "zod";
 
 import {
   ApprovalExpiredError,
-  OpenBoxAuthError,
+  GovernanceAPIError,
   OpenBoxClient,
   OpenBoxSpanProcessor,
   parseOpenBoxConfig,
@@ -25,7 +25,6 @@ describe("wrapWorkflow", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_workflow",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -127,7 +126,6 @@ describe("wrapWorkflow", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_workflow",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -263,7 +261,6 @@ describe("wrapWorkflow", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_workflow",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -394,7 +391,6 @@ describe("wrapWorkflow", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_workflow",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -477,14 +473,13 @@ describe("wrapWorkflow", () => {
     const server = await startOpenBoxServer({
       evaluate() {
         // Every evaluation persistently 401s — the client always throws
-        // OpenBoxAuthError for this, regardless of onApiError.
+        // GovernanceAPIError for this, regardless of onApiError.
         return { body: { error: "invalid_api_key" }, statusCode: 401 };
       }
     });
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_workflow_auth_fail_open",
       apiUrl: server.url,
-      validate: false
     });
 
     expect(config.onApiError).toBe("fail_open");
@@ -541,7 +536,7 @@ describe("wrapWorkflow", () => {
           value: "hello"
         }
       })
-    ).rejects.toBeInstanceOf(OpenBoxAuthError);
+    ).rejects.toBeInstanceOf(GovernanceAPIError);
 
     await server.close();
 
@@ -572,7 +567,6 @@ describe("wrapWorkflow", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_workflow_resume_auth_fail_open",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -644,7 +638,7 @@ describe("wrapWorkflow", () => {
         },
         step: "approve-step"
       })
-    ).rejects.toBeInstanceOf(OpenBoxAuthError);
+    ).rejects.toBeInstanceOf(GovernanceAPIError);
 
     await server.close();
 

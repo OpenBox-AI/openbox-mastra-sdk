@@ -28,13 +28,17 @@ API keys must match:
 - `obx_live_*`
 - `obx_test_*`
 
-When `validate` is `true`, startup also verifies the key against OpenBox Core using `/api/v1/auth/validate`.
+Startup always validates the key and configured identity against Core's selected
+`/api/v1`, `/api/v2`, or `/api/v3` auth route. `validate` and `OPENBOX_VALIDATE`
+have been removed; tests should supply a mock auth endpoint.
 
-Use `validate: false` only for:
-
-- tests
-- mock servers
-- deliberately offline local development
+IAM v3 adds a short-lived workload token to the API key. The base SDK handles
+bootstrap, RSA assertions, renewal, and token invalidation. Authentication and
+token-acquisition failures are always fatal at enforcing gates, even under
+`fail_open`, and never cause a protocol downgrade. Internal Core and Keycloak
+traffic bypasses Mastra HTTP capture. Config/client JSON and Node inspection
+redact credentials. Closing the client discards cached tokens and aborts pending
+authentication; it cannot erase strings still held by application configuration.
 
 ## Agent DID Signing
 
@@ -185,7 +189,7 @@ Recommendation:
 ## Production Hardening Checklist
 
 1. Use HTTPS for OpenBox Core.
-2. Keep `validate` enabled in production.
+2. Require successful startup authentication and set an explicit identity method.
 3. Keep OpenBox Core ignored in telemetry capture.
 4. Decide explicitly between `fail_open` and `fail_closed`.
 5. Enable file I/O capture only if you need it.

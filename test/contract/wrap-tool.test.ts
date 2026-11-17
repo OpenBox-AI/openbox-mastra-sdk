@@ -6,7 +6,7 @@ import { z } from "zod";
 import {
   GuardrailsValidationError,
   GovernanceHaltError,
-  OpenBoxAuthError,
+  GovernanceAPIError,
   OpenBoxClient,
   OpenBoxSpanProcessor,
   parseOpenBoxConfig,
@@ -53,6 +53,56 @@ function getHookSpans(
 }
 
 describe("wrapTool", () => {
+  it("sends the tool id unchanged as activity_type when activityTypeFormat is original", async () => {
+    const server = await startOpenBoxServer({
+      evaluate() {
+        return { verdict: "allow" };
+      }
+    });
+    const config = parseOpenBoxConfig({
+      activityTypeFormat: "original",
+      apiKey: "obx_test_contract",
+      apiUrl: server.url
+    });
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+    const tool = createTool({
+      description: "Send money",
+      id: "transfer_funds",
+      inputSchema: z.object({ amount: z.number() }),
+      outputSchema: z.object({ ok: z.boolean() }),
+      async execute() {
+        return { ok: true };
+      }
+    });
+    const wrapped = wrapTool(tool, { client, config, spanProcessor: new OpenBoxSpanProcessor() });
+
+    await wrapped.execute?.(
+      { amount: 1 },
+      {
+        workflow: {
+          runId: "run-original",
+          setState: vi.fn(),
+          state: {},
+          suspend: vi.fn(async () => undefined),
+          workflowId: "wf-original"
+        }
+      }
+    );
+    await server.close();
+
+    const started = server.requests
+      .filter(request => request.pathname === "/api/v1/governance/evaluate")
+      .map(request => request.body)
+      .find(body => body.event_type === "ActivityStarted");
+
+    expect(started).toMatchObject({ activity_type: "transfer_funds" });
+  });
+
   it("sends activity events and applies guardrail redaction before and after execution", async () => {
     const server = await startOpenBoxServer({
       evaluate(body) {
@@ -91,7 +141,6 @@ describe("wrapTool", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_contract",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -199,7 +248,6 @@ describe("wrapTool", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_contract",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -264,6 +312,67 @@ describe("wrapTool", () => {
     });
   });
 
+  it("keeps the output and does not suspend when approval is required only after the tool ran", async () => {
+    const server = await startOpenBoxServer({
+      evaluate(body) {
+        if (body.event_type === "ActivityCompleted") {
+          return { reason: "Review refunds after they run", verdict: "require_approval" };
+        }
+
+        return { verdict: "allow" };
+      }
+    });
+
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_test_contract",
+      apiUrl: server.url
+    });
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+    const execute = vi.fn(async () => ({ result: "refunded" }));
+    const suspend = vi.fn(async () => undefined);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const tool = createTool({
+      description: "Refund an order",
+      id: "refund-order",
+      inputSchema: z.object({ id: z.string() }),
+      outputSchema: z.object({ result: z.string() }),
+      execute
+    });
+    const wrapped = wrapTool(tool, {
+      client,
+      config,
+      spanProcessor: new OpenBoxSpanProcessor()
+    });
+
+    const result = await wrapped.execute?.(
+      { id: "ord-1" },
+      {
+        workflow: {
+          runId: "run-after",
+          setState: vi.fn(),
+          state: {},
+          suspend,
+          workflowId: "wf-after"
+        }
+      }
+    );
+
+    await server.close();
+    const warnings = warn.mock.calls.map(call => String(call[0]));
+    warn.mockRestore();
+
+    // The tool already ran: approval can no longer gate it, so nothing waits.
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({ result: "refunded" });
+    expect(suspend).not.toHaveBeenCalled();
+    expect(warnings.some(line => line.includes("after activity") && line.includes("Review refunds"))).toBe(true);
+  });
+
   it("requests approval only once when both activity start and completion require approval", async () => {
     let approvalCalls = 0;
 
@@ -290,7 +399,6 @@ describe("wrapTool", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_contract",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -361,7 +469,6 @@ describe("wrapTool", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_contract",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -445,7 +552,6 @@ describe("wrapTool", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_hook_approval_suspend",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -557,7 +663,6 @@ describe("wrapTool", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_hook_halt",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -641,7 +746,6 @@ describe("wrapTool", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_hook_activity_ids",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -754,7 +858,6 @@ describe("wrapTool", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_contract",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -813,7 +916,7 @@ describe("wrapTool", () => {
     const server = await startOpenBoxServer({
       evaluate() {
         // Every ActivityStarted evaluation persistently 401s — the client
-        // always throws OpenBoxAuthError for this, regardless of onApiError.
+        // always throws GovernanceAPIError for this, regardless of onApiError.
         return { body: { error: "invalid_api_key" }, statusCode: 401 };
       }
     });
@@ -821,7 +924,6 @@ describe("wrapTool", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_tool_auth_fail_open",
       apiUrl: server.url,
-      validate: false
     });
 
     expect(config.onApiError).toBe("fail_open");
@@ -864,7 +966,7 @@ describe("wrapTool", () => {
           }
         }
       )
-    ).rejects.toBeInstanceOf(OpenBoxAuthError);
+    ).rejects.toBeInstanceOf(GovernanceAPIError);
 
     await server.close();
 
@@ -886,7 +988,6 @@ describe("wrapTool", () => {
       apiKey: "obx_test_tool_auth_fail_closed",
       apiUrl: server.url,
       onApiError: "fail_closed",
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -925,7 +1026,7 @@ describe("wrapTool", () => {
           }
         }
       )
-    ).rejects.toBeInstanceOf(OpenBoxAuthError);
+    ).rejects.toBeInstanceOf(GovernanceAPIError);
 
     await server.close();
 
@@ -946,7 +1047,6 @@ describe("wrapTool", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_tool_completed_auth_error",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,

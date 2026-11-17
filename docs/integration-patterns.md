@@ -77,16 +77,8 @@ const config = parseOpenBoxConfig({
   apiUrl: process.env.OPENBOX_URL
 });
 
-const client = new OpenBoxClient({
-  agentDid: config.agentDid,
-  agentPrivateKey: config.agentPrivateKey,
-  apiKey: config.apiKey,
-  apiUrl: config.apiUrl,
-  evaluateMaxRetries: config.evaluateMaxRetries,
-  evaluateRetryBaseDelayMs: config.evaluateRetryBaseDelayMs,
-  onApiError: config.onApiError,
-  timeoutSeconds: config.governanceTimeout
-});
+const client = OpenBoxClient.fromConfig(config);
+await client.validateApiKey();
 
 const spanProcessor = new OpenBoxSpanProcessor({
   ignoredUrlPrefixes: [config.apiUrl]
@@ -120,6 +112,7 @@ const governedAgent = wrapAgent(agent, {
 });
 
 await telemetry.shutdown();
+client.close();
 ```
 
 Use this pattern when:
@@ -169,6 +162,7 @@ const governedFn = traced(
 );
 
 await telemetry.shutdown();
+client.close();
 ```
 
 This pattern is useful when:

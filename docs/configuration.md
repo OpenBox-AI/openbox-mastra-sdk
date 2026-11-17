@@ -7,8 +7,14 @@ This document covers runtime options, environment variables, parsing rules, defa
 Configuration is resolved in this order:
 
 1. explicit options passed to `withOpenBox()` or `parseOpenBoxConfig()`
-2. environment variables
-3. SDK defaults for optional fields
+2. SDK-specific `OPENBOX_MASTRA_*` variables for API URL, API key, and identity fields
+3. global `OPENBOX_*` variables
+4. SDK defaults for optional fields
+
+Blank environment values count as unset. `envPrefix` can replace `OPENBOX_MASTRA`.
+For URLs, `OPENBOX_URL` remains a global alias ahead of `OPENBOX_API_URL`; both
+are below the SDK-specific `OPENBOX_MASTRA_API_URL`. Mastra behavior settings
+such as retries and capture continue to use the global variables listed below.
 
 `apiUrl` and `apiKey` are always required from either code or environment.
 
@@ -31,13 +37,21 @@ The SDK parses configuration through `parseOpenBoxConfig()` and `withOpenBox()`.
 | `instrumentFileIo` | `boolean` | `false` | enable file operation telemetry |
 | `maxEvaluatePayloadBytes` | `number` | `256000` | cap payload size before compact fallback logic applies |
 | `onApiError` | `"fail_open" \| "fail_closed"` | `"fail_open"` | decide whether OpenBox outages should halt execution |
+| `activityTypeFormat` | `"camelCase" \| "original"` | `"camelCase"` | choose how a tool or step id becomes `activity_type`, the field policies match on (see below) |
 | `sendActivityStartEvent` | `boolean` | `true` | emit `ActivityStarted` |
 | `sendStartEvent` | `boolean` | `true` | emit `WorkflowStarted` |
 | `skipActivityTypes` | `Iterable<string>` | `["send_governance_event"]` | suppress matching activity types entirely |
 | `skipHitlActivityTypes` | `Iterable<string>` | `["send_governance_event"]` | retained for compatibility but not currently enforced by wrappers |
 | `skipSignals` | `Iterable<string>` | `[]` | suppress matching signal names |
 | `skipWorkflowTypes` | `Iterable<string>` | `[]` | suppress matching workflow or agent workflow types |
-| `validate` | `boolean` | `true` | validate the API key at startup |
+| `envPrefix` | `string` | `OPENBOX_MASTRA` | choose the connection/identity environment prefix |
+| `identityMethod` | `AgentIdentityMethod` | inferred | select `openbox_did`, `okta_ai_agent`, or `keycloak_workload` |
+| `workloadPrivateKey` | `string \| null` | unset | PKCS8 PEM RSA private key of the active workload service account |
+| `agentId`, `organizationId`, `deploymentId` | `string` | unset | explicit Okta v2 identity bindings |
+| `agentProofAudience` | `string` | unset | Okta proof audience, `urn:openbox:<deployment-id>:core` |
+| `oktaAgentId`, `oktaAgentKeyId` | `string` | unset | Okta external agent ID and credential key ID |
+| `oktaAgentPrivateKey` | `string` | unset | PKCS8 PEM RSA key for explicit Okta identity or v2 bootstrap |
+| `oktaAgentAlgorithm` | `string` | unset | explicit Okta algorithm (`RS256`) |
 
 ## Environment Variables
 
@@ -51,20 +65,27 @@ These environment variables are read during config parsing:
 | `OPENBOX_AGENT_PRIVATE_KEY` | base64 raw Ed25519 seed returned by OpenBox during registration or rotation | unset |
 | `OPENBOX_EVALUATE_MAX_RETRIES` | evaluate retry count | `2` |
 | `OPENBOX_EVALUATE_RETRY_BASE_DELAY_MS` | evaluate retry base delay in milliseconds | `150` |
-| `OPENBOX_GOVERNANCE_TIMEOUT` | OpenBox API timeout in seconds | `30` |
+| `OPENBOX_GOVERNANCE_TIMEOUT` | OpenBox API timeout in seconds; when unset, the base SDK's `OPENBOX_MASTRA_TIMEOUT_SECONDS` / `OPENBOX_TIMEOUT_SECONDS` apply | `30` |
 | `OPENBOX_HITL_ENABLED` | enable approval handling | `true` |
 | `OPENBOX_HTTP_CAPTURE` | capture text HTTP bodies and headers | `true` |
 | `OPENBOX_INSTRUMENT_DATABASES` | enable supported database instrumentation | `true` |
 | `OPENBOX_INSTRUMENT_FILE_IO` | enable file instrumentation | `false` |
 | `OPENBOX_MAX_EVALUATE_PAYLOAD_BYTES` | payload budget before compaction | `256000` |
-| `OPENBOX_GOVERNANCE_POLICY` | API failure policy: `fail_open` or `fail_closed` | `"fail_open"` |
+| `OPENBOX_GOVERNANCE_POLICY` | API failure policy: `fail_open` or `fail_closed`; when unset, the base SDK's `OPENBOX_MASTRA_ON_API_ERROR` / `OPENBOX_ON_API_ERROR` apply (`fail_closed_destructive` is treated as `fail_closed`) | `"fail_open"` |
+| `OPENBOX_ACTIVITY_TYPE_FORMAT` | `camelCase` or `original` (see "Activity types and policies") | `camelCase` |
 | `OPENBOX_SEND_ACTIVITY_START_EVENT` | emit `ActivityStarted` | `true` |
 | `OPENBOX_SEND_START_EVENT` | emit `WorkflowStarted` | `true` |
 | `OPENBOX_SKIP_ACTIVITY_TYPES` | comma-separated list of skipped activity types | `send_governance_event` |
 | `OPENBOX_SKIP_HITL_ACTIVITY_TYPES` | compatibility field for skipped approval activity types | `send_governance_event` |
 | `OPENBOX_SKIP_SIGNALS` | comma-separated list of skipped signals | empty |
 | `OPENBOX_SKIP_WORKFLOW_TYPES` | comma-separated list of skipped workflow types | empty |
-| `OPENBOX_VALIDATE` | validate the API key at startup | `true` |
+| `OPENBOX_API_URL` | standard Core URL (fallback after `OPENBOX_URL`) | required unless another URL is set |
+| `OPENBOX_AGENT_IDENTITY_METHOD` | explicit identity method | inferred |
+| `OPENBOX_WORKLOAD_PRIVATE_KEY` | PKCS8 PEM RSA workload key | unset |
+| `OPENBOX_AGENT_ID`, `OPENBOX_ORGANIZATION_ID`, `OPENBOX_DEPLOYMENT_ID` | explicit Okta bindings | unset |
+| `OPENBOX_AGENT_PROOF_AUDIENCE` | explicit Okta proof audience | unset |
+| `OPENBOX_OKTA_AGENT_ID`, `OPENBOX_OKTA_AGENT_KEY_ID` | Okta external ID and key ID | unset |
+| `OPENBOX_OKTA_AGENT_PRIVATE_KEY`, `OPENBOX_OKTA_AGENT_ALGORITHM` | Okta signing configuration | unset |
 
 Additional runtime flags used outside config parsing:
 
@@ -72,6 +93,23 @@ Additional runtime flags used outside config parsing:
 | --- | --- |
 | `OPENBOX_DEBUG` | enable summarized debug logs for evaluate requests, retries, and approval polling |
 | `OPENBOX_AGENT_GOAL` | override the inferred agent goal included in agent payloads |
+
+## Activity types and policies
+
+Policies match a tool or workflow step on `activity_type`. By default the SDK
+sends the id in camelCase: a tool with id `transfer_funds` arrives as
+`transferFunds`, and a step `prepare-transfer-step` as `prepareTransferStep`.
+Write policy conditions against that form, which is also what the dashboard
+shows. Set `activityTypeFormat: "original"` (or
+`OPENBOX_ACTIVITY_TYPE_FORMAT=original`) to send ids unchanged; existing
+policies written against the camelCase form then stop matching, so update them
+in the same change.
+
+When `hitlEnabled` is on (the default), `ActivityCompleted` is sent without
+`activity_type`. That stops a REQUIRE_APPROVAL rule written for a tool from
+firing a second time after the approved tool has run, so rules keyed on
+`activity_type` gate tools on `ActivityStarted` only. Set `hitlEnabled: false`
+if completion events must carry `activity_type`.
 
 ## Parsing Rules
 
@@ -87,6 +125,28 @@ Example:
 ```bash
 export OPENBOX_SKIP_ACTIVITY_TYPES="send_governance_event, healthCheck"
 ```
+
+## IAM v3 and identity selection
+
+`identityMethod: "keycloak_workload"` requires a workload key; it never silently
+creates an unsigned client when that key is missing. A workload key alone also
+selects v3. Core supplies the token endpoint, issuer, audience, service account,
+activation version, identity source, and key ID. The SDK acquires and caches the
+short-lived token, shares acquisition across concurrent requests, and renews it
+before expiry. No token or private key is included in config/client JSON or
+Node inspection, and internal auth traffic bypasses telemetry capture.
+
+DID, Okta, and workload inputs are mutually exclusive. For an Okta-sourced agent
+migrating to workload auth, `oktaAgentPrivateKey` is accepted as the workload key
+only with explicit `identityMethod: "keycloak_workload"`. Without that override,
+an Okta key alone selects `/api/v2/auth/bootstrap`; it never becomes unsigned v1.
+Explicit Okta metadata uses `/api/v2/*` and the base SDK's signed assertion.
+
+`withOpenBox()` and `initializeOpenBox()` always authenticate against Core before
+returning. In v3 this includes initial token acquisition. `validate` and
+`OPENBOX_VALIDATE` no longer bypass startup. `parseOpenBoxConfig()` remains an
+offline parser. An injected `client` supplies its own resolved identity and
+connection options, while Mastra event/capture settings still come from config.
 
 ## Agent DID Identity
 
@@ -141,7 +201,12 @@ If you skip `agent_output`, you also suppress the main signal path used for agen
 
 ## `onApiError`
 
-`onApiError` controls how the SDK reacts when OpenBox cannot be reached.
+`onApiError` controls ordinary Core network/5xx outages. Authentication and
+workload-acquisition errors always throw at enforcing gates, including approval
+polling, under either policy. A rejected workload request is never replayed; its
+token is invalidated and the next operation must acquire a fresh one. v3
+redirects and non-retryable 4xx contract errors also always throw. Completion
+telemetry remains best effort and cannot reopen a blocked gate.
 
 ### `fail_open`
 
@@ -198,7 +263,7 @@ If you call `setupOpenBoxOpenTelemetry()` directly, these options apply:
 
 | Setting | Recommended value | Why |
 | --- | --- | --- |
-| `validate` | `true` | catch invalid credentials or insecure URLs during startup |
+| `identityMethod` | explicit per agent | fail early when its required key is missing |
 | `onApiError` | explicit per environment | avoid accidental fail-open or fail-closed behavior |
 | `httpCapture` | `true` unless payload sensitivity is prohibitive | preserve request context for policy and troubleshooting |
 | `instrumentDatabases` | `true` | low-friction visibility into database access |
@@ -238,7 +303,6 @@ await withOpenBox(mastra, {
   sendActivityStartEvent: true,
   skipActivityTypes: ["send_governance_event"],
   skipSignals: [],
-  skipWorkflowTypes: [],
-  validate: true
+  skipWorkflowTypes: []
 });
 ```

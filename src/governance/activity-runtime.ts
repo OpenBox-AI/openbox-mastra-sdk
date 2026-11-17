@@ -69,7 +69,84 @@ export interface GovernedActivityOptions<TInput, TOutput> {
   type: string;
 }
 
-export async function executeGovernedActivity<TInput, TOutput>({
+export async function executeGovernedActivity<TInput, TOutput>(
+  options: GovernedActivityOptions<TInput, TOutput>
+): Promise<TOutput | undefined> {
+  const { dependencies, runtimeContext, type } = options;
+
+  if (!isStandaloneToolCall(runtimeContext)) {
+    return executeGovernedActivityInRun(options);
+  }
+
+  // A tool called directly, outside any workflow or agent run, has no run of
+  // its own. Core opens a session on WorkflowStarted and rejects activity
+  // events for a run it has no session for (SessionNotReady), so open and
+  // close a run around the call, as the workflow and agent wrappers do.
+  const workflowId = `tool:${type}`;
+  const runContext = {
+    runId: runtimeContext.agent?.toolCallId ?? randomUUID(),
+    source: "tool" as const,
+    taskQueue: "mastra",
+    workflowId,
+    workflowType: workflowId
+  };
+  const runFields = {
+    run_id: runContext.runId,
+    task_queue: runContext.taskQueue,
+    workflow_id: runContext.workflowId,
+    workflow_type: runContext.workflowType
+  };
+
+  if (dependencies.config.sendStartEvent) {
+    const startVerdict = await evaluateActivityEvent(
+      dependencies,
+      { event_type: WorkflowEventType.WORKFLOW_STARTED, ...runFields },
+      true
+    );
+
+    if (startVerdict && Verdict.shouldStop(startVerdict.verdict)) {
+      throw new GovernanceHaltError(
+        startVerdict.reason ?? "Tool blocked by governance"
+      );
+    }
+  }
+
+  let output: TOutput | undefined;
+
+  try {
+    output = await runWithOpenBoxExecutionContext(runContext, () =>
+      executeGovernedActivityInRun(options)
+    );
+  } catch (error) {
+    await evaluateActivityEvent(dependencies, {
+      error: serializeError(error),
+      event_type: WorkflowEventType.WORKFLOW_FAILED,
+      ...runFields
+    });
+    throw error;
+  }
+
+  await evaluateActivityEvent(dependencies, {
+    event_type: WorkflowEventType.WORKFLOW_COMPLETED,
+    workflow_output: serializeValue(output),
+    ...runFields
+  });
+
+  return output;
+}
+
+function isStandaloneToolCall(runtimeContext: ToolExecutionContextLike): boolean {
+  const activeContext = getOpenBoxExecutionContext();
+
+  return !(
+    runtimeContext.workflow?.workflowId ??
+    runtimeContext.workflow?.runId ??
+    activeContext?.workflowId ??
+    activeContext?.runId
+  );
+}
+
+async function executeGovernedActivityInRun<TInput, TOutput>({
   dependencies,
   execute,
   input,
@@ -77,7 +154,11 @@ export async function executeGovernedActivity<TInput, TOutput>({
   runtimeContext,
   type
 }: GovernedActivityOptions<TInput, TOutput>): Promise<TOutput | undefined> {
-  const descriptor = resolveActivityDescriptor(type, runtimeContext);
+  const descriptor = resolveActivityDescriptor(
+    type,
+    runtimeContext,
+    dependencies.config.activityTypeFormat
+  );
   const multiAgentSessionId = resolveOpenBoxMultiAgentSessionId(
     dependencies.config,
     {
@@ -339,48 +420,20 @@ export async function executeGovernedActivity<TInput, TOutput>({
             }
 
             if (
-              dependencies.config.hitlEnabled &&
               Verdict.requiresApproval(completedVerdict?.verdict ?? Verdict.ALLOW) &&
               !alreadyApproved &&
               !isActivityApproved(descriptor.runId, descriptor.activityId)
             ) {
-              const approvalPayload = {
-                openbox: {
-                  activityId: descriptor.activityId,
-                  activityType: descriptor.activityType,
-                  approvalId: completedVerdict?.approvalId,
-                  reason: completedVerdict?.reason,
-                  requestedAt: rfc3339Now(),
-                  runId: descriptor.runId,
-                  workflowId: descriptor.workflowId,
-                  workflowType: descriptor.workflowType
-                }
-              };
-
-              setPendingApproval({
-                activityId: descriptor.activityId,
-                activityType: descriptor.activityType,
-                approvalId: completedVerdict?.approvalId,
-                requestedAt: approvalPayload.openbox.requestedAt,
-                runId: descriptor.runId,
-                workflowId: descriptor.workflowId,
-                workflowType: descriptor.workflowType
-              });
-
-              const workflowSuspend = runtimeContext.workflow?.suspend;
-
-              if (workflowSuspend) {
-                output = (await workflowSuspend(approvalPayload)) as
-                  | TOutput
-                  | undefined;
-              } else {
-                await waitForApprovalInline(
-                  dependencies.client,
-                  descriptor,
-                  completedVerdict?.reason ??
-                    "Activity output requires human approval"
-                );
-              }
+              // The activity already ran: an approval can no longer gate it,
+              // and waiting (suspending the workflow, or polling inline) only
+              // stalls the run until someone approves by hand. Log it and keep
+              // the output — the same behavior as the other OpenBox SDKs.
+              console.warn(
+                `[openbox-sdk] REQUIRE_APPROVAL returned after activity ${descriptor.activityType} ` +
+                  "completed; continuing without waiting. Match the rule on ActivityStarted to " +
+                  "gate the activity." +
+                  (completedVerdict?.reason ? ` Reason: ${completedVerdict.reason}` : "")
+              );
             }
           }
 
@@ -663,7 +716,8 @@ function rfc3339Now(): string {
 
 function resolveActivityDescriptor(
   type: string,
-  runtimeContext: ToolExecutionContextLike
+  runtimeContext: ToolExecutionContextLike,
+  activityTypeFormat: OpenBoxConfig["activityTypeFormat"] = "camelCase"
 ): {
   activityId: string;
   activityType: string;
@@ -674,7 +728,8 @@ function resolveActivityDescriptor(
   workflowId: string;
   workflowType: string;
 } {
-  const normalizedType = normalizeActivityType(type);
+  const normalizedType =
+    activityTypeFormat === "original" ? type.trim() || "activity" : normalizeActivityType(type);
   const activeContext = getOpenBoxExecutionContext();
   const runId =
     runtimeContext.workflow?.runId ??

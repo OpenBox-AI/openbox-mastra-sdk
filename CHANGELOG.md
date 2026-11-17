@@ -5,6 +5,66 @@ All notable changes to `@openbox-ai/openbox-mastra-sdk` are documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-11-17
+
+### Breaking
+
+- `new OpenBoxClient()` now validates its options through the base SDK. A
+  malformed API key raises `OpenBoxAuthError`, and a non-HTTPS `apiUrl` raises
+  `OpenBoxInsecureURLError`, at construction time rather than on first use.
+- Secret config fields (`apiKey` and private keys) are non-enumerable, so a copy
+  of the config (`{ ...config }`) and any log of that copy no longer carry
+  them. Read them as properties (`config.apiKey`) when you need them.
+- Remove `validate` and `OPENBOX_VALIDATE`. `withOpenBox()` and
+  `initializeOpenBox()` now always authenticate before returning; mock Core
+  servers must implement authentication.
+- Delegate runtime authentication and errors to base SDK `^2.1.0`.
+  Unsigned runtime auth rejections now raise `GovernanceAPIError`; signed and
+  workload errors retain their specialized base SDK types. Approval auth
+  failures throw instead of being returned as a pending `null` response.
+- Use base SDK headers branded `openbox-mastra-typescript-v<version>`.
+  Runtime shutdown closes injected clients as well as owned clients.
+
+### Added
+
+- IAM v3 `keycloak_workload` identity, `workloadPrivateKey`, and Okta v2 options,
+  with explicit / `OPENBOX_MASTRA_*` / global environment precedence and blank
+  environment fallback. `OPENBOX_URL` remains supported.
+- One base client and token cache for startup, gates, approvals, hooks, and
+  telemetry; metadata, refresh, transition-proof, and close helpers.
+- `OpenBoxWorkloadAuthError` and related public identity/workload types.
+- `activityTypeFormat` / `OPENBOX_ACTIVITY_TYPE_FORMAT` (`camelCase` default,
+  or `original`) to send tool and step ids unchanged as `activity_type`. See
+  "Activity types and policies" in `docs/configuration.md`.
+
+### Fixed
+
+- The base SDK's `OPENBOX_MASTRA_ON_API_ERROR` / `OPENBOX_ON_API_ERROR` and
+  `*_TIMEOUT_SECONDS` variables now apply when Mastra's own
+  `OPENBOX_GOVERNANCE_POLICY` / `OPENBOX_GOVERNANCE_TIMEOUT` are unset. Before,
+  Mastra always passed its own defaults, so `OPENBOX_ON_API_ERROR=fail_closed`
+  was silently ignored.
+
+- A REQUIRE_APPROVAL on `ActivityCompleted` no longer suspends the workflow or
+  waits inline. The tool already ran, so the request is logged and its output
+  kept, matching the other OpenBox SDKs. Start-stage approvals are unchanged.
+- An HTTP 413 from Core now triggers the smaller-payload retry again, including
+  under `fail_closed`.
+- The client is closed if telemetry setup fails after authentication succeeds.
+- A tool called outside any workflow or agent run now opens and closes a run
+  of its own (`WorkflowStarted` / `WorkflowCompleted` or `WorkflowFailed` on
+  `tool:<id>`). Core rejects activity events for a run with no session
+  (`SessionNotReady`), so these calls were failing open without governance.
+
+### Security
+
+- Fail closed at instrumentation gates on authentication/contract errors under
+  `fail_open`; workload authentication never downgrades or replays a rejection.
+- Exclude internal Core/Keycloak HTTP traffic from capture and recursion, and
+  redact credentials in config/client JSON and Node inspection.
+- Update OpenTelemetry and locked dependencies to patched releases, and move
+  the test runner to Vitest 4 to remove the vulnerable Tinypool dependency.
+
 ## [1.0.0] - 2026-07-20
 
 First stable release. Mastra's governance internals now delegate to the shared
@@ -116,6 +176,7 @@ Initial release — the OpenBox governance and observability SDK for Mastra.
   activity input shape.
 - Production hardening for long-running sessions.
 
+[2.0.0]: https://github.com/OpenBox-AI/openbox-mastra-sdk/compare/1.0.0...v2.0.0
 [1.0.0]: https://github.com/OpenBox-AI/openbox-mastra-sdk/compare/0.2.1...1.0.0
 [0.2.1]: https://github.com/OpenBox-AI/openbox-mastra-sdk/compare/0.2.0...0.2.1
 [0.2.0]: https://github.com/OpenBox-AI/openbox-mastra-sdk/compare/v0.1.0...0.2.0

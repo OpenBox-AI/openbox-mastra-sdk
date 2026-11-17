@@ -4,7 +4,6 @@ import { OpenBoxClient } from "../client/index.js";
 import {
   parseOpenBoxConfig,
   setOpenBoxConfig,
-  type OpenBoxConfig,
   type OpenBoxConfigInput
 } from "../config/index.js";
 import { setupOpenBoxOpenTelemetry, type OpenBoxTelemetryController } from "../otel/index.js";
@@ -92,13 +91,16 @@ export function getOpenBoxRuntime(target: unknown): OpenBoxRuntime | undefined {
 }
 
 async function createRuntime(options: WithOpenBoxOptions): Promise<OpenBoxRuntime> {
-  const config = parseOpenBoxConfig(options);
+  const config = parseOpenBoxConfig(options, process.env, options.client?.config);
   const client =
     options.client ??
-    new OpenBoxClient(buildClientOptions(config, options.fetch));
+    OpenBoxClient.fromConfig(config, options.fetch ? { fetch: options.fetch } : {});
 
-  if (config.validate) {
+  try {
     await client.validateApiKey();
+  } catch (error) {
+    client.close();
+    throw error;
   }
 
   setOpenBoxConfig(config);
@@ -109,17 +111,24 @@ async function createRuntime(options: WithOpenBoxOptions): Promise<OpenBoxRuntim
     new OpenBoxSpanProcessor({
       ignoredUrlPrefixes: ignoredUrls
     });
-  const telemetry = setupOpenBoxOpenTelemetry({
-    captureHttpBodies: config.httpCapture,
-    dbLibraries: options.dbLibraries,
-    fileSkipPatterns: options.fileSkipPatterns,
-    governanceClient: client,
-    ignoredUrls,
-    instrumentDatabases: config.instrumentDatabases,
-    instrumentFileIo: config.instrumentFileIo,
-    onHookApiError: config.onApiError,
-    spanProcessor
-  });
+  let telemetry: OpenBoxTelemetryController;
+
+  try {
+    telemetry = setupOpenBoxOpenTelemetry({
+      captureHttpBodies: config.httpCapture,
+      dbLibraries: options.dbLibraries,
+      fileSkipPatterns: options.fileSkipPatterns,
+      governanceClient: client,
+      ignoredUrls,
+      instrumentDatabases: config.instrumentDatabases,
+      instrumentFileIo: config.instrumentFileIo,
+      onHookApiError: config.onApiError,
+      spanProcessor
+    });
+  } catch (error) {
+    client.close();
+    throw error;
+  }
   let shutdownComplete = false;
 
   return {
@@ -131,7 +140,11 @@ async function createRuntime(options: WithOpenBoxOptions): Promise<OpenBoxRuntim
       }
 
       shutdownComplete = true;
-      await telemetry.shutdown();
+      try {
+        await telemetry.shutdown();
+      } finally {
+        client.close();
+      }
     },
     spanProcessor,
     telemetry
@@ -364,23 +377,6 @@ function looksLikeMastra(value: unknown): value is GovernableMastra {
     typeof candidate.listTools === "function" &&
     typeof candidate.listWorkflows === "function"
   );
-}
-
-function buildClientOptions(
-  config: OpenBoxConfig,
-  customFetch?: typeof fetch
-): ConstructorParameters<typeof OpenBoxClient>[0] {
-  return {
-    ...(customFetch ? { fetch: customFetch } : {}),
-    agentDid: config.agentDid,
-    agentPrivateKey: config.agentPrivateKey,
-    apiKey: config.apiKey,
-    apiUrl: config.apiUrl,
-    evaluateMaxRetries: config.evaluateMaxRetries,
-    evaluateRetryBaseDelayMs: config.evaluateRetryBaseDelayMs,
-    onApiError: config.onApiError,
-    timeoutSeconds: config.governanceTimeout
-  };
 }
 
 function isPromise<T>(value: T | Promise<T>): value is Promise<T> {

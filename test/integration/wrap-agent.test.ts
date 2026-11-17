@@ -7,7 +7,7 @@ import { trace } from "@opentelemetry/api";
 import { z } from "zod";
 
 import {
-  OpenBoxAuthError,
+  GovernanceAPIError,
   OpenBoxClient,
   OpenBoxSpanProcessor,
   WorkflowSpanBuffer,
@@ -28,7 +28,6 @@ describe("wrapAgent", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_agent",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -134,7 +133,6 @@ describe("wrapAgent", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_agent_signal_prompt",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -218,7 +216,6 @@ describe("wrapAgent", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_agent_signal_json_prompt",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -294,7 +291,6 @@ describe("wrapAgent", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_agent_output_signal_spans",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -472,7 +468,6 @@ describe("wrapAgent", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_agent_http_hook_signal_only",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -607,7 +602,6 @@ describe("wrapAgent", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_agent_goal_from_prompt",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -722,7 +716,6 @@ describe("wrapAgent", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_agent",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -882,7 +875,6 @@ describe("wrapAgent", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_agent",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -1014,7 +1006,6 @@ describe("wrapAgent", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_agent",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -1117,7 +1108,6 @@ describe("wrapAgent", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_agent_usage_no_model",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -1231,7 +1221,6 @@ describe("wrapAgent", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_agent_model_no_usage",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -1346,7 +1335,6 @@ describe("wrapAgent", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_agent",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -1435,7 +1423,6 @@ describe("wrapAgent", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_agent",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -1520,7 +1507,6 @@ describe("wrapAgent", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_agent",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -1601,7 +1587,6 @@ describe("wrapAgent", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_agent_runtime_model_fallback",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -1685,7 +1670,6 @@ describe("wrapAgent", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_agent_span_model_preference",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -1792,7 +1776,6 @@ describe("wrapAgent", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_agent",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -1896,7 +1879,6 @@ describe("wrapAgent", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_agent",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -1988,7 +1970,6 @@ describe("wrapAgent", () => {
       apiKey: "obx_test_agent",
       apiUrl: server.url,
       onApiError: "fail_closed",
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -2092,7 +2073,6 @@ describe("wrapAgent", () => {
       apiKey: "obx_test_agent",
       apiUrl: server.url,
       onApiError: "fail_closed",
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -2167,7 +2147,6 @@ describe("wrapAgent", () => {
       {
         apiKey: "obx_test_agent",
         apiUrl: server.url,
-        validate: false
       },
       {
         OPENBOX_MAX_EVALUATE_PAYLOAD_BYTES: "300"
@@ -2240,7 +2219,6 @@ describe("wrapAgent", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_agent",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -2341,7 +2319,6 @@ describe("wrapAgent", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_agent",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -2402,7 +2379,6 @@ describe("wrapAgent", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_agent",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -2491,7 +2467,6 @@ describe("wrapAgent", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_agent",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -2572,7 +2547,6 @@ describe("wrapAgent", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_agent",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -2662,7 +2636,6 @@ describe("wrapAgent", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_agent",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -2729,7 +2702,6 @@ describe("wrapAgent", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_agent_auth_fail_open",
       apiUrl: server.url,
-      validate: false
     });
 
     expect(config.onApiError).toBe("fail_open");
@@ -2761,7 +2733,7 @@ describe("wrapAgent", () => {
 
     await expect(
       agent.generate("hello", { runId: "agent-auth-fail-open-run" })
-    ).rejects.toBeInstanceOf(OpenBoxAuthError);
+    ).rejects.toBeInstanceOf(GovernanceAPIError);
 
     await server.close();
 
@@ -2778,7 +2750,6 @@ describe("wrapAgent", () => {
       apiKey: "obx_test_agent_auth_fail_closed",
       apiUrl: server.url,
       onApiError: "fail_closed",
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,
@@ -2807,7 +2778,7 @@ describe("wrapAgent", () => {
 
     await expect(
       agent.generate("hello", { runId: "agent-auth-fail-closed-run" })
-    ).rejects.toBeInstanceOf(OpenBoxAuthError);
+    ).rejects.toBeInstanceOf(GovernanceAPIError);
 
     await server.close();
 
@@ -2827,7 +2798,6 @@ describe("wrapAgent", () => {
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_agent_completed_auth_error",
       apiUrl: server.url,
-      validate: false
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,

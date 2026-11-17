@@ -90,7 +90,6 @@ describe("withOpenBox", () => {
     const governed = await withOpenBox(mastra, {
       apiKey: "obx_test_with_openbox",
       apiUrl: server.url,
-      validate: false
     });
     const runtime = getOpenBoxRuntime(governed);
 
@@ -166,7 +165,6 @@ describe("withOpenBox", () => {
     const governed = await withOpenBox(mastra, {
       apiKey: "obx_test_with_openbox",
       apiUrl: server.url,
-      validate: false
     });
     const runtime = getOpenBoxRuntime(governed);
 
@@ -313,8 +311,11 @@ describe("withOpenBox", () => {
       "ActivityStarted",
       "ActivityCompleted",
       "WorkflowCompleted",
+      // An agent tool called outside an agent run gets a run of its own.
+      "WorkflowStarted",
       "ActivityStarted",
       "ActivityCompleted",
+      "WorkflowCompleted",
       "WorkflowStarted",
       "SignalReceived",
       "SignalReceived",
@@ -339,7 +340,6 @@ describe("withOpenBox", () => {
     const governedApp = await withOpenBox(app, {
       apiKey: "obx_test_with_openbox",
       apiUrl: server.url,
-      validate: false
     });
     const runtimeFromApp = getOpenBoxRuntime(governedApp);
     const runtimeFromMastra = getOpenBoxRuntime(mastra);
