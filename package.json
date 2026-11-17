@@ -111,7 +111,7 @@
     "@opentelemetry/instrumentation-ioredis": "^0.54.0",
     "@opentelemetry/instrumentation-knex": "^0.51.0",
     "@opentelemetry/instrumentation-mongodb": "^0.59.0",
-    "@opentelemetry/instrumentation-mongoose": "^0.53.0",
+    "@opentelemetry/instrumentation-mongoose": "^0.67.0",
     "@opentelemetry/instrumentation-mysql": "^0.52.0",
     "@opentelemetry/instrumentation-mysql2": "^0.53.0",
     "@opentelemetry/instrumentation-oracledb": "^0.32.0",
