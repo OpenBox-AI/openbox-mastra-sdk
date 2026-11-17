@@ -12,10 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `new OpenBoxClient()` now validates its options through the base SDK. A
   malformed API key raises `OpenBoxAuthError`, and a non-HTTPS `apiUrl` raises
   `OpenBoxInsecureURLError`, at construction time rather than on first use.
-- The base SDK's `OPENBOX_ON_API_ERROR` and `*_TIMEOUT_SECONDS` variables are
-  not read. Mastra keeps its own `onApiError` / `timeoutSeconds` options and
-  `OPENBOX_GOVERNANCE_POLICY` / `OPENBOX_GOVERNANCE_TIMEOUT` variables.
-
+- Secret config fields (`apiKey` and private keys) are non-enumerable, so a copy
+  of the config (`{ ...config }`) and any log of that copy no longer carry
+  them. Read them as properties (`config.apiKey`) when you need them.
 - Remove `validate` and `OPENBOX_VALIDATE`. `withOpenBox()` and
   `initializeOpenBox()` now always authenticate before returning; mock Core
   servers must implement authentication.
@@ -34,8 +33,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - One base client and token cache for startup, gates, approvals, hooks, and
   telemetry; metadata, refresh, transition-proof, and close helpers.
 - `OpenBoxWorkloadAuthError` and related public identity/workload types.
+- `activityTypeFormat` / `OPENBOX_ACTIVITY_TYPE_FORMAT` (`camelCase` default,
+  or `original`) to send tool and step ids unchanged as `activity_type`. See
+  "Activity types and policies" in `docs/configuration.md`.
 
 ### Fixed
+
+- The base SDK's `OPENBOX_MASTRA_ON_API_ERROR` / `OPENBOX_ON_API_ERROR` and
+  `*_TIMEOUT_SECONDS` variables now apply when Mastra's own
+  `OPENBOX_GOVERNANCE_POLICY` / `OPENBOX_GOVERNANCE_TIMEOUT` are unset. Before,
+  Mastra always passed its own defaults, so `OPENBOX_ON_API_ERROR=fail_closed`
+  was silently ignored.
 
 - A REQUIRE_APPROVAL on `ActivityCompleted` no longer suspends the workflow or
   waits inline. The tool already ran, so the request is logged and its output

@@ -154,7 +154,11 @@ async function executeGovernedActivityInRun<TInput, TOutput>({
   runtimeContext,
   type
 }: GovernedActivityOptions<TInput, TOutput>): Promise<TOutput | undefined> {
-  const descriptor = resolveActivityDescriptor(type, runtimeContext);
+  const descriptor = resolveActivityDescriptor(
+    type,
+    runtimeContext,
+    dependencies.config.activityTypeFormat
+  );
   const multiAgentSessionId = resolveOpenBoxMultiAgentSessionId(
     dependencies.config,
     {
@@ -712,7 +716,8 @@ function rfc3339Now(): string {
 
 function resolveActivityDescriptor(
   type: string,
-  runtimeContext: ToolExecutionContextLike
+  runtimeContext: ToolExecutionContextLike,
+  activityTypeFormat: OpenBoxConfig["activityTypeFormat"] = "camelCase"
 ): {
   activityId: string;
   activityType: string;
@@ -723,7 +728,8 @@ function resolveActivityDescriptor(
   workflowId: string;
   workflowType: string;
 } {
-  const normalizedType = normalizeActivityType(type);
+  const normalizedType =
+    activityTypeFormat === "original" ? type.trim() || "activity" : normalizeActivityType(type);
   const activeContext = getOpenBoxExecutionContext();
   const runId =
     runtimeContext.workflow?.runId ??

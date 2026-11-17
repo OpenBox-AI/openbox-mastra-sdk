@@ -10,6 +10,7 @@ import {
 } from "../types/index.js";
 import {
   resolveBaseOpenBoxConfig,
+  secretConfigFields,
   type OpenBoxIdentityOptions
 } from "../config/base-config.js";
 import type { OpenBoxConfig } from "../config/openbox-config.js";
@@ -100,6 +101,9 @@ export class OpenBoxClient {
   ): OpenBoxClient {
     return new OpenBoxClient({
       ...config,
+      // Secret fields are non-enumerable on a redacted config, so a spread
+      // drops them; pass them on explicitly.
+      ...secretConfigFields(config),
       ...options,
       timeoutSeconds: config.governanceTimeout
     });

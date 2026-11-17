@@ -37,6 +37,7 @@ The SDK parses configuration through `parseOpenBoxConfig()` and `withOpenBox()`.
 | `instrumentFileIo` | `boolean` | `false` | enable file operation telemetry |
 | `maxEvaluatePayloadBytes` | `number` | `256000` | cap payload size before compact fallback logic applies |
 | `onApiError` | `"fail_open" \| "fail_closed"` | `"fail_open"` | decide whether OpenBox outages should halt execution |
+| `activityTypeFormat` | `"camelCase" \| "original"` | `"camelCase"` | choose how a tool or step id becomes `activity_type`, the field policies match on (see below) |
 | `sendActivityStartEvent` | `boolean` | `true` | emit `ActivityStarted` |
 | `sendStartEvent` | `boolean` | `true` | emit `WorkflowStarted` |
 | `skipActivityTypes` | `Iterable<string>` | `["send_governance_event"]` | suppress matching activity types entirely |
@@ -64,13 +65,14 @@ These environment variables are read during config parsing:
 | `OPENBOX_AGENT_PRIVATE_KEY` | base64 raw Ed25519 seed returned by OpenBox during registration or rotation | unset |
 | `OPENBOX_EVALUATE_MAX_RETRIES` | evaluate retry count | `2` |
 | `OPENBOX_EVALUATE_RETRY_BASE_DELAY_MS` | evaluate retry base delay in milliseconds | `150` |
-| `OPENBOX_GOVERNANCE_TIMEOUT` | OpenBox API timeout in seconds | `30` |
+| `OPENBOX_GOVERNANCE_TIMEOUT` | OpenBox API timeout in seconds; when unset, the base SDK's `OPENBOX_MASTRA_TIMEOUT_SECONDS` / `OPENBOX_TIMEOUT_SECONDS` apply | `30` |
 | `OPENBOX_HITL_ENABLED` | enable approval handling | `true` |
 | `OPENBOX_HTTP_CAPTURE` | capture text HTTP bodies and headers | `true` |
 | `OPENBOX_INSTRUMENT_DATABASES` | enable supported database instrumentation | `true` |
 | `OPENBOX_INSTRUMENT_FILE_IO` | enable file instrumentation | `false` |
 | `OPENBOX_MAX_EVALUATE_PAYLOAD_BYTES` | payload budget before compaction | `256000` |
-| `OPENBOX_GOVERNANCE_POLICY` | API failure policy: `fail_open` or `fail_closed` | `"fail_open"` |
+| `OPENBOX_GOVERNANCE_POLICY` | API failure policy: `fail_open` or `fail_closed`; when unset, the base SDK's `OPENBOX_MASTRA_ON_API_ERROR` / `OPENBOX_ON_API_ERROR` apply (`fail_closed_destructive` is treated as `fail_closed`) | `"fail_open"` |
+| `OPENBOX_ACTIVITY_TYPE_FORMAT` | `camelCase` or `original` (see "Activity types and policies") | `camelCase` |
 | `OPENBOX_SEND_ACTIVITY_START_EVENT` | emit `ActivityStarted` | `true` |
 | `OPENBOX_SEND_START_EVENT` | emit `WorkflowStarted` | `true` |
 | `OPENBOX_SKIP_ACTIVITY_TYPES` | comma-separated list of skipped activity types | `send_governance_event` |
@@ -91,6 +93,23 @@ Additional runtime flags used outside config parsing:
 | --- | --- |
 | `OPENBOX_DEBUG` | enable summarized debug logs for evaluate requests, retries, and approval polling |
 | `OPENBOX_AGENT_GOAL` | override the inferred agent goal included in agent payloads |
+
+## Activity types and policies
+
+Policies match a tool or workflow step on `activity_type`. By default the SDK
+sends the id in camelCase: a tool with id `transfer_funds` arrives as
+`transferFunds`, and a step `prepare-transfer-step` as `prepareTransferStep`.
+Write policy conditions against that form, which is also what the dashboard
+shows. Set `activityTypeFormat: "original"` (or
+`OPENBOX_ACTIVITY_TYPE_FORMAT=original`) to send ids unchanged; existing
+policies written against the camelCase form then stop matching, so update them
+in the same change.
+
+When `hitlEnabled` is on (the default), `ActivityCompleted` is sent without
+`activity_type`. That stops a REQUIRE_APPROVAL rule written for a tool from
+firing a second time after the approved tool has run, so rules keyed on
+`activity_type` gate tools on `ActivityStarted` only. Set `hitlEnabled: false`
+if completion events must carry `activity_type`.
 
 ## Parsing Rules
 

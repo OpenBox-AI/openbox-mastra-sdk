@@ -93,6 +93,59 @@ describe("parseOpenBoxConfig", () => {
     expect(config.agentDid).toBeUndefined();
     expect(config.agentPrivateKey).toBeUndefined();
     expect(config).not.toHaveProperty("validate");
+    expect(config.activityTypeFormat).toBe("camelCase");
+  });
+
+  it("keeps secrets out of copies of the config", () => {
+    const config = parseOpenBoxConfig({
+      apiKey: "obx_live_secretvalue123",
+      apiUrl: "https://api.openbox.ai"
+    });
+
+    expect(config.apiKey).toBe("obx_live_secretvalue123");
+    expect(JSON.stringify(config)).toContain('"apiKey":"[REDACTED]"');
+    expect(JSON.stringify({ ...config })).not.toContain("secretvalue123");
+    expect(JSON.stringify(Object.assign({}, config))).not.toContain("secretvalue123");
+  });
+
+  it("reads the base SDK's policy and timeout variables when Mastra's are unset", () => {
+    const config = parseOpenBoxConfig(
+      {},
+      {
+        OPENBOX_API_KEY: "obx_test_env_key",
+        OPENBOX_API_URL: "https://api.openbox.ai",
+        OPENBOX_ON_API_ERROR: "fail_closed",
+        OPENBOX_TIMEOUT_SECONDS: "12"
+      }
+    );
+
+    expect(config.onApiError).toBe("fail_closed");
+    expect(config.governanceTimeout).toBe(12);
+  });
+
+  it("lets Mastra's own policy variable win over the base SDK's", () => {
+    const config = parseOpenBoxConfig(
+      {},
+      {
+        OPENBOX_API_KEY: "obx_test_env_key",
+        OPENBOX_API_URL: "https://api.openbox.ai",
+        OPENBOX_GOVERNANCE_POLICY: "fail_open",
+        OPENBOX_ON_API_ERROR: "fail_closed"
+      }
+    );
+
+    expect(config.onApiError).toBe("fail_open");
+  });
+
+  it("parses the activity type format", () => {
+    const base = { OPENBOX_API_KEY: "obx_test_env_key", OPENBOX_API_URL: "https://api.openbox.ai" };
+
+    expect(
+      parseOpenBoxConfig({}, { ...base, OPENBOX_ACTIVITY_TYPE_FORMAT: "original" }).activityTypeFormat
+    ).toBe("original");
+    expect(() =>
+      parseOpenBoxConfig({}, { ...base, OPENBOX_ACTIVITY_TYPE_FORMAT: "snake" })
+    ).toThrow(/OPENBOX_ACTIVITY_TYPE_FORMAT/);
   });
 
   it("parses environment variables", () => {

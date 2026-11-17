@@ -53,6 +53,56 @@ function getHookSpans(
 }
 
 describe("wrapTool", () => {
+  it("sends the tool id unchanged as activity_type when activityTypeFormat is original", async () => {
+    const server = await startOpenBoxServer({
+      evaluate() {
+        return { verdict: "allow" };
+      }
+    });
+    const config = parseOpenBoxConfig({
+      activityTypeFormat: "original",
+      apiKey: "obx_test_contract",
+      apiUrl: server.url
+    });
+    const client = new OpenBoxClient({
+      apiKey: config.apiKey,
+      apiUrl: config.apiUrl,
+      onApiError: config.onApiError,
+      timeoutSeconds: config.governanceTimeout
+    });
+    const tool = createTool({
+      description: "Send money",
+      id: "transfer_funds",
+      inputSchema: z.object({ amount: z.number() }),
+      outputSchema: z.object({ ok: z.boolean() }),
+      async execute() {
+        return { ok: true };
+      }
+    });
+    const wrapped = wrapTool(tool, { client, config, spanProcessor: new OpenBoxSpanProcessor() });
+
+    await wrapped.execute?.(
+      { amount: 1 },
+      {
+        workflow: {
+          runId: "run-original",
+          setState: vi.fn(),
+          state: {},
+          suspend: vi.fn(async () => undefined),
+          workflowId: "wf-original"
+        }
+      }
+    );
+    await server.close();
+
+    const started = server.requests
+      .filter(request => request.pathname === "/api/v1/governance/evaluate")
+      .map(request => request.body)
+      .find(body => body.event_type === "ActivityStarted");
+
+    expect(started).toMatchObject({ activity_type: "transfer_funds" });
+  });
+
   it("sends activity events and applies guardrail redaction before and after execution", async () => {
     const server = await startOpenBoxServer({
       evaluate(body) {

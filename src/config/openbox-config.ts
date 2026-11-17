@@ -44,6 +44,8 @@ export interface OpenBoxMultiAgentConfig {
   multiAgentSessionId: string | OpenBoxMultiAgentSessionIdResolver | undefined;
 }
 
+export type OpenBoxActivityTypeFormat = "camelCase" | "original";
+
 export interface OpenBoxConfigInput extends OpenBoxIdentityOptions {
   envPrefix?: string | undefined;
   apiKey?: string | undefined;
@@ -58,6 +60,7 @@ export interface OpenBoxConfigInput extends OpenBoxIdentityOptions {
   maxEvaluatePayloadBytes?: number | undefined;
   multiAgent?: OpenBoxMultiAgentInput | undefined;
   onApiError?: OpenBoxApiErrorPolicy | undefined;
+  activityTypeFormat?: OpenBoxActivityTypeFormat | undefined;
   sendActivityStartEvent?: boolean | undefined;
   sendStartEvent?: boolean | undefined;
   skipActivityTypes?: Iterable<string> | undefined;
@@ -81,6 +84,12 @@ export interface OpenBoxConfig extends OpenBoxIdentityOptions {
   maxEvaluatePayloadBytes: number;
   multiAgent: OpenBoxMultiAgentConfig;
   onApiError: OpenBoxApiErrorPolicy;
+  /**
+   * How a tool or step id becomes `activity_type`, the field policies match on.
+   * `camelCase` (default) sends `transfer_funds` as `transferFunds`;
+   * `original` sends the id unchanged.
+   */
+  activityTypeFormat: OpenBoxActivityTypeFormat;
   sendActivityStartEvent: boolean;
   sendStartEvent: boolean;
   skipActivityTypes: Set<string>;
@@ -105,6 +114,7 @@ const OPENBOX_CONFIG_SCHEMA = z.object({
   instrumentFileIo: z.boolean().default(false),
   maxEvaluatePayloadBytes: z.number().int().positive().default(256_000),
   onApiError: z.enum(["fail_open", "fail_closed"]).default("fail_open"),
+  activityTypeFormat: z.enum(["camelCase", "original"]).default("camelCase"),
   sendActivityStartEvent: z.boolean().default(true),
   sendStartEvent: z.boolean().default(true),
   skipActivityTypes: z
@@ -156,12 +166,19 @@ export function parseOpenBoxConfig(
     resolveBaseOpenBoxConfig(
       {
         ...input,
+        // Pass these only when Mastra's own option or variable is set, so the
+        // base SDK's OPENBOX_MASTRA_* / OPENBOX_* variables and its defaults
+        // (30 s, fail_open) still apply otherwise.
         timeoutSeconds:
           input.governanceTimeout ??
-          parseNumber(env.OPENBOX_GOVERNANCE_TIMEOUT, 30),
+          (env.OPENBOX_GOVERNANCE_TIMEOUT
+            ? parseNumber(env.OPENBOX_GOVERNANCE_TIMEOUT, 30)
+            : undefined),
         onApiError:
           input.onApiError ??
-          parsePolicy(env.OPENBOX_GOVERNANCE_POLICY, "fail_open")
+          (env.OPENBOX_GOVERNANCE_POLICY
+            ? parsePolicy(env.OPENBOX_GOVERNANCE_POLICY, "fail_open")
+            : undefined)
       },
       env
     );
@@ -192,7 +209,11 @@ export function parseOpenBoxConfig(
     maxEvaluatePayloadBytes:
       input.maxEvaluatePayloadBytes ??
       parseInteger(env.OPENBOX_MAX_EVALUATE_PAYLOAD_BYTES, 256_000),
-    onApiError: baseConfig.onApiError,
+    // Mastra has no destructive-only mode; anything but fail_open fails closed.
+    onApiError: baseConfig.onApiError === "fail_open" ? "fail_open" : "fail_closed",
+    activityTypeFormat:
+      input.activityTypeFormat ??
+      parseActivityTypeFormat(env.OPENBOX_ACTIVITY_TYPE_FORMAT),
     sendActivityStartEvent:
       input.sendActivityStartEvent ??
       parseBoolean(env.OPENBOX_SEND_ACTIVITY_START_EVENT, true),
@@ -357,6 +378,21 @@ function parseInteger(value: string | undefined, defaultValue: number): number {
   }
 
   return parsed;
+}
+
+function parseActivityTypeFormat(
+  value: string | undefined
+): OpenBoxActivityTypeFormat {
+  const normalized = value?.trim();
+  if (!normalized) {
+    return "camelCase";
+  }
+  if (normalized === "camelCase" || normalized === "original") {
+    return normalized;
+  }
+  throw new Error(
+    `Invalid OPENBOX_ACTIVITY_TYPE_FORMAT: ${normalized}. Expected 'camelCase' or 'original'.`
+  );
 }
 
 function parsePolicy(

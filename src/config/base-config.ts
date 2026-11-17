@@ -86,17 +86,38 @@ function nonBlank(value: string | undefined): string | undefined {
   return value?.trim() || undefined;
 }
 
-/** Redact the plain Mastra config just as the base SDK redacts its config. */
+export const SECRET_CONFIG_FIELDS = [
+  "apiKey",
+  "agentPrivateKey",
+  "oktaAgentPrivateKey",
+  "workloadPrivateKey"
+] as const;
+
+/**
+ * Redact the plain Mastra config just as the base SDK redacts its config.
+ *
+ * Secret fields stay readable (`config.apiKey`) but are non-enumerable, so a
+ * copy (`{ ...config }`, `Object.assign`) or a log of that copy never carries
+ * them. JSON and Node inspection of the config itself show `[REDACTED]`.
+ */
 export function redactConfig<T extends object>(config: T): T {
+  const record = config as Record<string, unknown>;
+
+  for (const key of SECRET_CONFIG_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(record, key)) {
+      Object.defineProperty(record, key, {
+        configurable: true,
+        enumerable: false,
+        value: record[key],
+        writable: true
+      });
+    }
+  }
+
   const view = () => {
     const result = { ...config } as Record<string, unknown>;
-    for (const key of [
-      "apiKey",
-      "agentPrivateKey",
-      "oktaAgentPrivateKey",
-      "workloadPrivateKey"
-    ]) {
-      if (result[key]) result[key] = "[REDACTED]";
+    for (const key of SECRET_CONFIG_FIELDS) {
+      if (record[key]) result[key] = "[REDACTED]";
     }
     return result;
   };
@@ -105,4 +126,17 @@ export function redactConfig<T extends object>(config: T): T {
     [Symbol.for("nodejs.util.inspect.custom")]: { value: view }
   });
   return config;
+}
+
+/** The secret fields of a redacted config, for code that must pass them on. */
+export function secretConfigFields<T extends object>(
+  config: T
+): Pick<T, Extract<keyof T, (typeof SECRET_CONFIG_FIELDS)[number]>> {
+  const record = config as Record<string, unknown>;
+  return Object.fromEntries(
+    SECRET_CONFIG_FIELDS.filter((key) => record[key] !== undefined).map((key) => [
+      key,
+      record[key]
+    ])
+  ) as Pick<T, Extract<keyof T, (typeof SECRET_CONFIG_FIELDS)[number]>>;
 }
