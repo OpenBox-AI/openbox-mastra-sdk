@@ -111,17 +111,24 @@ async function createRuntime(options: WithOpenBoxOptions): Promise<OpenBoxRuntim
     new OpenBoxSpanProcessor({
       ignoredUrlPrefixes: ignoredUrls
     });
-  const telemetry = setupOpenBoxOpenTelemetry({
-    captureHttpBodies: config.httpCapture,
-    dbLibraries: options.dbLibraries,
-    fileSkipPatterns: options.fileSkipPatterns,
-    governanceClient: client,
-    ignoredUrls,
-    instrumentDatabases: config.instrumentDatabases,
-    instrumentFileIo: config.instrumentFileIo,
-    onHookApiError: config.onApiError,
-    spanProcessor
-  });
+  let telemetry: OpenBoxTelemetryController;
+
+  try {
+    telemetry = setupOpenBoxOpenTelemetry({
+      captureHttpBodies: config.httpCapture,
+      dbLibraries: options.dbLibraries,
+      fileSkipPatterns: options.fileSkipPatterns,
+      governanceClient: client,
+      ignoredUrls,
+      instrumentDatabases: config.instrumentDatabases,
+      instrumentFileIo: config.instrumentFileIo,
+      onHookApiError: config.onApiError,
+      spanProcessor
+    });
+  } catch (error) {
+    client.close();
+    throw error;
+  }
   let shutdownComplete = false;
 
   return {

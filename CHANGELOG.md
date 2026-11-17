@@ -5,9 +5,16 @@ All notable changes to `@openbox-ai/openbox-mastra-sdk` are documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.0.0] - 2026-10-06
+## [2.0.0] - 2026-11-17
 
 ### Breaking
+
+- `new OpenBoxClient()` now validates its options through the base SDK. A
+  malformed API key raises `OpenBoxAuthError`, and a non-HTTPS `apiUrl` raises
+  `OpenBoxInsecureURLError`, at construction time rather than on first use.
+- The base SDK's `OPENBOX_ON_API_ERROR` and `*_TIMEOUT_SECONDS` variables are
+  not read. Mastra keeps its own `onApiError` / `timeoutSeconds` options and
+  `OPENBOX_GOVERNANCE_POLICY` / `OPENBOX_GOVERNANCE_TIMEOUT` variables.
 
 - Remove `validate` and `OPENBOX_VALIDATE`. `withOpenBox()` and
   `initializeOpenBox()` now always authenticate before returning; mock Core
@@ -27,6 +34,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - One base client and token cache for startup, gates, approvals, hooks, and
   telemetry; metadata, refresh, transition-proof, and close helpers.
 - `OpenBoxWorkloadAuthError` and related public identity/workload types.
+
+### Fixed
+
+- A REQUIRE_APPROVAL on `ActivityCompleted` no longer suspends the workflow or
+  waits inline. The tool already ran, so the request is logged and its output
+  kept, matching the other OpenBox SDKs. Start-stage approvals are unchanged.
+- An HTTP 413 from Core now triggers the smaller-payload retry again, including
+  under `fail_closed`.
+- The client is closed if telemetry setup fails after authentication succeeds.
 
 ### Security
 

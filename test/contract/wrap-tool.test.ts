@@ -275,8 +275,7 @@ describe("wrapTool", () => {
 
     const config = parseOpenBoxConfig({
       apiKey: "obx_test_contract",
-      apiUrl: server.url,
-      validate: false
+      apiUrl: server.url
     });
     const client = new OpenBoxClient({
       apiKey: config.apiKey,

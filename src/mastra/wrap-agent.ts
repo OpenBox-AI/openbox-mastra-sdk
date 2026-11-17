@@ -2271,7 +2271,7 @@ function isBadRequestSchemaError(error: unknown): boolean {
 function isPayloadTooLargeError(error: unknown): boolean {
   return (
     error instanceof GovernanceAPIError &&
-    /(blob data size exceeds limit|payload too large|request entity too large|message too large)/i.test(
+    /(HTTP 413\b|blob data size exceeds limit|payload too large|request entity too large|message too large)/i.test(
       error.message
     )
   );
