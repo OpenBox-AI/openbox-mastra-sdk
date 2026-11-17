@@ -69,7 +69,84 @@ export interface GovernedActivityOptions<TInput, TOutput> {
   type: string;
 }
 
-export async function executeGovernedActivity<TInput, TOutput>({
+export async function executeGovernedActivity<TInput, TOutput>(
+  options: GovernedActivityOptions<TInput, TOutput>
+): Promise<TOutput | undefined> {
+  const { dependencies, runtimeContext, type } = options;
+
+  if (!isStandaloneToolCall(runtimeContext)) {
+    return executeGovernedActivityInRun(options);
+  }
+
+  // A tool called directly, outside any workflow or agent run, has no run of
+  // its own. Core opens a session on WorkflowStarted and rejects activity
+  // events for a run it has no session for (SessionNotReady), so open and
+  // close a run around the call, as the workflow and agent wrappers do.
+  const workflowId = `tool:${type}`;
+  const runContext = {
+    runId: runtimeContext.agent?.toolCallId ?? randomUUID(),
+    source: "tool" as const,
+    taskQueue: "mastra",
+    workflowId,
+    workflowType: workflowId
+  };
+  const runFields = {
+    run_id: runContext.runId,
+    task_queue: runContext.taskQueue,
+    workflow_id: runContext.workflowId,
+    workflow_type: runContext.workflowType
+  };
+
+  if (dependencies.config.sendStartEvent) {
+    const startVerdict = await evaluateActivityEvent(
+      dependencies,
+      { event_type: WorkflowEventType.WORKFLOW_STARTED, ...runFields },
+      true
+    );
+
+    if (startVerdict && Verdict.shouldStop(startVerdict.verdict)) {
+      throw new GovernanceHaltError(
+        startVerdict.reason ?? "Tool blocked by governance"
+      );
+    }
+  }
+
+  let output: TOutput | undefined;
+
+  try {
+    output = await runWithOpenBoxExecutionContext(runContext, () =>
+      executeGovernedActivityInRun(options)
+    );
+  } catch (error) {
+    await evaluateActivityEvent(dependencies, {
+      error: serializeError(error),
+      event_type: WorkflowEventType.WORKFLOW_FAILED,
+      ...runFields
+    });
+    throw error;
+  }
+
+  await evaluateActivityEvent(dependencies, {
+    event_type: WorkflowEventType.WORKFLOW_COMPLETED,
+    workflow_output: serializeValue(output),
+    ...runFields
+  });
+
+  return output;
+}
+
+function isStandaloneToolCall(runtimeContext: ToolExecutionContextLike): boolean {
+  const activeContext = getOpenBoxExecutionContext();
+
+  return !(
+    runtimeContext.workflow?.workflowId ??
+    runtimeContext.workflow?.runId ??
+    activeContext?.workflowId ??
+    activeContext?.runId
+  );
+}
+
+async function executeGovernedActivityInRun<TInput, TOutput>({
   dependencies,
   execute,
   input,

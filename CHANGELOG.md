@@ -43,6 +43,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An HTTP 413 from Core now triggers the smaller-payload retry again, including
   under `fail_closed`.
 - The client is closed if telemetry setup fails after authentication succeeds.
+- A tool called outside any workflow or agent run now opens and closes a run
+  of its own (`WorkflowStarted` / `WorkflowCompleted` or `WorkflowFailed` on
+  `tool:<id>`). Core rejects activity events for a run with no session
+  (`SessionNotReady`), so these calls were failing open without governance.
 
 ### Security
 

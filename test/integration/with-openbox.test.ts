@@ -311,8 +311,11 @@ describe("withOpenBox", () => {
       "ActivityStarted",
       "ActivityCompleted",
       "WorkflowCompleted",
+      // An agent tool called outside an agent run gets a run of its own.
+      "WorkflowStarted",
       "ActivityStarted",
       "ActivityCompleted",
+      "WorkflowCompleted",
       "WorkflowStarted",
       "SignalReceived",
       "SignalReceived",
