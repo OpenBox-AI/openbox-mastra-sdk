@@ -1,6 +1,6 @@
 {
   "name": "@openbox-ai/openbox-mastra-sdk",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "OpenBox governance and observability SDK for Mastra",
   "license": "MIT",
   "author": "Shorya Singh (OpenBox Team)",

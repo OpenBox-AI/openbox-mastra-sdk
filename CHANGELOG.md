@@ -5,6 +5,14 @@ All notable changes to `@openbox-ai/openbox-mastra-sdk` are documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.1] - 2026-11-17
+
+### Fixed
+
+- `ActivityCompleted` always carries `activity_type`, as the other OpenBox SDKs
+  do. With human-in-the-loop on (the default) it was left off, so the
+  dashboard showed completed activities without a name.
+
 ## [2.0.0] - 2026-11-17
 
 ### Breaking
@@ -39,9 +47,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- `ActivityCompleted` always carries `activity_type`, as the other OpenBox SDKs
-  do. With human-in-the-loop on (the default) it was left off, so the
-  dashboard showed completed activities without a name.
 - The base SDK's `OPENBOX_MASTRA_ON_API_ERROR` / `OPENBOX_ON_API_ERROR` and
   `*_TIMEOUT_SECONDS` variables now apply when Mastra's own
   `OPENBOX_GOVERNANCE_POLICY` / `OPENBOX_GOVERNANCE_TIMEOUT` are unset. Before,
