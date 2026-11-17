@@ -380,13 +380,15 @@ async function executeGovernedActivityInRun<TInput, TOutput>({
               serializeActivityInputForCompletedEvent(inputForExecution),
               descriptor.goal
             );
-            const completedActivityTypePayload =
-              dependencies.config.hitlEnabled ? {} : { activity_type: descriptor.activityType };
+            // Always name the activity, as the other OpenBox SDKs do: the
+            // dashboard labels the completed row with it, and completion-stage
+            // rules can match it. An approval returned here is logged, not
+            // waited on (below), so it can't stall a run that already ran.
             const completedVerdict = await evaluateActivityEvent(dependencies, {
               activity_id: descriptor.activityId,
               activity_input: completedInputForEvent,
               activity_output: serializeValue(output),
-              ...completedActivityTypePayload,
+              activity_type: descriptor.activityType,
               attempt: descriptor.attempt,
               duration_ms: durationMs,
               end_time: activityEndMs,

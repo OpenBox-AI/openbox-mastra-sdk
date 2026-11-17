@@ -105,11 +105,10 @@ shows. Set `activityTypeFormat: "original"` (or
 policies written against the camelCase form then stop matching, so update them
 in the same change.
 
-When `hitlEnabled` is on (the default), `ActivityCompleted` is sent without
-`activity_type`. That stops a REQUIRE_APPROVAL rule written for a tool from
-firing a second time after the approved tool has run, so rules keyed on
-`activity_type` gate tools on `ActivityStarted` only. Set `hitlEnabled: false`
-if completion events must carry `activity_type`.
+Both `ActivityStarted` and `ActivityCompleted` carry `activity_type`, so a rule
+keyed on it matches both stages. A REQUIRE_APPROVAL that comes back on
+`ActivityCompleted` is logged and the tool's output kept, since the tool has
+already run; to gate a tool, write the rule so it applies when the tool starts.
 
 ## Parsing Rules
 
