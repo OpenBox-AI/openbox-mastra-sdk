@@ -117,7 +117,7 @@
     "@opentelemetry/instrumentation-oracledb": "^0.32.0",
     "@opentelemetry/instrumentation-pg": "^0.59.0",
     "@opentelemetry/instrumentation-redis": "^0.55.0",
-    "@opentelemetry/instrumentation-tedious": "^0.25.0",
+    "@opentelemetry/instrumentation-tedious": "^0.40.0",
     "@opentelemetry/instrumentation-undici": "^0.17.0",
     "@opentelemetry/resources": "^2.9.0",
     "@opentelemetry/sdk-node": "^0.220.0",
