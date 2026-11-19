@@ -270,15 +270,19 @@ describe("withOpenBox", () => {
 
     expect(localEchoTool).toBeDefined();
 
-    const agentToolResult = await localEchoTool?.execute?.(
-      { value: "hello" },
-      {
-        agent: {
-          suspend: vi.fn(async () => undefined),
-          toolCallId: "agent-tool-call"
-        }
-      } as never
-    );
+    // listTools() also types provider placeholder tools that have no execute().
+    const agentToolResult =
+      localEchoTool && "execute" in localEchoTool
+        ? await localEchoTool.execute?.(
+            { value: "hello" },
+            {
+              agent: {
+                suspend: vi.fn(async () => undefined),
+                toolCallId: "agent-tool-call"
+              }
+            } as never
+          )
+        : undefined;
     const agentResult = await dynamicAgent.generate("hello", {
       runId: "dynamic-agent-run"
     });
