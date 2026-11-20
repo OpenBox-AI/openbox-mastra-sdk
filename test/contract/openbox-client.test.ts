@@ -3,6 +3,7 @@ import { createHash, generateKeyPairSync, verify } from "node:crypto";
 import { HttpResponse, delay, http } from "msw";
 import { setupServer } from "msw/node";
 
+import { SDK_VERSION } from "../../src/version.js";
 import {
   buildAgentIdentityCanonicalRequest,
   GovernanceAPIError,
@@ -115,7 +116,7 @@ describe("OpenBoxClient.validateApiKey", () => {
     await expect(client.validateApiKey()).resolves.toBeUndefined();
     expect(observedAuthHeader).toBe("Bearer obx_live_valid_key");
     expect(observedContentType).toBe("application/json");
-    expect(observedUserAgent).toBe("OpenBox-SDK/openbox-mastra-typescript-v2.0.0");
+    expect(observedUserAgent).toBe(`OpenBox-SDK/openbox-mastra-typescript-v${SDK_VERSION}`);
   });
 
   it("signs auth validation requests when DID credentials are configured", async () => {
